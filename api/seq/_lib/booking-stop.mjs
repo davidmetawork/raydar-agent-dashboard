@@ -74,6 +74,7 @@ import {
   buildDefinitionAnswersDocument,
   definitionAnswersDigestValid,
   definitionAnswersDurable,
+  definitionPublishedDecision,
   definitionCacheDecision,
   definitionCacheFits,
   definitionCacheEntryWellFormed,
@@ -1072,15 +1073,36 @@ const DEFINITION_ROTOR_MIN_READ_MS = 2000;
 
 // The catalog rows each scope load listed, keyed by the scope object it
 // returned (never serialised, never part of any binding). The sweep reuses
-// them when it must re-run its scope load against a pointer that moved, so
-// the re-run costs KV reads plus the live (selection-deciding) definition
-// reads only, and classifies the same catalog the first load did.
+// them when it must re-run its scope load against the bound pointer's
+// digest, so the re-run makes no catalog read and classifies the same
+// catalog the first load did.
 const scopeCatalogs = new WeakMap();
 export function bookingStopScopeCatalog(scope) {
   const rows = scope && typeof scope === "object"
     ? scopeCatalogs.get(scope)
     : null;
   return Array.isArray(rows) ? structuredClone(rows) : null;
+}
+
+// The link answers each scope load used, keyed by the scope object it
+// returned, like scopeCatalogs (never serialised, never bound):
+//   all:  every answer {n, e, l, r} that produced its digest (fresh reads and
+//         served answers). A refresh's later loads serve these ("pinned") so
+//         its drift check reproduces the first load exactly.
+//   live: only the answers this load read live (a real Paraform read). The
+//         sweep's re-run reuses them instead of reading a row twice a pass.
+const scopeAnswers = new WeakMap();
+function scopeAnswerMap(scope, kind) {
+  const answers = scope && typeof scope === "object"
+    ? scopeAnswers.get(scope)?.[kind]
+    : null;
+  return answers instanceof Map ? structuredClone(answers) : null;
+}
+export function bookingStopScopeAnswers(scope) {
+  return scopeAnswerMap(scope, "all");
+}
+export function bookingStopScopeLiveAnswers(scope) {
+  return scopeAnswerMap(scope, "live");
 }
 
 function newDefinitionCacheTelemetry() {
@@ -1095,6 +1117,8 @@ function newDefinitionCacheTelemetry() {
     rotorFailures: 0,
     cacheHits: 0,
     writeAttempts: 0,
+    liveReuses: 0,
+    recoveryReads: 0,
     oldestHitAgeMs: null,
   };
 }
@@ -1150,7 +1174,10 @@ async function discoverBookingStopScope(telemetry, {
   // mutable cache document, with overlay, rotor and a best-effort write.
   // "published" (the sweep): ONLY the write-once answers document of
   // `definitionAnswersDigest`, the digest the current pointer publishes;
-  // it reads no mutable document and writes nothing.
+  // it reads no mutable document and writes nothing. It does not depend on
+  // `definitionCacheRevision` (so the rollback lever stops only the refresh
+  // serving cached answers) and serves every answer that is not
+  // selection-deciding whatever its name hash or age.
   definitionSource = "cache",
   definitionAnswersDigest = null,
   definitionAnswersReader = (digest) =>
@@ -1187,13 +1214,33 @@ async function discoverBookingStopScope(telemetry, {
   // Proactive re-reads of the oldest cached answers. Only the refresh's first
   // load turns this on; the sweep never does.
   definitionRotor = false,
-  // How long a servable cached answer is trusted: MAX_AGE for the refresh,
-  // SWEEP_MAX_AGE for the sweep. Capped at SWEEP_MAX_AGE.
+  // How long a servable answer from the mutable cache document is trusted
+  // (the refresh): MAX_AGE by default, capped at SWEEP_MAX_AGE. The
+  // published source ignores it: the sweep serves the bound document's
+  // answers whatever their age (the pointer's age is bounded by the snapshot
+  // contract).
   definitionMaxAgeMs = BOOKING_STOP_DEFINITION_MAX_AGE_MS,
   // Refresh only: publish this load's answers under its scope digest and read
-  // them back; fail the load when that cannot be made durable and the load
-  // served any cached answer (see publishDefinitionAnswers).
+  // them back. When that cannot be made durable and the load served any
+  // cached answer, re-read those rows live and return a scope that served
+  // nothing (see publishDefinitionAnswers).
   definitionDurableAnswers = false,
+  // Refresh only (cache source): the answers an earlier load of the SAME
+  // invocation used (bookingStopScopeAnswers). Served with the published-mode
+  // rule (enabled flag checked, selection-deciding rows read live, name hash
+  // and age not checked) so the drift-check load reproduces the first load
+  // unless the catalog or a live-read row really moved, as main's does.
+  definitionPinnedAnswers = null,
+  // Sweep re-run only (published source): answers this pass already read
+  // live (bookingStopScopeLiveAnswers of its first load). A row the bound
+  // document does not serve takes its live answer from here instead of a
+  // second Paraform read in the same pass.
+  definitionLiveAnswers = null,
+  // Refresh only: scope digests whose answers an earlier load of the same
+  // invocation already read back durable. Any answers document under a
+  // digest carries that digest's link answers, so a later load with the same
+  // digest whose own write cannot be verified is still covered.
+  definitionDurableDigests = null,
 } = {}) {
   const all = Array.isArray(listedCatalog)
     ? structuredClone(listedCatalog)
@@ -1281,6 +1328,11 @@ async function discoverBookingStopScope(telemetry, {
     ? definitionCacheRevision
     : null;
   const publishedSource = definitionSource === "published";
+  // Published mode is keyed ONLY to the bound digest: it does not depend on
+  // this deployment's cache revision, the rollback lever or the size-cap
+  // switch, because it must reproduce the binding the refresh published.
+  const servePublished = publishedSource
+    && definitionAnswersDigestValid(definitionAnswersDigest);
   // A catalog too big for the size caps switches the cache off for this load:
   // nothing is served (so an older, smaller document is never trusted past
   // the point it can be rewritten) and nothing is written. Every definition
@@ -1302,8 +1354,8 @@ async function discoverBookingStopScope(telemetry, {
     ? definitionMaxAgeMs
     : BOOKING_STOP_DEFINITION_MAX_AGE_MS;
   const offState = configuredRevision ? "oversize" : "disabled";
-  telemetry.state = cacheRevision ? "missing" : offState;
-  telemetry.write = cacheRevision ? "not_needed" : offState;
+  telemetry.state = cacheRevision || servePublished ? "missing" : offState;
+  telemetry.write = cacheRevision || publishedSource ? "not_needed" : offState;
   const readRequired = typeof readCampaign === "function"
     ? readCampaign
     : async (id) =>
@@ -1322,31 +1374,28 @@ async function discoverBookingStopScope(telemetry, {
     ? definitionOverlay
     : null;
   let cached = new Map();
-  if (cacheRevision && publishedSource) {
+  // Answers served with the published-mode rule (definitionPublishedDecision):
+  // the bound document's (sweep) or an earlier load's of this refresh.
+  let pinned = new Map();
+  if (servePublished) {
     // The sweep: only the answers that produced the published digest. A
     // missing, foreign or unreadable document serves nothing, so every
     // definition is read live (as before the cache). One retry absorbs a
     // single KV blip.
-    if (definitionAnswersDigestValid(definitionAnswersDigest)) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const parsed = readDefinitionAnswersDocument(
-            await definitionAnswersReader(definitionAnswersDigest),
-            {
-              revision: cacheRevision,
-              digest: definitionAnswersDigest,
-              nowMs: Number(clock()),
-            },
-          );
-          telemetry.state = parsed.state;
-          cached = parsed.entries;
-          break;
-        } catch {
-          telemetry.state = "read_error";
-        }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const parsed = readDefinitionAnswersDocument(
+          await definitionAnswersReader(definitionAnswersDigest),
+          { digest: definitionAnswersDigest },
+        );
+        telemetry.state = parsed.state;
+        pinned = parsed.entries;
+        break;
+      } catch {
+        telemetry.state = "read_error";
       }
     }
-  } else if (cacheRevision) {
+  } else if (cacheRevision && !publishedSource) {
     try {
       const parsed = readDefinitionCacheDocument(
         await definitionCacheReader(),
@@ -1364,7 +1413,11 @@ async function discoverBookingStopScope(telemetry, {
           definitionCacheEntryWellFormed(entry, loadNowMs)),
       ));
     }
+    if (definitionPinnedAnswers instanceof Map) pinned = definitionPinnedAnswers;
   }
+  const liveAnswers = publishedSource && definitionLiveAnswers instanceof Map
+    ? definitionLiveAnswers
+    : null;
   const catalogById = new Map(all.map((sequence) => [sequence.id, sequence]));
   const nameHashes = new Map();
   const nameHashOf = (sequence) => {
@@ -1387,10 +1440,41 @@ async function discoverBookingStopScope(telemetry, {
   const fresh = new Map();
   const hits = new Map();
   const required = [];
+  // A reusable live answer must describe this exact catalog row.
+  const definitionAnswerEntryWellFormedForRow = (entry, sequence) => Boolean(
+    entry
+    && typeof entry.l === "boolean"
+    && Number.isFinite(entry.r)
+    && entry.e === Boolean(sequence.enabled)
+    && entry.n === nameHashOf(sequence)
+  );
   const classifyNowMs = Number(clock());
   for (const sequence of all) {
     if (excludedIds.has(sequence.id)) continue;
-    if (!cacheRevision) {
+    const pinnedEntry = pinned.get(sequence.id) ?? null;
+    if (
+      pinnedEntry
+      && definitionPublishedDecision(pinnedEntry, {
+        enabled: sequence.enabled,
+        nudge: isNudgeSequence(sequence, selectionKeys),
+      }).use
+    ) {
+      inspected.set(sequence.id, pinnedEntry.l);
+      hits.set(sequence.id, pinnedEntry);
+      continue;
+    }
+    const live = liveAnswers?.get(sequence.id) ?? null;
+    if (
+      definitionAnswerEntryWellFormedForRow(live, sequence)
+    ) {
+      // A live read this pass already made: the same answer main's single
+      // read per pass would give, at no Paraform cost.
+      inspected.set(sequence.id, live.l);
+      fresh.set(sequence.id, { linkBearing: live.l, readAtMs: live.r });
+      telemetry.liveReuses += 1;
+      continue;
+    }
+    if (!cacheRevision || publishedSource) {
       required.push(sequence);
       continue;
     }
@@ -1507,16 +1591,8 @@ async function discoverBookingStopScope(telemetry, {
     }
   };
 
-  // The refresh's published answers: exactly the {n, e, l, r} this load
-  // used, under its scope digest, written and then READ BACK with a reader
-  // that throws on a transport failure. Only a positive read-back holding
-  // every answer counts as durable. When this load served any cached answer
-  // and the answers cannot be made durable, the load fails: the sweep could
-  // not reproduce that answer, so publishing would make it fail closed. A
-  // load that served nothing is published regardless (the sweep then reads
-  // live and agrees, as before the cache).
-  const publishDefinitionAnswers = async (scopeDigest) => {
-    if (!cacheRevision || publishedSource || !definitionDurableAnswers) return;
+  // Every answer {n, e, l, r} this load used (live: only its real reads).
+  const answersUsed = ({ liveOnly = false } = {}) => {
     const answers = new Map();
     for (const sequence of all) {
       if (excludedIds.has(sequence.id)) continue;
@@ -1528,9 +1604,25 @@ async function discoverBookingStopScope(telemetry, {
           linkBearing: read.linkBearing,
           readAtMs: read.readAtMs,
         })
-        : hits.get(sequence.id);
+        : liveOnly ? null : hits.get(sequence.id);
       if (entry) answers.set(sequence.id, entry);
     }
+    return answers;
+  };
+
+  // The refresh's published answers: exactly the {n, e, l, r} this load
+  // used, under its scope digest, written and then READ BACK with a reader
+  // that throws on a transport failure, parsed exactly as the sweep will
+  // parse it. Only a positive read-back holding every answer counts as
+  // durable. Returns false only when this load served a cached answer and
+  // its answers could not be made durable: the caller then re-reads the
+  // served rows live (see below). A load that served nothing needs no
+  // durable answers (the sweep then reads live and agrees).
+  const publishDefinitionAnswers = async (scopeDigest) => {
+    if (!cacheRevision || publishedSource || !definitionDurableAnswers) {
+      return true;
+    }
+    const answers = answersUsed();
     let durable = false;
     for (let attempt = 0; attempt < 2 && !durable; attempt += 1) {
       const doc = buildDefinitionAnswersDocument({
@@ -1548,43 +1640,45 @@ async function discoverBookingStopScope(telemetry, {
         // below is the only judge.
       }
       try {
-        durable = definitionAnswersDurable(
-          answers,
-          readDefinitionAnswersDocument(
-            await definitionAnswersReader(scopeDigest),
-            {
-              revision: cacheRevision,
-              digest: scopeDigest,
-              nowMs: Number(clock()),
-            },
-          ),
-        );
+        const readback = await definitionAnswersReader(scopeDigest);
+        // A document written long ago (a write that keeps failing while an
+        // older one is still found) could expire before this pointer ages
+        // out; only one written inside the refresh bound counts, so its TTL
+        // outlives the pointer by hours.
+        const writtenAtMs = Date.parse(String(readback?.at || ""));
+        durable = Number.isFinite(writtenAtMs)
+          && Number(clock()) - writtenAtMs < BOOKING_STOP_DEFINITION_MAX_AGE_MS
+          && definitionAnswersDurable(
+            answers,
+            readDefinitionAnswersDocument(readback, { digest: scopeDigest }),
+          );
       } catch {
         durable = false; // unreachable is not durable
       }
     }
-    if (durable) {
+    if (
+      durable
+      || (definitionDurableDigests instanceof Set
+        && definitionDurableDigests.has(scopeDigest))
+    ) {
       telemetry.durable = true;
-      return;
+      return true;
     }
-    if (!hits.size) return; // nothing served: the sweep reads live and agrees
+    if (!hits.size) return true; // nothing served: the sweep reads live
     telemetry.durable = false;
-    const error = new Error("BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
-    error.code = "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE";
-    throw error;
+    return false;
   };
 
-  let loadError = null;
-  try {
-    // Required reads: any failure fails the whole load, exactly as before.
+  // Required reads: any failure fails the whole load, exactly as before.
+  const readAllRequired = async (list, counter) => {
     let cursor = 0;
     let failed = false;
     const worker = async () => {
-      while (!failed && cursor < required.length) {
-        const sequence = required[cursor++];
+      while (!failed && cursor < list.length) {
+        const sequence = list[cursor++];
         try {
           await readDefinition(sequence, readRequired);
-          telemetry.requiredReads += 1;
+          telemetry[counter] += 1;
         } catch (error) {
           failed = true;
           throw error;
@@ -1592,6 +1686,11 @@ async function discoverBookingStopScope(telemetry, {
       }
     };
     await Promise.all(Array.from({ length: concurrency }, worker));
+  };
+
+  let loadError = null;
+  try {
+    await readAllRequired(required, "requiredReads");
 
     // Rotor: re-read the oldest cached answers before they expire, so
     // expiries never bunch into bursts. Every cached answer is one that may
@@ -1647,99 +1746,131 @@ async function discoverBookingStopScope(telemetry, {
     telemetry.write = "failed";
   });
   if (loadError) throw loadError;
-  if (inspected.size + excludedIds.size !== all.length) {
-    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
-    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
-    throw error;
-  }
-  telemetry.cacheHits = hits.size;
-  {
-    const nowMs = Number(clock());
-    for (const entry of hits.values()) {
-      telemetry.oldestHitAgeMs = Math.max(
-        telemetry.oldestHitAgeMs ?? 0,
-        nowMs - entry.r,
-      );
-    }
-  }
 
-  // Every policy entry was sealed from the reviewed protected-scope census.
-  // Exact id + exact catalog-name hash is therefore enough to classify it as
-  // an intentionally excluded link-bearing campaign without re-reading its
-  // definition. Name drift and custom/default family matches are read and stay
-  // protected under the pre-existing selector.
-  const linkSequences = all.filter((sequence) =>
-    excludedIds.has(sequence.id) || inspected.get(sequence.id));
-  const enabledLinkSequences = linkSequences.filter((sequence) =>
-    Boolean(sequence.enabled));
-  const sequences = all.filter((sequence) =>
-    !excludedIds.has(sequence.id)
-    && (isNudgeSequence(sequence, selectionKeys)
-      || (Boolean(sequence.enabled) && inspected.get(sequence.id))));
-  const excludedEnabledLinkSequences = linkSequences.filter((sequence) =>
-    excludedIds.has(sequence.id) && Boolean(sequence.enabled)).length;
-  const coveredEnabledLinkSequences = enabledLinkSequences.length
-    - excludedEnabledLinkSequences;
-  const bookingStopPolicy = bookingStopPolicyHealth(coldExclusionPolicy, {
-    excludedSequences: excludedIds.size,
-    excludedEnabledLinkSequences,
-    nameDriftProtectedSequences,
-    missingCatalogEntries,
-  });
-  const scopeDigest = bookingStopScopeDigest(all.map((sequence) => ({
-    id: sequence.id,
-    enabled: sequence.enabled,
-    linkBearing: excludedIds.has(sequence.id) || inspected.get(sequence.id),
-    nudgeBearing: isNudgeSequence(sequence, selectionKeys),
-    selected: sequences.some((selected) => selected.id === sequence.id),
-    excludedCold: excludedIds.has(sequence.id),
-    definitionRead: inspected.has(sequence.id),
-  })), {
-    catalogFloor: minimumCatalogCount,
-    coldExclusionPolicy,
-  });
-  if (!scopeDigest) {
-    const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
-    error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
-    throw error;
-  }
-  await publishDefinitionAnswers(scopeDigest);
-  // Telemetry only, deliberately outside scopeDigest and scopeBinding: the
-  // enabled, name-unmatched, not-excluded sequences whose definition carries
-  // no scheduling link. They are the only rows where the link answer decides
-  // selection, so the cache never serves them and every load reads them live:
-  // this count is the per-load definition-read floor.
-  const dangerClassSequences = all.filter((sequence) =>
-    !excludedIds.has(sequence.id)
-    && Boolean(sequence.enabled)
-    && !isNudgeSequence(sequence, selectionKeys)
-    && !inspected.get(sequence.id)).length;
-  const loaded = {
-    schema: coldExclusionPolicy.scopeSchema,
-    scopeDigest,
-    catalogFloor: minimumCatalogCount,
-    ...(bookingStopPolicy ? { bookingStopPolicy } : {}),
-    sequences,
-    catalogSequences: all.length,
-    scannedSequences: all.length,
-    linkSequences: linkSequences.length,
-    enabledLinkSequences: enabledLinkSequences.length,
-    coveredEnabledLinkSequences,
-    dangerClassSequences,
-    // Unbound telemetry. definitionSequencesRead (below, v3) keeps meaning
-    // "definitions classified" = catalog minus cold exclusions, fresh or
-    // cached; definitionFreshReads is the honest Paraform read count.
-    definitionFreshReads: telemetry.freshReads,
-    definitionCacheHits: telemetry.cacheHits,
-    definitionCache: definitionCacheTelemetry(telemetry),
-    ...(coldExclusionPolicy.active ? {
-      definitionSequencesRead: inspected.size,
-      excludedColdSequences: excludedIds.size,
-      excludedColdEnabledLinkSequences: excludedEnabledLinkSequences,
-    } : {}),
-    complete: true,
+  // Selection, counts and digest from the current answers. Recomputed once
+  // when the answers could not be made durable and the served rows were
+  // re-read live.
+  const buildScope = () => {
+    if (inspected.size + excludedIds.size !== all.length) {
+      const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+      error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+      throw error;
+    }
+    telemetry.cacheHits = hits.size;
+    telemetry.oldestHitAgeMs = null;
+    {
+      const nowMs = Number(clock());
+      for (const entry of hits.values()) {
+        telemetry.oldestHitAgeMs = Math.max(
+          telemetry.oldestHitAgeMs ?? 0,
+          nowMs - entry.r,
+        );
+      }
+    }
+
+    // Every policy entry was sealed from the reviewed protected-scope census.
+    // Exact id + exact catalog-name hash is therefore enough to classify it as
+    // an intentionally excluded link-bearing campaign without re-reading its
+    // definition. Name drift and custom/default family matches are read and stay
+    // protected under the pre-existing selector.
+    const linkSequences = all.filter((sequence) =>
+      excludedIds.has(sequence.id) || inspected.get(sequence.id));
+    const enabledLinkSequences = linkSequences.filter((sequence) =>
+      Boolean(sequence.enabled));
+    const sequences = all.filter((sequence) =>
+      !excludedIds.has(sequence.id)
+      && (isNudgeSequence(sequence, selectionKeys)
+        || (Boolean(sequence.enabled) && inspected.get(sequence.id))));
+    const excludedEnabledLinkSequences = linkSequences.filter((sequence) =>
+      excludedIds.has(sequence.id) && Boolean(sequence.enabled)).length;
+    const coveredEnabledLinkSequences = enabledLinkSequences.length
+      - excludedEnabledLinkSequences;
+    const bookingStopPolicy = bookingStopPolicyHealth(coldExclusionPolicy, {
+      excludedSequences: excludedIds.size,
+      excludedEnabledLinkSequences,
+      nameDriftProtectedSequences,
+      missingCatalogEntries,
+    });
+    const scopeDigest = bookingStopScopeDigest(all.map((sequence) => ({
+      id: sequence.id,
+      enabled: sequence.enabled,
+      linkBearing: excludedIds.has(sequence.id) || inspected.get(sequence.id),
+      nudgeBearing: isNudgeSequence(sequence, selectionKeys),
+      selected: sequences.some((selected) => selected.id === sequence.id),
+      excludedCold: excludedIds.has(sequence.id),
+      definitionRead: inspected.has(sequence.id),
+    })), {
+      catalogFloor: minimumCatalogCount,
+      coldExclusionPolicy,
+    });
+    if (!scopeDigest) {
+      const error = new Error("BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE");
+      error.code = "BOOKING_STOP_SEQUENCE_SCOPE_INCOMPLETE";
+      throw error;
+    }
+    // Telemetry only, deliberately outside scopeDigest and scopeBinding: the
+    // enabled, name-unmatched, not-excluded sequences whose definition carries
+    // no scheduling link. They are the only rows where the link answer decides
+    // selection, so the cache never serves them and every load reads them live:
+    // this count is the per-load definition-read floor.
+    const dangerClassSequences = all.filter((sequence) =>
+      !excludedIds.has(sequence.id)
+      && Boolean(sequence.enabled)
+      && !isNudgeSequence(sequence, selectionKeys)
+      && !inspected.get(sequence.id)).length;
+    const loaded = {
+      schema: coldExclusionPolicy.scopeSchema,
+      scopeDigest,
+      catalogFloor: minimumCatalogCount,
+      ...(bookingStopPolicy ? { bookingStopPolicy } : {}),
+      sequences,
+      catalogSequences: all.length,
+      scannedSequences: all.length,
+      linkSequences: linkSequences.length,
+      enabledLinkSequences: enabledLinkSequences.length,
+      coveredEnabledLinkSequences,
+      dangerClassSequences,
+      // Unbound telemetry. definitionSequencesRead (below, v3) keeps meaning
+      // "definitions classified" = catalog minus cold exclusions, fresh or
+      // cached; definitionFreshReads is the honest Paraform read count.
+      definitionFreshReads: telemetry.freshReads,
+      definitionCacheHits: telemetry.cacheHits,
+      definitionCache: definitionCacheTelemetry(telemetry),
+      ...(coldExclusionPolicy.active ? {
+        definitionSequencesRead: inspected.size,
+        excludedColdSequences: excludedIds.size,
+        excludedColdEnabledLinkSequences: excludedEnabledLinkSequences,
+      } : {}),
+      complete: true,
+    };
+    return { loaded, scopeDigest };
   };
+
+  let built = buildScope();
+  if (!(await publishDefinitionAnswers(built.scopeDigest))) {
+    // The answers this load served cannot be made durable, so the sweep
+    // could not reproduce them. Do not fail the refresh (main would publish
+    // here): re-read the served rows live, at most the catalog (main's full
+    // read) and under the same deadline and failure rules as a required
+    // read, then publish a scope that served nothing. The sweep finds no
+    // durable answers for it, reads live and agrees, as before the cache.
+    const served = all.filter((sequence) => hits.has(sequence.id));
+    await readAllRequired(served, "recoveryReads");
+    await persistDefinitions().catch(() => {
+      telemetry.write = "failed";
+    });
+    built = buildScope();
+  }
+  const { loaded } = built;
+  // Telemetry after the publish step (durable, recovery reads).
+  loaded.definitionFreshReads = telemetry.freshReads;
+  loaded.definitionCacheHits = telemetry.cacheHits;
+  loaded.definitionCache = definitionCacheTelemetry(telemetry);
   scopeCatalogs.set(loaded, listed);
+  scopeAnswers.set(loaded, {
+    all: answersUsed(),
+    live: answersUsed({ liveOnly: true }),
+  });
   return loaded;
 }
 
@@ -1762,6 +1893,12 @@ export function createRefreshScopeLoader({
   const definitionOverlay = new Map();
   const loads = [];
   let calls = 0;
+  // The answers the first successful load used. Later loads (the drift
+  // check) serve them with the published-mode rule, so a rename or an age
+  // step between the two loads cannot make the check fail where main's two
+  // live reads agree; selection-deciding rows are still read live by both.
+  let pinnedAnswers = null;
+  const durableDigests = new Set();
   return {
     scopeLoader: async () => {
       const first = calls === 0;
@@ -1773,8 +1910,14 @@ export function createRefreshScopeLoader({
           definitionOverlay,
           definitionRotor: first,
           definitionDurableAnswers: true,
+          definitionDurableDigests: durableDigests,
+          ...(pinnedAnswers ? { definitionPinnedAnswers: pinnedAnswers } : {}),
         });
         loads.push(scope?.definitionCache ?? null);
+        pinnedAnswers ??= bookingStopScopeAnswers(scope);
+        if (scope?.definitionCache?.durable === true) {
+          durableDigests.add(scope.scopeDigest);
+        }
         return scope;
       } catch (error) {
         loads.push(error?.definitionCache ?? null);
@@ -2038,12 +2181,12 @@ export async function runBookingSweep({
     () => sequenceScopeLoader({
       deadline,
       coldExclusionPolicy,
-      // Serve only the answers the published scope was built from (never
-      // the mutable cache document); selection-deciding rows, and any row
-      // whose name or enabled flag moved, are read live.
+      // Serve exactly the answers the published scope was built from (never
+      // the mutable cache document), whatever their name hash or age and
+      // whatever this deployment's cache revision or lever; selection-
+      // deciding rows, and any row whose enabled flag moved, are read live.
       definitionSource: "published",
       definitionAnswersDigest: answersDigest,
-      definitionMaxAgeMs: BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
       ...extra,
     }),
   );
@@ -2108,25 +2251,39 @@ export async function runBookingSweep({
   const bindPointer = (await readPointer()) ?? pinnedPointer;
   const bindDigest = digestOf(bindPointer);
   let definitionCacheFirstLoad = null;
+  // Did the first load serve the bound digest's own answers? Only then is a
+  // digest mismatch a real change (catalog or a live-read row) that a re-run
+  // cannot cure, and the pass fails closed exactly where main's would.
+  const servedBoundAnswers = servedDigest != null
+    && servedDigest === bindDigest
+    && scope.definitionCache?.state === "warm";
   if (
     bindDigest
-    && bindDigest !== servedDigest
     && bindDigest !== scope.scopeDigest
-    // A load that served no cached answer read everything live: it is the
-    // pre-cache scope and needs no re-run.
-    && scope.definitionCacheHits !== 0
+    && !servedBoundAnswers
   ) {
-    // A refresh published between the two reads, and this scope may carry
-    // cached answers of the old digest that the new binding contradicts.
-    // Re-run the scope load ONCE against the new digest, reusing this pass's
-    // catalog: KV reads plus the live (selection-deciding) definition reads.
+    // The first load could not serve the bound digest's answers: no pointer
+    // at the precheck (null digest), an answers read that failed or found
+    // nothing, or a refresh that published a new digest in between. Its
+    // live answers may contradict answers the binding served, where main's
+    // refresh would have read live too and agreed. Re-run the scope load
+    // ONCE against the bound digest, whatever the first load's hit count,
+    // reusing this pass's catalog and every row it already read live: KV
+    // reads plus live reads of the rows the first load served and the bound
+    // document does not. So a pass never pays a full live read twice; if
+    // the bound answers cannot be read either, it reads only the rows the
+    // first load served from another digest's document.
     result.scopeReloadedForPointer = true;
     definitionCacheFirstLoad = scope.definitionCache ?? null;
     const listedCatalog = bookingStopScopeCatalog(scope);
+    const liveAnswers = bookingStopScopeLiveAnswers(scope);
     try {
       scope = await loadScope(
         bindDigest,
-        listedCatalog ? { listedCatalog } : {},
+        {
+          ...(listedCatalog ? { listedCatalog } : {}),
+          ...(liveAnswers ? { definitionLiveAnswers: liveAnswers } : {}),
+        },
       );
     } catch (error) {
       return scopeUnavailable(error);

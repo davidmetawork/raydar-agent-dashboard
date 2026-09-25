@@ -19,9 +19,12 @@
 //   Every answer the cache does serve either keeps a row in scope (a cached
 //   "has link" on an enabled, unmatched row) or cannot change selection (a
 //   disabled row, a name-matched row). Its only cost when stale is a wider
-//   scope, and it is still bounded by MAX_AGE.
-//   - n (name hash) and e (enabled) must equal the live catalog row, so a new
-//     id, a rename or an enable flip in either direction forces a read.
+//   scope, and it is still bounded: MAX_AGE at the refresh, and at the sweep
+//   MAX_AGE plus the pointer's own 60-minute snapshot bound (SWEEP_MAX_AGE).
+//   - In the refresh's cache mode n (name hash) and e (enabled) must equal
+//     the live catalog row, so a new id, a rename or an enable flip in
+//     either direction forces a read. Published mode (the sweep, and a
+//     refresh's drift-check load) checks e only: see below.
 //   - The document is keyed to the link matcher (version + source
 //     fingerprint), so a matcher change forces fresh reads.
 //   - r (read time) only ever comes from a real read. Merging and racing
@@ -45,11 +48,28 @@
 //     names. Any document under key D carries D's link answers, so a served
 //     answer can never disagree with the published binding, and no other
 //     writer (a slow sweep, a second refresh) can change what the sweep sees.
+//   - PUBLISHED MODE REPRODUCES THE BINDING EXACTLY. The sweep serves the
+//     bound document's answer for every row that is not selection-deciding,
+//     whatever its name hash, its age, or the local cache revision and
+//     lever (the document is keyed to the bound digest, and the snapshot
+//     contract already bounds the pointer's age to 60 minutes). It keeps the
+//     enabled-flag check and reads every selection-deciding row live, so the
+//     only way its digest can differ from the binding is a real change in
+//     the catalog or in a live-read row, and there main's sweep fails too.
+//     The rollback lever (BOOKING_STOP_DEFINITION_CACHE=off) therefore stops
+//     the REFRESH serving cached answers; the first sweep after it still
+//     reproduces the binding the last cached refresh published.
+//   - When the refresh cannot make its answers durable, it re-reads the rows
+//     it served from cache (at most the catalog, main's full read), and
+//     publishes a scope that served nothing: the sweep then reads live and
+//     agrees, as before the cache.
 //   - The sweep binds BOTH legs to one pointer object: the scope leg serves
 //     that pointer's digest and the snapshot leg is handed the same object.
-//     Pointer reads are strict and retried once; when the pointer moved
-//     during the scope leg, the scope is re-run once against the new digest
-//     (same catalog, KV reads plus the live rows only) before binding.
+//     Pointer reads are strict and retried once. Whenever the loaded digest
+//     differs from the bound pointer's and the first load could not serve
+//     that digest's answers, the scope is re-run once against the bound
+//     digest (same catalog, no second read of a row this pass already read
+//     live).
 // Entries hold no step text, no PII and no secrets: {n, e, l, r} per id.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -124,6 +144,24 @@ export function definitionCacheEntryWellFormed(entry, nowMs) {
     && Number.isFinite(entry.r)
     && Number.isFinite(nowMs)
     && entry.r <= nowMs
+  );
+}
+
+/**
+ * Shape-only validity of a published answer: the sweep serves the bound
+ * document's answers whatever their age (the pointer's own age is bounded by
+ * the snapshot contract), so no clock comparison here.
+ */
+export function definitionAnswerEntryWellFormed(entry) {
+  return Boolean(
+    entry
+    && typeof entry === "object"
+    && !Array.isArray(entry)
+    && typeof entry.n === "string"
+    && NAME_HASH.test(entry.n)
+    && typeof entry.e === "boolean"
+    && typeof entry.l === "boolean"
+    && Number.isFinite(entry.r)
   );
 }
 
@@ -233,6 +271,31 @@ export function definitionCacheDecision(entry, {
     return { use: false, reason: "expired", ageMs };
   }
   return { use: true, reason: "hit", ageMs };
+}
+
+/**
+ * The published-mode decision: may this answer (from the bound answers
+ * document, or from an earlier load of the same refresh invocation) stand in
+ * for a read of this row now? Only the enabled flag and the selection class
+ * are checked; the name hash and the age are not, because the answer is the
+ * one the binding was built from and reproducing it is the point. A row whose
+ * "no link" would decide selection is still read live.
+ */
+export function definitionPublishedDecision(entry, { enabled, nudge }) {
+  if (!definitionAnswerEntryWellFormed(entry)) {
+    return { use: false, reason: entry == null ? "missing" : "invalid" };
+  }
+  if (entry.e !== Boolean(enabled)) {
+    return { use: false, reason: "changed" };
+  }
+  if (definitionAnswerDecidesSelection({
+    enabled,
+    nudge,
+    linkBearing: entry.l,
+  })) {
+    return { use: false, reason: "selection_deciding" };
+  }
+  return { use: true, reason: "hit" };
 }
 
 /** The entry a real read produces. */
@@ -351,9 +414,13 @@ export function buildDefinitionAnswersDocument({
 /**
  * Parse a published answers document for `digest`. Same result shape and
  * states as readDefinitionCacheDocument; a document for another digest is
- * "foreign_revision".
+ * "foreign_revision". With `revision` null (the sweep's published mode) the
+ * document's own revision is accepted and entries are checked for shape only
+ * (no age test): the sweep reproduces what the bound refresh published,
+ * whatever this deployment's matcher revision or rollback lever says. With a
+ * revision (the refresh's durability read-back) it must match.
  */
-export function readDefinitionAnswersDocument(doc, { revision, digest, nowMs }) {
+export function readDefinitionAnswersDocument(doc, { revision = null, digest, nowMs = null }) {
   const empty = (state) => ({ state, entries: new Map() });
   if (doc == null) return empty("missing");
   if (
@@ -366,14 +433,38 @@ export function readDefinitionAnswersDocument(doc, { revision, digest, nowMs }) 
   ) {
     return empty("invalid");
   }
+  const published = revision == null;
   if (
-    typeof revision !== "string"
-    || !revision
-    || doc.revision !== revision
+    (published
+      ? typeof doc.revision !== "string" || !doc.revision
+      : typeof revision !== "string" || !revision || doc.revision !== revision)
     || !definitionAnswersDigestValid(digest)
     || doc.digest !== digest
   ) {
     return empty("foreign_revision");
+  }
+  if (published) {
+    let bytes = Infinity;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(doc), "utf8");
+    } catch {
+      return empty("invalid");
+    }
+    const ids = Object.keys(doc.entries);
+    if (
+      ids.length > BOOKING_STOP_DEFINITION_CACHE_MAX_ENTRIES
+      || bytes > BOOKING_STOP_DEFINITION_CACHE_MAX_BYTES
+    ) {
+      return empty("oversize");
+    }
+    const entries = new Map();
+    for (const id of ids) {
+      const entry = doc.entries[id];
+      if (id && definitionAnswerEntryWellFormed(entry)) {
+        entries.set(id, plainEntry(entry));
+      }
+    }
+    return { state: "warm", entries };
   }
   return readDefinitionCacheDocument(
     {
@@ -387,20 +478,16 @@ export function readDefinitionAnswersDocument(doc, { revision, digest, nowMs }) 
 
 /**
  * True only when the read-back answers document is warm and holds, for every
- * answer this load used, the identical {n, e, l, r}. An absent, foreign,
- * malformed or partial read-back is NOT durable.
+ * answer this load used, the same enabled flag and link answer. Those are
+ * all the sweep serves from it (published mode ignores n and r), and any
+ * document under this digest that carries them reproduces the digest. An
+ * absent, foreign, malformed or partial read-back is NOT durable.
  */
 export function definitionAnswersDurable(answers, parsed) {
   if (!parsed || parsed.state !== "warm") return false;
   for (const [id, answer] of answers) {
     const entry = parsed.entries.get(id);
-    if (
-      !entry
-      || entry.n !== answer.n
-      || entry.e !== answer.e
-      || entry.l !== answer.l
-      || entry.r !== answer.r
-    ) {
+    if (!entry || entry.e !== answer.e || entry.l !== answer.l) {
       return false;
     }
   }
@@ -415,6 +502,12 @@ const TELEMETRY_COUNTS = [
   "rotorFailures",
   "cacheHits",
   "writeAttempts",
+  // Sweep re-run only: rows answered from a live read this pass already made
+  // (no Paraform request).
+  "liveReuses",
+  // Refresh only: served rows re-read live because the answers could not be
+  // made durable.
+  "recoveryReads",
 ];
 const TELEMETRY_AGES = [
   "oldestHitAgeMs",
@@ -440,7 +533,8 @@ export function definitionCacheTelemetry(value) {
     // Refresh only: true when the published answers document for this
     // load's scope digest was read back holding every answer the load used;
     // false when it could not be made durable and the load served a cached
-    // answer (the load then failed); null when not checked or not required.
+    // answer (the load then re-read those rows live and published a scope
+    // that served nothing); null when not checked or not required.
     durable: typeof value.durable === "boolean" ? value.durable : null,
   };
   for (const key of TELEMETRY_COUNTS) {

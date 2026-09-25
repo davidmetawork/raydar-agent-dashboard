@@ -543,19 +543,27 @@ test("refresh bound: a servable answer is used at 6h minus 1 ms and re-read at e
   assert.deepEqual(edge.reads, ["linked01", "named001", "offlink1", "offplain", "plain001"]);
 });
 
-test("sweep bound: the sweep trusts a published answer one snapshot lifetime longer, and never beyond", async () => {
+test("published mode: the sweep serves the bound answers whatever their age (the pointer's age is the snapshot contract's job); the refresh bound still caps the mutable document", async () => {
   const h = harness();
   const published = await h.load({ definitionDurableAnswers: true });
   const digest = published.scopeDigest;
   assert.ok(h.state.answers.has(digest));
-  h.state.now = T0 + BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS - 1;
-  const inside = await h.measure(() => h.sweep(digest));
-  assert.deepEqual(inside.reads, ["plain001"]);
-  h.state.now = T0 + BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS;
-  const edge = await h.measure(() => h.sweep(digest));
-  assert.equal(edge.reads.length, 5);
-  // A caller can never lengthen trust past the sweep bound: an oversized
-  // value falls back to the refresh bound.
+  // PR 231 round four: an age cut-off in published mode could only make the
+  // sweep read live and contradict the binding it is about to bind to.
+  for (const at of [
+    T0 + BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS - 1,
+    T0 + BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS,
+    T0 + 48 * HOUR,
+  ]) {
+    h.state.now = at;
+    const served = await h.measure(() => h.sweep(digest, {
+      definitionMaxAgeMs: BOOKING_STOP_DEFINITION_MAX_AGE_MS, // ignored
+    }));
+    assert.deepEqual(served.reads, ["plain001"]);
+    assert.equal(served.out.scopeDigest, digest);
+  }
+  // In cache (refresh) mode a caller can never lengthen trust past the sweep
+  // bound: an oversized value falls back to the refresh bound.
   const h2 = harness();
   await h2.load();
   h2.state.now = T0 + BOOKING_STOP_DEFINITION_MAX_AGE_MS;
@@ -840,6 +848,15 @@ test("answers durability: only a warm read-back holding every answer, identical,
   assert.equal(definitionAnswersDurable(answers, parse(null)), false, "absent read-back is not durable");
   assert.equal(definitionAnswersDurable(answers, parse({ ...doc, digest: "e".repeat(64) })), false, "another digest");
   assert.equal(definitionAnswersDurable(answers, parse({ ...doc, revision: "other" })), false, "another matcher");
+  // Round four: the sweep serves only e and l from the document, so another
+  // read time or name hash under the same digest is still durable.
+  const restamped = structuredClone(doc);
+  restamped.entries.x.r = 150;
+  restamped.entries.x.n = "b".repeat(64);
+  assert.equal(definitionAnswersDurable(answers, parse(restamped)), true, "same e and l");
+  const disabled = structuredClone(doc);
+  disabled.entries.x.e = false;
+  assert.equal(definitionAnswersDurable(answers, parse(disabled)), false, "different enabled flag");
   const partial = structuredClone(doc);
   delete partial.entries.y;
   assert.equal(definitionAnswersDurable(answers, parse(partial)), false, "partial");
@@ -1002,39 +1019,40 @@ test("a cache write failure that changes no served answer does not fail the refr
   assert.equal(run.telemetry.durable, true); // nothing stored contradicts it
 });
 
-test("a refresh that served a cached answer fails when its published answers cannot be written, and the sweep keeps binding the previous generation", async () => {
+test("answers that cannot be made durable: the refresh re-reads its served rows live and publishes a scope that served nothing; the sweep reads live and binds", async () => {
   const h = harness();
   const store = memoryStore();
   const first = await refreshOnce(h, store);
   assert.equal(first.result.ok, true);
-  const publishedBefore = clone(store.values.get(BOOKING_MEMBERSHIP_KEYS.current));
   // The link is removed from linked01 (enabled, name-unmatched). No catalog
-  // field moves, so only a re-read (expiry here) can see it.
+  // field moves, so only a re-read can see it.
   h.state.definitions.linked01 = NO_LINK;
-  h.state.now = T0 + BOOKING_STOP_DEFINITION_MAX_AGE_MS;
+  h.state.now = T0 + 3 * HOUR; // inside the 6h bound: the refresh would serve it
   h.state.failAnswersWrite = true;
-  const error = await refreshOnce(h, store).catch((caught) => caught);
-  assert.equal(error.code, "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
-  assert.equal(error.definitionCache.durable, false);
-  // Nothing new was published ...
-  assert.deepEqual(store.values.get(BOOKING_MEMBERSHIP_KEYS.current), publishedBefore);
-  // ... and the sweep, which serves the answers of the PUBLISHED digest (not
-  // the refresh's newer mutable document), still binds that scope.
-  h.state.now += 5 * MIN;
-  const sweep = await h.sweep(publishedBefore.scope.digest);
-  assert.equal(sweep.scopeDigest, publishedBefore.scope.digest);
-  assert.deepEqual(selectedIds(sweep), publishedBefore.scope.selectedSequenceIds);
-  // Once the write lands, the refresh publishes the narrower truth and the
-  // sweep binds it.
-  h.state.failAnswersWrite = false;
-  h.state.now += 5 * MIN;
-  const recovered = await refreshOnce(h, store);
-  assert.equal(recovered.result.ok, true);
-  assert.equal(recovered.telemetry.durable, true);
+  // Every read-back is absent (an older document under the same digest
+  // would legitimately count: it carries the same link answers).
+  const run = await refreshOnce(h, store, {
+    rotor: false,
+    loaderOverrides: { definitionAnswersReader: async () => null },
+  });
+  // PR 231 round four: no NOT_DURABLE failure (main publishes here).
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.equal(run.telemetry.durable, false);
+  assert.equal(run.telemetry.cacheHits, 0, "the published scope served nothing");
+  assert.ok(run.telemetry.recoveryReads >= 4, JSON.stringify(run.telemetry));
+  assert.ok(run.reads.includes("linked01"));
+  // Recovery reads are bounded by main's full read, per load.
+  assert.ok(run.reads.length <= 2 * 5, run.reads.join(","));
   const current = store.values.get(BOOKING_MEMBERSHIP_KEYS.current);
-  assert.equal(current.scope.selectedSequenceIds.includes("linked01"), false);
+  assert.equal(current.scope.selectedSequenceIds.includes("linked01"), false, "the live truth, as main publishes");
+  assert.deepEqual(current.scope.selectedSequenceIds, selectedIds(await h.fullRead()));
+  // The sweep finds no durable answers for that digest, reads live and binds.
   h.state.now += 7 * MIN;
-  assert.equal((await sweepAccepts(h, store, await h.sweep(current.scope.digest))).ok, true);
+  const sweep = await h.measure(() => h.sweep(current.scope.digest, {
+    definitionAnswersReader: async () => null,
+  }));
+  assert.equal(sweep.reads.length, 5);
+  assert.equal((await sweepAccepts(h, store, sweep.out)).ok, true);
 });
 
 test("sweep grace: an answer the published refresh served is not re-read (and contradicted) by the sweep minutes later", async () => {
@@ -1048,15 +1066,14 @@ test("sweep grace: an answer the published refresh served is not re-read (and co
   assert.equal(refresh.result.ok, true, JSON.stringify(refresh.result));
   assert.equal(refresh.reads.includes("linked01"), false);
   const digest = store.values.get(BOOKING_MEMBERSHIP_KEYS.current).scope.digest;
-  // The sweep runs 7 minutes later, past 6 hours: with the refresh bound it
-  // would re-read, disagree, and fail closed; with the sweep bound it binds.
+  // The sweep runs 7 minutes later, past 6 hours. Published mode has no age
+  // cut-off (round four), so even a caller passing the refresh bound gets the
+  // published answer and binds.
   h.state.now += 7 * MIN;
   const withRefreshBound = await h.sweep(digest, {
     definitionMaxAgeMs: BOOKING_STOP_DEFINITION_MAX_AGE_MS,
   });
-  const rejected = await sweepAccepts(h, store, withRefreshBound);
-  assert.equal(rejected.ok, false);
-  assert.equal(rejected.detail, "current_invalid_or_scope_mismatch");
+  assert.equal((await sweepAccepts(h, store, withRefreshBound)).ok, true);
   const sweep = await h.measure(() => h.sweep(digest));
   assert.equal(sweep.reads.includes("linked01"), false);
   const accepted = await sweepAccepts(h, store, sweep.out);
@@ -1165,6 +1182,8 @@ test("telemetry projection is counts-only and drops anything else", () => {
     rotorFailures: 0,
     cacheHits: 7,
     writeAttempts: 0,
+    liveReuses: 0,
+    recoveryReads: 0,
     oldestHitAgeMs: 1234,
   });
   assert.equal(definitionCacheTelemetry(null), null);
@@ -1223,7 +1242,7 @@ test("review: a KV blip on the mutable cache document during a refresh (null rea
   assert.equal(selectedIds(sweep).includes("linked01"), false);
 });
 
-test("review: a refresh that served a cached answer fails NOT_DURABLE when the answers read-back is unreachable, absent, or a lost write", async () => {
+test("review: a refresh that served a cached answer and whose answers read-back is unreachable, absent, or a lost write re-reads those rows live and still publishes (round four)", async () => {
   for (const [label, setup] of [
     ["write fails, read-back null", (h) => {
       h.state.failAnswersWrite = true;
@@ -1243,14 +1262,22 @@ test("review: a refresh that served a cached answer fails NOT_DURABLE when the a
     const store = memoryStore();
     await h.load(); // every servable answer read at T0
     h.state.now = T0 + 3 * HOUR; // the refresh serves them from cache
-    const publishedBefore = clone(store.values.get(BOOKING_MEMBERSHIP_KEYS.current) ?? null);
-    const error = await refreshOnce(h, store, {
+    const run = await refreshOnce(h, store, {
       rotor: false,
       loaderOverrides: setup(h),
-    }).catch((caught) => caught);
-    assert.equal(error?.code, "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE", label);
-    assert.equal(error.definitionCache.durable, false, label);
-    assert.deepEqual(store.values.get(BOOKING_MEMBERSHIP_KEYS.current) ?? null, publishedBefore, label);
+    });
+    assert.equal(run.result.ok, true, label);
+    assert.equal(run.telemetry.durable, false, label);
+    assert.equal(run.telemetry.cacheHits, 0, label);
+    assert.ok(run.telemetry.recoveryReads > 0, label);
+    const current = store.values.get(BOOKING_MEMBERSHIP_KEYS.current);
+    // The sweep reads live (no durable answers) and binds.
+    h.state.failAnswersRead = null;
+    h.state.now += 7 * MIN;
+    const sweep = await h.sweep(current.scope.digest, {
+      definitionAnswersReader: async () => null,
+    });
+    assert.equal((await sweepAccepts(h, store, sweep)).ok, true, label);
   }
 });
 
@@ -1265,11 +1292,17 @@ test("review: a load that served nothing does not need its answers stored, and t
   assert.equal(sweep.reads.length, 5, "no published answers: every definition read live");
   assert.equal(sweep.out.definitionCache.state, "missing");
   assert.deepEqual(bindingOf(sweep.out), bindingOf(cold));
-  // A refresh's second load serves the first load's reads (overlay), so a
-  // publishing refresh does need them stored: it fails rather than publish.
+  // A refresh that serves answers it cannot store re-reads them live and
+  // publishes a scope that served nothing (round four), so the sweep again
+  // reads live and agrees.
   const store = memoryStore();
-  const error = await refreshOnce(h, store).catch((caught) => caught);
-  assert.equal(error?.code, "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
+  const run = await refreshOnce(h, store);
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.equal(run.telemetry.durable, false);
+  assert.equal(run.telemetry.cacheHits, 0);
+  h.state.now += 7 * MIN;
+  const next = await h.sweep(publishedDigestOf(store));
+  assert.equal((await sweepAccepts(h, store, next)).ok, true);
 });
 
 test("review: one KV blip on the sweep's answers read is retried, and the sweep never touches the mutable cache document", async () => {
@@ -1382,17 +1415,20 @@ test("review: definitionCacheFits bounds entries and worst-case bytes", () => {
   assert.equal(definitionCacheFits({ revision: "rev", ids: ids(900, 600), nowMs: T0 }), false, "byte cap");
 });
 
-test("review: the default answers reader throws on an unconfigured or unreachable store, so a refresh that served a cached answer fails NOT_DURABLE", async () => {
+test("review: the default answers reader throws on an unconfigured or unreachable store, so a refresh that served a cached answer re-reads it live and returns a scope that served nothing", async () => {
   const h = harness();
   await h.load();
   h.state.now = T0 + 3 * HOUR;
   const { definitionAnswersReader, definitionAnswersWriter, ...rest } = h.options();
   assert.equal(typeof definitionAnswersReader, "function");
   assert.equal(typeof definitionAnswersWriter, "function");
-  const error = await discoverBookingStopSequences({
+  const scope = await discoverBookingStopSequences({
     ...rest,
     definitionDurableAnswers: true,
-  }).catch((caught) => caught);
-  assert.equal(error?.code, "BOOKING_STOP_DEFINITION_CACHE_NOT_DURABLE");
+  });
+  assert.equal(scope.definitionCache.durable, false);
+  assert.equal(scope.definitionCacheHits, 0);
+  assert.equal(scope.definitionCache.recoveryReads, 4);
+  assert.deepEqual(bindingOf(scope), bindingOf(await h.fullRead()));
   await assert.rejects(() => kvGetStrict("seqguard:any"), { code: "KV_UNAVAILABLE" });
 });

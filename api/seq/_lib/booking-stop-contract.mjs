@@ -54,10 +54,12 @@ export const BOOKING_STOP_DEFINITION_MATCHER_VERSION = 1;
 // only ever widens scope; a disabled or name-matched row's link answer never
 // changes selection).
 export const BOOKING_STOP_DEFINITION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
-// The sweep trusts the same answers one snapshot lifetime longer, so it never
-// re-reads (and disagrees with) an answer the published snapshot was built
-// from. Rows the sweep reads live are unaffected. Also the retention bound:
-// an entry older than this is dropped on write.
+// The refresh bound plus one snapshot lifetime: the oldest answer the sweep
+// can serve (it serves the bound answers document whatever an entry's age;
+// the refresh built it inside MAX_AGE and the pointer is at most one
+// snapshot lifetime old). Also the retention bound of the mutable document
+// (an entry older than this is dropped on write) and the cap on any
+// definitionMaxAgeMs a caller passes.
 export const BOOKING_STOP_DEFINITION_SWEEP_MAX_AGE_MS =
   BOOKING_STOP_DEFINITION_MAX_AGE_MS + BOOKING_MEMBERSHIP_MAX_AGE_MS;
 // The refresh re-reads the oldest cached answers before they expire so

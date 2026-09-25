@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  bookingStopDefinitionCacheRevision,
   bookingStopScopeCatalog,
   createRefreshScopeLoader,
   discoverBookingStopSequences,
@@ -278,7 +279,10 @@ async function runSweep(h, store, {
   precheck = async () => currentOf(store),
   lock = async () => null,
   scopeHook = null,
+  // false models the pre-cache sweep: no published answers are served, every
+  // definition is read live.
   cacheOn = true,
+  loaderOverrides = {},
 } = {}) {
   const seen = { scopeCalls: [], snapshot: null, pointerArg: "not-called", sleeps: 0 };
   let result = null;
@@ -301,7 +305,8 @@ async function runSweep(h, store, {
         const catalogBefore = h.state.catalogReads;
         const scope = await h.load({
           ...args,
-          ...(cacheOn ? {} : { definitionCacheRevision: null }),
+          ...(cacheOn ? {} : { definitionAnswersDigest: null }),
+          ...loaderOverrides,
         });
         call.reads = h.state.reads.slice(readsBefore).sort();
         call.catalogReads = h.state.catalogReads - catalogBefore;
@@ -384,10 +389,12 @@ test("pointer race: the cached sweep re-runs its scope ONCE against the new dige
   // Both legs bind to ONE read: the snapshot got the pointer whose digest
   // the re-run served.
   assert.equal(run.seen.pointerArg.scope.digest, bindDigest);
-  // The re-run reuses this pass's catalog and reads only the live rows
-  // (selection-deciding: plain001, and linked01 now that it has no link).
+  // The re-run reuses this pass's catalog and every row the first load
+  // already read live (plain001): it reads only linked01, now
+  // selection-deciding in the new digest's answers. No row is read twice.
   assert.equal(run.seen.scopeCalls[1].catalogReads, 0);
-  assert.deepEqual(run.seen.scopeCalls[1].reads, ["linked01", "plain001"]);
+  assert.deepEqual(run.seen.scopeCalls[1].reads, ["linked01"]);
+  assert.equal(run.result.definitionCache.liveReuses, 1);
 });
 
 test("pointer race on a SERVABLE row: a disabled sequence gains a link, the next refresh publishes mid-scope; the re-run serves the new digest's answer and binds", async () => {
@@ -411,8 +418,9 @@ test("pointer race on a SERVABLE row: a disabled sequence gains a link, the next
   assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
   assert.equal(run.seen.scopeCalls.length, 2);
   assert.equal(run.seen.scopeCalls[1].args.definitionAnswersDigest, d2);
-  // offplain came from d2's answers, not a live read.
-  assert.deepEqual(run.seen.scopeCalls[1].reads, ["plain001"]);
+  // offplain came from d2's answers and plain001 from the first load's live
+  // read: the re-run makes no Paraform read at all.
+  assert.deepEqual(run.seen.scopeCalls[1].reads, []);
   assert.equal(run.seen.pointerArg.scope.digest, d2);
 });
 
@@ -620,4 +628,250 @@ test("bookingStopScopeCatalog returns a copy of the rows the load listed, and a 
   const again = await h.load({ listedCatalog: bookingStopScopeCatalog(scope) });
   assert.equal(h.state.catalogReads, before);
   assert.equal(again.scopeDigest, scope.scopeDigest);
+});
+
+// ─── 6. Round four: the sweep reproduces the published binding exactly ──────
+// PR 231 third review found five passes that fail closed (pause no one) where
+// main binds. Each scenario runs twice: once on the cached system, once on a
+// model of main (refresh with the cache off, sweep reading every definition
+// live), and the cached pass must bind wherever main's does.
+
+const KV_DOWN = () =>
+  Object.assign(new Error("KV_UNAVAILABLE"), { code: "KV_UNAVAILABLE" });
+
+// Main: every refresh and sweep read reads Paraform live. Same world as
+// publishedWithServedStaleAnswer: linked01's link is removed after T0.
+async function mainWorld({ duringWalk = null, beforeSweep = null, precheck = null } = {}) {
+  const h = harness({ revision: null });
+  const store = memoryStore();
+  await h.load();
+  h.state.definitions.linked01 = NO_LINK;
+  h.state.now = T0 + 3 * HOUR;
+  const refresh = await refreshOnce(h, store, { rotor: false, onMembership: duringWalk });
+  if (!refresh.result.ok) return { refresh, run: null };
+  h.state.now += 7 * MIN;
+  beforeSweep?.(h);
+  const run = await runSweep(h, store, {
+    cacheOn: false,
+    ...(precheck ? { precheck: precheck(store) } : {}),
+  });
+  return { refresh, run };
+}
+
+test("round four: a rename of a non-selection-deciding row between refresh and sweep serves the bound answer, and the pass binds where main binds", async () => {
+  const rename = (h) => { h.state.rows[0].name = "Sourcing - Counsel (renamed)"; };
+  const main = await mainWorld({ beforeSweep: rename });
+  assert.equal(main.run.seen.snapshot?.ok, true, "main binds");
+
+  const { h, store } = await publishedWithServedStaleAnswer();
+  rename(h); // linked01: still enabled and name-unmatched, served "has link"
+  const run = await runSweep(h, store);
+  assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
+  assert.equal(run.seen.scopeCalls.length, 1);
+  // The name hash moved, but the bound answer is served: only the
+  // selection-deciding row is read live.
+  assert.deepEqual(run.seen.scopeCalls[0].reads, ["plain001"]);
+  assert.equal(run.result.scopeReloadedForPointer, false);
+});
+
+test("round four: a rename that makes a row selection-deciding still reads it live (and fails closed exactly where main does)", async () => {
+  const rename = (h) => { h.state.rows[3].name = "Plain role"; }; // named001 loses its nudge name
+  const main = await mainWorld({ beforeSweep: rename });
+  assert.equal(main.run.seen.snapshot?.ok, false, "main fails closed: the selection moved");
+
+  const { h, store } = await publishedWithServedStaleAnswer();
+  rename(h);
+  const run = await runSweep(h, store);
+  assert.ok(run.seen.scopeCalls[0].reads.includes("named001"), "read live, never served");
+  assert.equal(run.seen.snapshot?.ok, false);
+  // It served the bound digest's own answers, so a re-run cannot help.
+  assert.equal(run.seen.scopeCalls.length, 1);
+});
+
+test("round four: a rename during the refresh's membership walk publishes where main publishes (no BOOKING_MEMBERSHIP_SCOPE_DRIFT)", async () => {
+  const renameDuringWalk = (h) => () => { h.state.rows[0].name = "Sourcing - Counsel v2"; };
+  const main = await (async () => {
+    const h = harness({ revision: null });
+    const store = memoryStore();
+    await h.load();
+    h.state.definitions.linked01 = NO_LINK;
+    h.state.now = T0 + 3 * HOUR;
+    return refreshOnce(h, store, { rotor: false, onMembership: renameDuringWalk(h) });
+  })();
+  assert.equal(main.result.ok, true, "main publishes");
+
+  const h = harness();
+  const store = memoryStore();
+  await h.load(); // T0: every answer read and cached
+  h.state.definitions.linked01 = NO_LINK;
+  h.state.now = T0 + 3 * HOUR; // the refresh serves linked01's cached "has link"
+  const run = await refreshOnce(h, store, {
+    rotor: false,
+    onMembership: renameDuringWalk(h),
+  });
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  // The drift-check load served the first load's answer for the renamed row
+  // and read only the selection-deciding row live.
+  assert.deepEqual(run.reads, ["plain001", "plain001"]);
+  h.state.now += 7 * MIN;
+  const sweep = await runSweep(h, store);
+  assert.equal(sweep.seen.snapshot?.ok, true, JSON.stringify(sweep.seen.snapshot));
+});
+
+test("round four: a link added to a selection-deciding row during the walk is still drift (pinned answers never cover a live-read row)", async () => {
+  const h = harness();
+  const store = memoryStore();
+  await h.load();
+  h.state.now = T0 + 3 * HOUR;
+  await assert.rejects(() => refreshOnce(h, store, {
+    rotor: false,
+    onMembership: () => { h.state.definitions.plain001 = LINK; },
+  }), { code: "BOOKING_MEMBERSHIP_SCOPE_DRIFT" });
+});
+
+test("round four: the precheck pointer read failing twice with a stale served answer re-runs against the bound digest and binds, reading no row twice", async () => {
+  const failTwice = () => {
+    let calls = 0;
+    return (store) => async () => {
+      calls += 1;
+      if (calls <= 2) throw KV_DOWN();
+      return currentOf(store);
+    };
+  };
+  const main = await mainWorld({ precheck: failTwice() });
+  assert.equal(main.run.seen.snapshot?.ok, true, "main binds");
+
+  const { h, store } = await publishedWithServedStaleAnswer();
+  const run = await runSweep(h, store, { precheck: failTwice()(store) });
+  assert.equal(run.seen.scopeCalls.length, 2);
+  // The first load had no digest: it read everything live, and its live
+  // "no link" on linked01 contradicts the binding's served "has link".
+  assert.equal(run.seen.scopeCalls[0].args.definitionAnswersDigest, null);
+  assert.equal(run.seen.scopeCalls[0].reads.length, 5);
+  // The re-run (whatever the first load's hit count, here 0) serves the bound
+  // answers and reuses every live read: zero further Paraform reads.
+  assert.equal(run.seen.scopeCalls[1].args.definitionAnswersDigest, publishedDigestOf(store));
+  assert.deepEqual(run.seen.scopeCalls[1].reads, []);
+  assert.equal(run.seen.scopeCalls[1].catalogReads, 0);
+  assert.equal(run.result.scopeReloadedForPointer, true);
+  assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
+});
+
+test("round four: the rollback lever pulled while the current pointer carries cached answers; the first sweep still binds, then the lever's refresh publishes the live truth", async () => {
+  // The lever really does switch the revision off on Vercel.
+  assert.equal(
+    bookingStopDefinitionCacheRevision({ VERCEL: "1", BOOKING_STOP_DEFINITION_CACHE: "off" }),
+    null,
+  );
+  const lever = { definitionCacheRevision: null };
+  const { h, store } = await publishedWithServedStaleAnswer();
+  const first = await runSweep(h, store, { loaderOverrides: lever });
+  assert.equal(first.seen.snapshot?.ok, true, JSON.stringify(first.seen.snapshot));
+  assert.deepEqual(first.seen.scopeCalls[0].reads, ["plain001"]);
+  assert.equal(first.result.definitionCache.state, "warm");
+
+  // The next refresh under the lever serves nothing and writes no answers.
+  h.state.now += 3 * MIN;
+  const answersWritesBefore = h.state.answersWrites;
+  const refresh = await refreshOnce(h, store, { rotor: false, loaderOverrides: lever });
+  assert.equal(refresh.result.ok, true);
+  assert.equal(refresh.reads.length, 10, "both loads read every definition, as main");
+  assert.equal(h.state.answersWrites, answersWritesBefore);
+  assert.equal(currentOf(store).scope.selectedSequenceIds.includes("linked01"), false);
+  h.state.now += 7 * MIN;
+  const next = await runSweep(h, store, { loaderOverrides: lever });
+  assert.equal(next.seen.snapshot?.ok, true, JSON.stringify(next.seen.snapshot));
+  assert.equal(next.seen.scopeCalls[0].reads.length, 5, "no answers for that digest: all live");
+});
+
+test("round four: the answers document failing durability twice no longer fails the refresh; it publishes a scope that served nothing and the sweep reads live and binds", async () => {
+  const h = harness();
+  const store = memoryStore();
+  await h.load();
+  h.state.definitions.linked01 = NO_LINK;
+  h.state.now = T0 + 3 * HOUR;
+  h.state.failAnswersWrite = true;
+  const refresh = await refreshOnce(h, store, {
+    rotor: false,
+    loaderOverrides: { definitionAnswersReader: async () => null },
+  });
+  assert.equal(refresh.result.ok, true, JSON.stringify(refresh.result));
+  assert.equal(refresh.telemetry.durable, false);
+  assert.equal(refresh.telemetry.cacheHits, 0);
+  // Each load re-read the rows it served; never more than main's full read.
+  assert.ok(refresh.telemetry.recoveryReads >= 4);
+  assert.ok(refresh.reads.length <= 10, refresh.reads.join(","));
+  assert.equal(currentOf(store).scope.selectedSequenceIds.includes("linked01"), false);
+  h.state.now += 7 * MIN;
+  const run = await runSweep(h, store);
+  assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
+  assert.equal(run.seen.scopeCalls[0].reads.length, 5);
+  assert.equal(run.seen.scopeCalls.length, 1);
+});
+
+test("round four: a drift-check load whose own write cannot be verified is covered by the first load's durable document under the same digest (no recovery reads)", async () => {
+  const h = harness();
+  const store = memoryStore();
+  await h.load();
+  h.state.now = T0 + 3 * HOUR;
+  let failing = false;
+  const refresh = await refreshOnce(h, store, {
+    rotor: false,
+    onMembership: () => { failing = true; },
+    loaderOverrides: {
+      definitionAnswersWriter: async (digest, doc) => {
+        if (failing) throw KV_DOWN();
+        h.state.answers.set(digest, clone(doc));
+      },
+      definitionAnswersReader: async (digest) =>
+        (failing ? null : clone(h.state.answers.get(digest) ?? null)),
+    },
+  });
+  assert.equal(refresh.result.ok, true, JSON.stringify(refresh.result));
+  assert.equal(refresh.telemetry.durable, true);
+  assert.equal(refresh.telemetry.recoveryReads, 0);
+  assert.deepEqual(refresh.reads, ["plain001", "plain001"]);
+  h.state.now += 7 * MIN;
+  const run = await runSweep(h, store);
+  assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
+  assert.deepEqual(run.seen.scopeCalls[0].reads, ["plain001"]);
+});
+
+test("round four: when the pointer moved and the re-run's answers read fails, the re-run reads only the rows the first load served, never a full live read twice", async () => {
+  const { h, store } = await publishedWithServedStaleAnswer({
+    refreshAt: T0 + BOOKING_STOP_DEFINITION_MAX_AGE_MS - 5 * MIN,
+  });
+  let bound = null;
+  const run = await runSweep(h, store, {
+    scopeHook: async (call) => {
+      if (call !== 1) return;
+      assert.equal((await refreshOnce(h, store, { rotor: false })).result.ok, true);
+      bound = publishedDigestOf(store);
+      h.state.failAnswersRead = (digest) => (digest === bound ? KV_DOWN() : null);
+    },
+  });
+  assert.equal(run.seen.scopeCalls.length, 2);
+  assert.equal(run.seen.scopeCalls[1].args.definitionAnswersDigest, bound);
+  assert.equal(run.result.definitionCache.state, "read_error");
+  // plain001 was read live by the first load and is reused; the four rows
+  // the first load served from the old digest's answers are read live.
+  assert.deepEqual(run.seen.scopeCalls[0].reads, ["plain001"]);
+  assert.deepEqual(run.seen.scopeCalls[1].reads, ["linked01", "named001", "offlink1", "offplain"]);
+  const all = [...run.seen.scopeCalls[0].reads, ...run.seen.scopeCalls[1].reads];
+  assert.equal(new Set(all).size, all.length, "no row read twice in one pass");
+  // All-live answers equal what refresh B published (it read linked01 live).
+  assert.equal(run.seen.snapshot?.ok, true, JSON.stringify(run.seen.snapshot));
+});
+
+test("round four parity control: a real change on a live-read row after the refresh fails closed with no re-run, as main does", async () => {
+  const addLink = (h) => { h.state.definitions.plain001 = LINK; };
+  const main = await mainWorld({ beforeSweep: addLink });
+  assert.equal(main.run.seen.snapshot?.ok, false, "main fails closed");
+
+  const { h, store } = await publishedWithServedStaleAnswer();
+  addLink(h);
+  const run = await runSweep(h, store);
+  assert.equal(run.seen.scopeCalls.length, 1);
+  assert.equal(run.result.scopeReloadedForPointer, false);
+  assert.equal(run.seen.snapshot?.ok, false);
 });
