@@ -30,6 +30,9 @@ const evidence = (over = {}) => ({
   reachedOut: true,
   replyRecords: [],
   gmailReplies: 0,
+  // Since 2026-09-25 "didn't get back" also needs a searched mailbox; a
+  // clean fixture is one where the search ran and found nothing.
+  mailboxReplies: 0,
   gmailError: null,
   ...over,
 });
@@ -197,4 +200,12 @@ test("a reply beats the hold window and the arming pin", () => {
   });
   assert.equal(decision.action, "review");
   assert.equal(decision.resolution, "candidate_replied");
+});
+
+test("no mailbox search means no dismissal, whoever reached out (2026-09-25)", () => {
+  for (const over of [{ mailboxReplies: null }, { mailboxReplies: undefined }]) {
+    const decision = plan({}, over);
+    assert.equal(decision.action, "review");
+    assert.equal(decision.resolution, "reply_not_observable");
+  }
 });

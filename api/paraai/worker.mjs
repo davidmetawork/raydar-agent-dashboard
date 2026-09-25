@@ -54,6 +54,7 @@ import {
   takeAlertSlot,
 } from "./_lib/store.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
+import { runExpiredTick } from "./_lib/expired.mjs";
 
 async function alertWorkerFailure(error, {
   lane,
@@ -337,8 +338,80 @@ export async function runAutomationCycle({
   };
 }
 
+// Three unresolved expired matches pause new Para AI matches. The expired lane
+// clears only the ones it can truthfully explain, so the rest need a person,
+// and review items no longer post anywhere. One line a day while paused.
+async function alertMatchingPaused(expired) {
+  if (!(await takeAlertSlot("expired-matching-paused", 24 * 3600).catch(() => false))) return false;
+  await notifySlack(
+    `🚨 Para AI matching is paused (${expired?.paraAi?.matchingStatus || "not active"}): Paraform shows `
+    + `${expired?.expiredCount ?? "several"} unresolved expired matches. The automatic lane only clears `
+    + "ones with no reply; add a reason to the rest on paraform.com/home.",
+  ).catch(() => {});
+  return true;
+}
+
+// Expired-match actioning, isolated like outreach: a failure here never stops
+// any other lane. It always runs AFTER outreach, so a request emailed this
+// tick is already marked reached out before its expiry is judged.
+async function runExpiredLane({
+  expiredImpl = runExpiredTick,
+  alertImpl = alertWorkerFailure,
+  pausedAlertImpl = alertMatchingPaused,
+} = {}) {
+  try {
+    const expired = await expiredImpl();
+    if (expired?.matchingPaused === true) await pausedAlertImpl(expired).catch(() => {});
+    return { expired, expiredError: null };
+  } catch (error) {
+    await alertImpl(error, {
+      lane: "paraai_expired",
+      slot: "expired-worker-failed",
+      message: (code) => `🚨 Para AI expired-match actioning failed (${code}). Expired matches are not being cleared, and three unresolved ones pause new Para AI matches.`,
+    });
+    return {
+      expired: null,
+      expiredError: {
+        error: String(error?.code || "expired_failed"),
+        detail: String(error?.message || error).slice(0, 180),
+      },
+    };
+  }
+}
+
+// The two Para AI interview-request lanes, candidate outreach email then
+// expired-match actioning. David turned them back on 2026-09-25 while the rest
+// of this worker stays under the 2026-09-16 background pause, so this is what
+// the automatic entrypoints run while `paraaiWorker` is paused. Each lane
+// checks its own `paraaiRequestLanes` brake before any provider call.
+export async function runRequestLanes({
+  outreachImpl = runOutreachTick,
+  expiredImpl = runExpiredTick,
+  alertImpl = alertWorkerFailure,
+  pausedAlertImpl = alertMatchingPaused,
+} = {}) {
+  let outreach = null;
+  let outreachError = null;
+  try {
+    outreach = await outreachImpl();
+  } catch (error) {
+    outreachError = {
+      error: String(error?.code || "outreach_failed"),
+      detail: String(error?.message || error).slice(0, 180),
+    };
+    await alertImpl(error, {
+      lane: "paraai_outreach",
+      slot: "outreach-worker-failed",
+      message: (code) => `🚨 Para AI outreach worker failed (${code}). Direct-submit queue processing continued.`,
+    });
+  }
+  const { expired, expiredError } = await runExpiredLane({ expiredImpl, alertImpl, pausedAlertImpl });
+  return { outreach, outreachError, expired, expiredError };
+}
+
 export async function handleParaaiWorker(req, res, {
   pauseState = () => paraformBackgroundPauseState("paraaiWorker"),
+  requestLanes = runRequestLanes,
 } = {}) {
   res.setHeader("Cache-Control", "no-store");
   if (!["GET", "POST"].includes(req.method)) return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
@@ -349,7 +422,29 @@ export async function handleParaaiWorker(req, res, {
   // intentionally a no-op response so cron/Fly do not retry into provider IO.
   const backgroundPause = await pauseState().catch(() => ({ paused: true }));
   if (backgroundPause?.paused) {
-    return res.status(200).json({ ok: true, paused: true, reason: "paraai_worker_paused" });
+    const paused = { ok: true, paused: true, reason: "paraai_worker_paused" };
+    // Only the two interview-request lanes run through this pause (David,
+    // 2026-09-25), and only on the automatic entrypoints: the Fly POST tick
+    // and the cron GET recovery. Every other mode stays a no-op.
+    const requestedMode = requestBody(req).mode
+      ?? (req.method === "GET" ? "recover" : "tick");
+    if (!["tick", "recover"].includes(requestedMode) || !storeConfigured()) {
+      return res.status(200).json(paused);
+    }
+    const lanes = await requestLanes();
+    const lanesBraked = [lanes.outreach, lanes.expired]
+      .every((result) => result?.reason === "request_lanes_paused");
+    return res.status(200).json({
+      ...paused,
+      requestLanes: lanesBraked ? "paused" : "running",
+      degraded: Boolean(
+        lanes.outreachError
+        || lanes.expiredError
+        || lanes.expired?.errors > 0
+        || lanes.expired?.authExpired
+      ),
+      ...lanes,
+    });
   }
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
 
@@ -789,15 +884,10 @@ export async function handleParaaiWorker(req, res, {
         message: (code) => `🚨 Para AI outreach worker failed (${code}). Direct-submit queue processing continued.`,
       });
     }
-    // Reply actioning, expired-match actioning and curated-interest detection
-    // were retired from this dispatch loop 2026-09-24 (D06, Paraform
-    // reduction pass): all three write gates had defaulted closed since
-    // launch (never armed), so retiring them changed zero candidate-facing
-    // behavior. Their handlers (reply.mjs, expired.mjs, interest.mjs and
-    // their _lib modules) are untouched and still reachable as standalone
-    // manual routes — only the automatic tick call from this worker loop was
-    // removed. See docs-site products/paraai-{reply,expired}-actioning.md and
-    // paraai-curated-interest.md (status: deprecated).
+    // Expired-match actioning came back 2026-09-25 (David), armed. Reply
+    // actioning and curated-interest detection stay retired from this loop
+    // (D06, 2026-09-24); their handlers remain reachable as manual routes.
+    const { expired, expiredError } = await runExpiredLane();
     let recovery = null;
     let recoveryError = null;
     if (mode === "recover") {
@@ -821,6 +911,9 @@ export async function handleParaaiWorker(req, res, {
         recoveryError
         || resumeSweepError
         || outreachError
+        || expiredError
+        || expired?.errors > 0
+        || expired?.authExpired
         || remainderError
         || remainder?.ok === false
         || resumeOnlyBackfillError
@@ -836,6 +929,8 @@ export async function handleParaaiWorker(req, res, {
       resumeSweepError,
       outreach,
       outreachError,
+      expired,
+      expiredError,
       tick,
       remainder,
       remainderError,

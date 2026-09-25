@@ -27,6 +27,7 @@ import {
   firstDeliveredInternalDate,
   outreachMailbox,
   gmailConfigured,
+  searchThreads,
 } from "./outreach-gmail.mjs";
 import { listReplyRecords } from "./reply-store.mjs";
 import { readSubmissionRequestClaim } from "./request-claim.mjs";
@@ -53,6 +54,12 @@ import {
   markExpiredRun,
   readExpiredLastRun,
 } from "./expired-store.mjs";
+import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
+import {
+  candidateEmailFromParaformSources,
+  paraformCandidateRecipientPremark,
+} from "./outreach.mjs";
+import { trpcGet } from "./core.mjs";
 
 const bool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -108,14 +115,41 @@ export function expiredWriteEnabled(config = expiredConfig()) {
 
 // ---------------------------------------------------------------- planning
 
+// The candidate's address from Paraform, read the way outreach reads it, for a
+// row we never emailed (a hand-sent reach-out). One read per such row.
+async function paraformCandidateEmail(candidateUserId, { trpcGetImpl = trpcGet } = {}) {
+  const rows = await trpcGetImpl("candidateUser.getCandidateUsersByIds", {
+    candidate_user_ids: [candidateUserId],
+  });
+  const list = Array.isArray(rows) ? rows : [rows];
+  const record = list.find((row) => String(row?.id || "") === String(candidateUserId)) || list[0];
+  const { email } = await candidateEmailFromParaformSources(candidateUserId, record, { trpcGetImpl });
+  return String(email || "").trim();
+}
+
 // Everything that could make "Candidate didn't get back" false, gathered before
 // any decision. Gmail is authoritative (it sees replies the reply lane has not
 // scanned yet); the reply records are a cheap local cross-check.
-export async function gatherContactEvidence(row, { config, replyRecordsByCandidate, now }) {
+export async function gatherContactEvidence(row, {
+  config,
+  replyRecordsByCandidate,
+  now,
+  stateImpl = getOutreachState,
+  threadImpl = getThread,
+  searchImpl = searchThreads,
+  emailImpl = paraformCandidateEmail,
+}) {
   const evidence = {
     reachedOut: row.reachedOut === true,
+    // Paraform writes reached_out_to_candidate itself, at creation, when a
+    // request is addressed to the candidate. That is not contact by us.
+    vendorPremark: paraformCandidateRecipientPremark(row),
+    // How Raydar delivered THIS request, if it did: "gmail" or a Mailroom
+    // transport such as "mailroom-sendgrid".
+    raydarDelivery: null,
     replyRecords: [],
     gmailReplies: null,
+    mailboxReplies: null,
     gmailError: null,
   };
   const records = replyRecordsByCandidate.get(row.candidateUserId) || [];
@@ -128,9 +162,29 @@ export async function gatherContactEvidence(row, { config, replyRecordsByCandida
 
   if (!config.gmailConfigured) return evidence;
   try {
-    const state = await getOutreachState(row.candidateUserId);
+    const state = await stateImpl(row.candidateUserId);
+    const match = state?.matches?.[row.id];
+    if (match?.sentAt) evidence.raydarDelivery = String(match.transport || "gmail");
+    // Any message from the candidate anywhere in the mailbox since the request
+    // was created counts as getting back (2026-09-25). The thread read below
+    // cannot see a reply to a SendGrid (Mailroom relief) send or to a
+    // hand-sent email, and the September pause recovery sent 38 requests
+    // through SendGrid. Over-counting only sends a row to review. A row we
+    // never emailed takes the address from Paraform; with no address at all
+    // the search cannot run and the plan sends the row to review.
+    let candidateEmail = String(state?.candidateEmail || "").trim();
+    if (!candidateEmail && row.reachedOut) candidateEmail = await emailImpl(row.candidateUserId);
+    if (candidateEmail) {
+      const afterSeconds = Math.floor((Number(row.createdAtMs) || 0) / 1000);
+      const found = await searchImpl(
+        config.mailbox,
+        `from:"${candidateEmail.replace(/"/g, "")}" in:anywhere after:${afterSeconds}`,
+        5,
+      );
+      evidence.mailboxReplies = Array.isArray(found) ? found.length : 0;
+    }
     if (!state?.threadId) { evidence.gmailReplies = 0; return evidence; }
-    const thread = await getThread(config.mailbox, state.threadId);
+    const thread = await threadImpl(config.mailbox, state.threadId);
     if (!thread) { evidence.gmailReplies = 0; return evidence; }
     const anchor = finiteDate(state.firstOutboundAt) ?? firstDeliveredInternalDate(thread) ?? 0;
     const replies = candidateReplyMessages(thread, config.mailbox, anchor);
@@ -158,15 +212,34 @@ export function planExpiredRow(row, evidence, { config, now, claim }) {
   // A candidate who replied demonstrably DID get back. The reply lane owns that
   // request's truthful outcome (a late submit, or a pass with a real reason), so
   // this lane surfaces it rather than inventing one.
-  if (evidence.gmailReplies > 0 || evidence.replyRecords.length > 0) {
+  if (evidence.gmailReplies > 0 || evidence.mailboxReplies > 0 || evidence.replyRecords.length > 0) {
     return {
       action: "review",
       resolution: "candidate_replied",
-      detail: `gmail=${evidence.gmailReplies ?? "n/a"} records=${evidence.replyRecords.length}`,
+      detail: `gmail=${evidence.gmailReplies ?? "n/a"} mailbox=${evidence.mailboxReplies ?? "n/a"} records=${evidence.replyRecords.length}`,
     };
   }
   if (config.requireReachedOut && !evidence.reachedOut) {
     return { action: "review", resolution: "never_contacted", detail: "reached_out_to_candidate is false" };
+  }
+  // Paraform's own premark says nothing about whether anyone wrote to the
+  // candidate, so without a Raydar delivery for this request the reason
+  // would be unproven (2026-09-25).
+  if (config.requireReachedOut && evidence.vendorPremark && !evidence.raydarDelivery) {
+    return {
+      action: "review",
+      resolution: "never_contacted",
+      detail: "reached-out marker is Paraform's candidate-recipient premark; no Raydar delivery",
+    };
+  }
+  // "Didn't get back" needs a searched mailbox (2026-09-25). No address to
+  // search, or no Gmail, leaves it unproven, whoever reached out.
+  if (evidence.mailboxReplies == null) {
+    return {
+      action: "review",
+      resolution: "reply_not_observable",
+      detail: `no mailbox search (delivery ${evidence.raydarDelivery || "none"})`,
+    };
   }
   if (config.holdHours > 0 && expiredAt != null && now < expiredAt + config.holdHours * 3600_000) {
     return { action: "hold", resolution: "hold_window", detail: `${config.holdHours}h` };
@@ -207,11 +280,17 @@ export async function runExpiredTick({
   ignoreArmingPin = false,
   force = false,
   env = process.env,
+  pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
 } = {}) {
   const config = expiredConfig(env);
   if (!expiredDetectionEnabled(config)) {
     return { ok: true, ran: false, reason: config.approved ? "store_not_configured" : "not_approved" };
   }
+  // Shares the interview-request lanes' brake with candidate outreach
+  // (2026-09-25). Unreadable fails closed, and the brake stops the backfill
+  // and manual tick too, since they spend the same writes.
+  const lanePause = await pauseState().catch(() => ({ paused: true }));
+  if (lanePause?.paused) return { ok: true, ran: false, reason: "request_lanes_paused" };
 
   const slot = await acquireExpiredPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!slot && mode === "organic") return { ok: true, ran: false, reason: "poll_not_due" };
@@ -292,7 +371,10 @@ export async function runExpiredTick({
       reachedOut: evidence.reachedOut,
       evidence: {
         gmailReplies: evidence.gmailReplies,
+        mailboxReplies: evidence.mailboxReplies,
         replyRecords: evidence.replyRecords.length,
+        vendorPremark: evidence.vendorPremark,
+        raydarDelivery: evidence.raydarDelivery,
         gmailError: evidence.gmailError,
       },
       plan,
@@ -307,6 +389,9 @@ export async function runExpiredTick({
     // A hold is a retry, not a decision — never persisted, so the next tick
     // re-evaluates with fresh evidence.
     if (plan.action === "hold") {
+      // A hold is retried next pass and does not use a batch slot, so a row
+      // whose evidence keeps failing cannot starve the rows behind it.
+      summary.planned -= 1;
       summary.held += 1;
       summary.results.push({ requestId: row.id, outcome: "hold", resolution: plan.resolution });
       continue;
