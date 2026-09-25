@@ -33,7 +33,7 @@
 //   helpers and never logs or stores the cookie value anywhere.
 
 import { notifySlack, trpcGetRaw } from "./core.mjs";
-import { notifySlotKey, pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
+import { notifySlotDelivered, notifySlotKey, pageNotify, systemHealthOwns } from "../../_lib/notify.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -45,6 +45,10 @@ export const AUTH_PROBE_CADENCE_KEY = "auth:paraform:probe:cadence";
 export const AUTH_READ_SUSPECT_KEY = "auth:paraform:read-suspect";
 export const AUTH_READ_RECOVERY_KEY = "auth:paraform:read-recovery";
 const OPEN_ALERT_TTL_SECONDS = 30 * 24 * 60 * 60;
+// The write-layer page's in-flight claim: covers one send (up to ~31 s of
+// Slack retries) with room to spare, then lapses if nothing marked it
+// delivered, so an orphaned claim delays the page minutes, never the episode.
+const WRITE_OPEN_CLAIM_TTL_SECONDS = 15 * 60;
 const REMINDER_TTL_SECONDS = 24 * 60 * 60;
 const LAST_PROBE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const READ_CONFIRMATION_TTL_SECONDS = 30 * 60;
@@ -360,23 +364,29 @@ export async function runAuthProbeTick(
   // atomic open slot (AUTH_OPEN_ALERT_KEY, the NX winner's openedAt stamp),
   // never a tick's local `since`: two ticks that both found no flag each
   // took their own `since` and paged under two keys (PR 230 review 4). The
-  // slot lives as long as the open slot (30 d, refreshed each tick below),
-  // not pageNotify's 24 h default, so a lost delivered:true record cannot
-  // re-page a weekend-long outage when a 24 h slot lapses (review 4).
-  // pageNotify releases the slot when a send fails, so a slot found held
-  // means another tick's send landed OR is still in flight and may yet fail
-  // (then it releases the slot and records delivered:false). A held slot is
-  // therefore NOT counted as delivered: the caller leaves record.alert alone
-  // and a later tick retries, where the held slot dedupes it (review 3).
-  // Answers "sent" | "held" | "failed".
+  // claim is short (WRITE_OPEN_CLAIM_TTL_SECONDS) and only a landed page
+  // turns it into a "delivered:<iso>" slot that lives as long as the open
+  // slot (30 d, refreshed each tick below), so a lost delivered:true record
+  // cannot re-page a weekend-long outage (review 4), and a claim orphaned by
+  // a killed function or a failed release lapses in minutes and a later tick
+  // sends the page instead of losing it (review 5).
+  // A held slot not yet marked delivered means another tick's send is still
+  // in flight and may yet fail: it is NOT counted as delivered, the caller
+  // leaves record.alert alone and a later tick retries (review 3).
+  // Answers "sent" | "delivered" (held, and marked delivered) | "held" |
+  // "failed".
   const writeOpenKey = (episodeStamp) => `paraform-auth-write-open:${episodeStamp}`;
   const pageWriteOpen = async (text, episodeStamp) => {
     const result = await pageImpl(text, {
       key: writeOpenKey(episodeStamp),
-      ttlSeconds: OPEN_ALERT_TTL_SECONDS,
+      ttlSeconds: WRITE_OPEN_CLAIM_TTL_SECONDS,
+      deliveredTtlSeconds: OPEN_ALERT_TTL_SECONDS,
     }).catch(() => null);
     if (result?.ok !== true) return "failed";
-    return result.skipped === "duplicate" ? "held" : "sent";
+    if (result.skipped !== "duplicate") return "sent";
+    const slotRaw = await Promise.resolve(kvImpl(["GET", notifySlotKey(writeOpenKey(episodeStamp))]))
+      .catch(() => null);
+    return notifySlotDelivered(slotRaw) ? "delivered" : "held";
   };
   const observed = await probeImpl();
   const writeFailure = parse(await kvImpl(["GET", AUTH_WRITE_FAILURE_KEY]));
@@ -535,7 +545,8 @@ export async function runAuthProbeTick(
     let delivered;
     let via;
     if (switchOn && layer === "write") {
-      delivered = (await pageWriteOpen(openText, at)) === "sent";
+      const outcome = await pageWriteOpen(openText, at);
+      delivered = outcome === "sent" || outcome === "delivered";
       via = "notify";
     } else {
       delivered = (await post(openText).catch(() => false)) === true;
@@ -570,10 +581,12 @@ export async function runAuthProbeTick(
     ]);
     // The write-layer #notify slot for this episode rides the same refresh
     // (same KV, XX only), so it dedupes for the whole episode however long.
+    // Only a slot marked delivered: an in-flight claim keeps its short TTL,
+    // so an orphaned one still lapses and the page is retried (review 5).
     if (switchOn) {
       const pageSlot = notifySlotKey(writeOpenKey(openedAtRaw));
       const pageSlotRaw = await Promise.resolve(kvImpl(["GET", pageSlot])).catch(() => null);
-      if (pageSlotRaw != null) {
+      if (notifySlotDelivered(pageSlotRaw)) {
         await Promise.resolve(kvImpl([
           "SET", pageSlot, pageSlotRaw, "XX", "EX", OPEN_ALERT_TTL_SECONDS,
         ])).catch(() => null);
@@ -600,7 +613,7 @@ export async function runAuthProbeTick(
       // delivered:false and stop the retries for good.
       return { status: "down", down: true, alertRetried: true, alertDelivered: false, alertPending: true };
     }
-    const delivered = outcome === "sent";
+    const delivered = outcome === "sent" || outcome === "delivered";
     record.alert = {
       openedAt: record.alert?.openedAt || at,
       delivered,

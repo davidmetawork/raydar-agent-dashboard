@@ -221,10 +221,11 @@ test("the sweep's confirmed-expiry witness has its own key and reaches seq healt
   assert.equal(none.sessionExpiredConfirmedAt, null);
 });
 
-test("booking sweep: the witness is written on a confirmed expiry and cleared by a good pass or a live session", async () => {
+test("booking sweep: the witness is written on a confirmed expiry and cleared only by a good pass (a live session records a proof)", async () => {
   const { readFile } = await import("node:fs/promises");
   const src = await readFile(new URL("../api/seq/booking-sweep.mjs", import.meta.url), "utf8");
   assert.match(src, /if \(expired\) \{[\s\S]{0,200}recordSessionExpiredWitness\(\)/);
-  assert.match(src, /AUTH_EXPIRED" && !expired\) \{[\s\S]{0,200}clearSessionExpiredWitness\(\)/);
+  assert.match(src, /if \(verdict === "live"\) \{[\s\S]{0,600}recordSessionLiveProof\(/);
   assert.match(src, /recordSweepAttempt\(\{ status: "success", result \}\);[\s\S]{0,300}clearSessionExpiredWitness\(\)/);
+  assert.equal(src.match(/await clearSessionExpiredWitness\(\)/g)?.length, 1, "only the good pass retires the witness (PR 230 review 5)");
 });

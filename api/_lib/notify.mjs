@@ -60,6 +60,12 @@ async function defaultKv(command, env = process.env) {
 export const notifySlotKey = (key) => `notify:${String(key).slice(0, 160)}`;
 const slotKey = notifySlotKey;
 
+// A slot whose page landed, when the caller asked for it to be marked
+// (pageNotify's deliveredTtlSeconds). An in-flight claim holds an ISO stamp.
+const DELIVERED_PREFIX = "delivered:";
+export const notifySlotDelivered = (value) =>
+  typeof value === "string" && value.startsWith(DELIVERED_PREFIX);
+
 /** "won" | "held" | "unavailable" */
 export async function claimNotifySlot(key, ttlSeconds = NOTIFY_TTL_SECONDS, {
   env = process.env,
@@ -91,10 +97,18 @@ export async function clearNotifySlot(key, { env = process.env, kv = defaultKv }
  * One critical page. -> { ok, via, skipped? }
  *   via "legacy": switch off, sent with notifySlack exactly as before
  *   via "notify": switch on, sent to NOTIFY_SLACK_CHANNEL
+ *
+ * deliveredTtlSeconds (opt-in, PR 230 review 5): the claim then lives only
+ * ttlSeconds (keep it short: it covers one in-flight send), and a landed
+ * page rewrites the slot to "delivered:<iso>" for deliveredTtlSeconds. A
+ * claim orphaned by a killed function, or by a failed send whose release
+ * DEL failed too, lapses in minutes and a later run retries, instead of
+ * holding the page off for the delivered lifetime.
  */
 export async function pageNotify(text, {
   key,
   ttlSeconds = NOTIFY_TTL_SECONDS,
+  deliveredTtlSeconds = null,
   env = process.env,
   kv = defaultKv,
   legacySend = notifySlack,
@@ -111,5 +125,11 @@ export async function pageNotify(text, {
   }
   const ok = await notifySend(text, { channel, botTokenFirst: true }).catch(() => false);
   if (!ok && key) await clearNotifySlot(key, { env, kv });
+  if (ok && key && deliveredTtlSeconds) {
+    await Promise.resolve(kv(
+      ["SET", slotKey(key), `${DELIVERED_PREFIX}${new Date().toISOString()}`, "EX", String(deliveredTtlSeconds)],
+      env,
+    )).catch(() => null);
+  }
   return { ok: Boolean(ok), via: "notify", key };
 }

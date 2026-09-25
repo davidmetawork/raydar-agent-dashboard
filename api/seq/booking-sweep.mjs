@@ -26,8 +26,9 @@ import {
   sweepStaleness,
   SWEEP_STALE_AFTER_MS,
   shouldAlert,
-  isSessionActuallyExpired,
+  sessionProbeVerdict,
   recordSessionExpiredWitness,
+  recordSessionLiveProof,
   clearSessionExpiredWitness,
   kvConfigured,
   calendlyConfigured,
@@ -117,7 +118,9 @@ async function warnOnCronRejection(cron) {
 export async function handleBookingSweep(req, res, {
   sweep = runBookingSweep,
   staleness: readStaleness = sweepStaleness,
-  confirmExpired = isSessionActuallyExpired,
+  // "expired" | "live" | "unknown" (a boolean from a test stub means
+  // expired / live).
+  confirmExpired = sessionProbeVerdict,
   clock = Date.now,
 } = {}) {
   if (cors(req, res)) return;
@@ -286,11 +289,27 @@ export async function handleBookingSweep(req, res, {
     // Never report (or alert) an expiry on the strength of one 401: Paraform
     // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
     // cries wolf about the cookie and the real alarm stops being believed.
-    const expired = e?.code === "AUTH_EXPIRED" && (await confirmExpired());
-    if (e?.code === "AUTH_EXPIRED" && !expired) {
-      // Throttling on a session verified live: any old witness is wrong now.
-      await clearSessionExpiredWitness().catch(() => {});
+    let verdict = null;
+    if (e?.code === "AUTH_EXPIRED") {
+      verdict = await confirmExpired();
+      if (verdict === true) verdict = "expired";
+      else if (verdict === false) verdict = "live";
+    }
+    const expired = verdict === "expired";
+    if (verdict === "live") {
+      // Throttling on a session a probe verified live. The witness stays: only
+      // a good pass retires it (PR 230 review 5). Deleting it here let the
+      // next still-failing pass re-page the incident the tile already paged
+      // (after a recapture, or mid-outage on one lucky probe). The live proof
+      // moves the stale page to the 3 h-from-recapture rule instead.
+      await recordSessionLiveProof(new Date(clock()).toISOString()).catch(() => {});
       return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform rate-limited this pass; session verified live. Next run retries.", ranAt: new Date().toISOString() });
+    }
+    if (verdict !== null && !expired) {
+      // The confirm probe got no 401 and no 200 (network error, timeout,
+      // 5xx/429, a 403 trpc error): it proves nothing about the cookie, so
+      // any witness is left exactly as it is.
+      return res.status(200).json({ ok: false, error: "throttled", detail: "Paraform did not answer the session probe; session state unknown. Next run retries.", ranAt: new Date().toISOString() });
     }
     if (expired) {
       // The paraform-session tile reads this witness from KV each tick and

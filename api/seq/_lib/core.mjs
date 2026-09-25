@@ -708,16 +708,28 @@ export async function withThrottleRetry(fn, {
 /** A cheap read retried with growing backoff. One probe is not enough: it races
  *  the very burst it is trying to rule out. */
 export async function isSessionActuallyExpired({ probes = 3 } = {}) {
+  return (await sessionProbeVerdict({ probes })) === "expired";
+}
+
+/**
+ * The same spaced probes, tri-state (PR 230 review 5): "expired" (every probe
+ * got a 401), "live" (a probe got a clean 200), or "unknown" (a network
+ * error, a timeout, a 5xx/429, or a trpc error body such as a 403: none of
+ * them says anything about the cookie). isSessionActuallyExpired folds
+ * "unknown" into "not expired", which is right for the classifier; the
+ * booking sweep's witness must not treat it as proof of a live session.
+ */
+export async function sessionProbeVerdict({ probes = 3 } = {}) {
   // Deliberately trpcGetRaw: the classifier calls THIS to decide, so going back
   // through it would recurse forever. Raw also means one probe, one verdict.
   for (let i = 0; i < probes; i++) {
-    try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1); return false; }
+    try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1); return "live"; }
     catch (e) {
-      if (e?.code !== "PARAFORM_THROTTLED") return false; // reached it, so auth is fine
+      if (e?.code !== "PARAFORM_THROTTLED") return "unknown"; // not a 401: proves nothing about auth
       await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
     }
   }
-  return true;
+  return "expired";
 }
 
 // ─── Membership reads ────────────────────────────────────────────────────────

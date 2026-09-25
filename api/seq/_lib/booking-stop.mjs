@@ -40,7 +40,7 @@ import {
   trpcGet, trpcPost, campaignLeads, BOOKED_STATUSES, sleep,
   // These three moved into core.mjs so the launcher's dedup and
   // enrolled-elsewhere scans get the same protection this module needed.
-  withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads, campaignLeadBySearch,
+  withThrottleRetry, isSessionActuallyExpired, sessionProbeVerdict, completeCampaignLeads, campaignLeadBySearch,
 } from "./core.mjs";
 import {
   fetchRaydarBookingIndex,
@@ -75,7 +75,7 @@ import {
   bookingMembershipSnapshotHealth,
   loadPublishedBookingMembershipSnapshot,
 } from "./booking-membership-snapshot.mjs";
-export { withThrottleRetry, isSessionActuallyExpired, completeCampaignLeads };
+export { withThrottleRetry, isSessionActuallyExpired, sessionProbeVerdict, completeCampaignLeads };
 export {
   BOOKING_MEMBERSHIP_CURRENT_SCHEMA,
   BOOKING_MEMBERSHIP_SNAPSHOT_SCHEMA,
@@ -323,9 +323,10 @@ const SESSION_WITNESS_TTL_SECONDS = 6 * 3600;
 
 /**
  * Written only after isSessionActuallyExpired() proved the session dead with
- * spaced probes (never on one 401). Cleared by a successful pass, or when a
- * later AUTH_EXPIRED turns out to be throttling on a live session. The TTL
- * bounds a witness nobody clears (the sweep stops running).
+ * spaced probes (never on one 401). Cleared only by a successful pass: a
+ * later AUTH_EXPIRED that a probe finds live records a live proof beside it
+ * instead (PR 230 review 5). The TTL bounds a witness nobody clears (the
+ * sweep stops running).
  */
 export async function recordSessionExpiredWitness(now = Date.now()) {
   const at = new Date(now).toISOString();

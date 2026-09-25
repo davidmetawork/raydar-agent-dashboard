@@ -32,6 +32,11 @@ const store = new Map();
 const posts = [];
 let n8nState = { workflows: [], executions: {} , fail: false };
 let slackOk = true;
+// The session probe's one Paraform read, answered by this stand-in (never the
+// real host): a status number, "net" (the fetch throws), or null (no probe
+// expected: any request fails the test).
+let paraformProbe = null;
+const PARAFORM_PROBE_URL = "https://www.paraform.com/api/trpc/campaigns.getListOfCampaignsOptimized";
 const realFetch = globalThis.fetch;
 
 function redis(command) {
@@ -59,6 +64,12 @@ globalThis.fetch = async (input, init = {}) => {
     const body = JSON.parse(init.body);
     if (slackOk) posts.push({ channel: body.channel, text: body.text });
     return json({ ok: slackOk });
+  }
+  if (url.startsWith(PARAFORM_PROBE_URL) && paraformProbe !== null) {
+    if (paraformProbe === "net") throw new TypeError("fetch failed");
+    if (paraformProbe === 200) return json({ result: { data: { json: [] } } });
+    if (paraformProbe === 403) return json({ error: { json: { message: "FORBIDDEN" } } }, 403);
+    return new Response("<html>busy</html>", { status: paraformProbe });
   }
   if (url.startsWith(`${N8N_URL}/api/v1/workflows`)) {
     if (n8nState.fail) return json({ message: "down" }, 503);
@@ -97,6 +108,7 @@ function reset() {
   store.clear();
   posts.length = 0;
   slackOk = true;
+  paraformProbe = null;
   switchOff();
 }
 
@@ -153,7 +165,7 @@ test("switch on: a witnessed expiry leaves the stale page to the paraform-sessio
   assert.deepEqual(posts, [], "the tile pages this one; the sweep posts nothing");
 });
 
-test("a confirmed AUTH_EXPIRED writes the witness; a live-session throttle clears it", async () => {
+test("a confirmed AUTH_EXPIRED writes the witness; a live-session throttle keeps it and records a live proof", async () => {
   reset();
   switchOn();
   const res = fakeRes();
@@ -173,7 +185,10 @@ test("a confirmed AUTH_EXPIRED writes the witness; a live-session throttle clear
     confirmExpired: async () => false,
   });
   assert.equal(throttled.body.error, "throttled");
-  assert.equal(store.has(K.sessionExpiredWitness), false, "witness cleared");
+  // Review 5: only a good pass retires the witness; a live verdict moves the
+  // stale page to the 3 h-from-recapture rule through the proof.
+  assert.equal(store.has(K.sessionExpiredWitness), true, "witness kept");
+  assert.ok(store.has(K.sessionLiveProof), "live proof recorded");
 });
 
 test("switch off: a confirmed expiry still posts the legacy line to the legacy channel", async () => {
@@ -603,4 +618,74 @@ test("R3: switch off, seq health does not cap the live read (a slow healthy read
   });
   assert.equal(res.body.paraform, "live");
   assert.equal(res.body.ok, true);
+});
+
+// ── review 5 refuters: the sweep's own confirm probe never retires the witness
+// The handler's default confirm (the real tri-state session probe) runs
+// against the offline Paraform stand-in above.
+for (const [label, answer] of [["a 503", 503], ["a 429", 429], ["a 403 trpc error", 403], ["a network error", "net"]]) {
+  test(`R5-D: mid-outage, a confirm probe that gets ${label} keeps the witness, so the next pass does not page 'sweep stale'`, async () => {
+    reset();
+    switchOn();
+    await handleBookingSweep(cronReq(), fakeRes(), {
+      staleness: async () => ({ stale: false }),
+      sweep: async () => { throw authExpired(); },
+      confirmExpired: async () => true,
+    });
+    assert.ok(store.has(K.sessionExpiredWitness));
+    paraformProbe = answer;
+    const res = fakeRes();
+    await handleBookingSweep(cronReq(), res, { sweep: async () => { throw authExpired(); } });
+    assert.equal(res.body.error, "throttled");
+    assert.ok(store.has(K.sessionExpiredWitness), "an unknown probe proves nothing: the witness stands");
+    assert.equal(store.has(K.sessionLiveProof), false, "and it is no live proof");
+    paraformProbe = null;
+    await tick();
+    await handleBookingSweep(cronReq(), fakeRes(), {
+      sweep: async () => { throw authExpired(); },
+      confirmExpired: async () => true,
+    });
+    assert.equal(stalePosts().length, 0, `the dead cookie was paged twice: ${JSON.stringify(stalePosts())}`);
+    assert.deepEqual(posts, [], "the tile's page is the one page");
+  });
+}
+
+test("R5-C: after a recapture, a burst AUTH_EXPIRED whose confirm probe reaches Paraform does not re-page 'sweep stale'", async () => {
+  reset();
+  switchOn();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    staleness: async () => ({ stale: false }),
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => { throw authExpired(); },
+    confirmExpired: async () => true,
+  });
+  await tick();
+  await handleSequenceHealth(healthReq(), fakeRes(), {
+    healthReader: async () => ({ paraform: "live", sequenceCount: 3, checkedAt: new Date().toISOString() }),
+  });
+  await tick();
+  // The backlog burst: the classifier escalates to AUTH_EXPIRED, the
+  // handler's own probe then reaches Paraform (200).
+  paraformProbe = 200;
+  const res = fakeRes();
+  await handleBookingSweep(cronReq(), res, { sweep: async () => { throw authExpired(); } });
+  assert.equal(res.body.error, "throttled");
+  assert.ok(store.has(K.sessionExpiredWitness), "only a good pass retires the witness");
+  assert.ok(store.has(K.sessionLiveProof));
+  paraformProbe = null;
+  await tick();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => ({ ok: false, error: "membership_snapshot_unavailable", pauseErrors: [], decisions: [] }),
+    confirmExpired: async () => { throw new Error("must not confirm"); },
+  });
+  await tick();
+  await handleBookingSweep(cronReq(), fakeRes(), {
+    sweep: async () => ({ ok: true, apply: true, pauseErrors: [], decisions: [], paused: 0 }),
+    confirmExpired: async () => { throw new Error("no"); },
+  });
+  assert.equal(stalePosts().length, 0, `recovery re-paged the dead-cookie incident: ${JSON.stringify(stalePosts())}`);
+  assert.deepEqual(posts, [], "the tile's page was the one page");
 });

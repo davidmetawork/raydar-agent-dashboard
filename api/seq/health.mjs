@@ -181,9 +181,10 @@ export async function handleSequenceHealth(req, res, {
     bookingStop = {
       currentBookingStopPolicy,
       // Set only while the booking sweep's CONFIRMED Paraform-session expiry
-      // stands (spaced probes, not one 401; cleared by a good pass or a
-      // live-session throttle). System Health's paraform-session tile reads
-      // it once the #notify switch is on. Additive (2026-09-25).
+      // stands (spaced probes, not one 401; cleared only by a good pass, a
+      // live-session throttle records a live proof instead). System Health's
+      // paraform-session tile reads it once the #notify switch is on.
+      // Additive (2026-09-25).
       sessionExpiredConfirmedAt: s.sessionExpiredConfirmedAt ?? null,
       // The first live read seen AFTER that witness (recapture): the tile
       // yields to it (set below on this tick's read, or from KV).
