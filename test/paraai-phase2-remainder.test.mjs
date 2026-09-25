@@ -1314,7 +1314,10 @@ test("worker exposes runner-only aggregate remainder controls without caller sel
   assert.match(source, /caller_parameters_forbidden/);
   assert.match(source, /Object\.keys\(body\)/);
   assert.match(source, /remainder\?\.ok === false/);
-  assert.match(source, /phase2-remainder-controller-degraded/);
+  // A degraded remainder controller is reported in the worker response's
+  // `degraded` flag; since the 2026-09-25 one-channel rule it no longer takes
+  // an alert slot or posts to Slack ("normal queue processing continued").
+  assert.doesNotMatch(source, /phase2-remainder-controller-degraded/);
   assert.doesNotMatch(
     source,
     /phase2-remainder-arm[\s\S]{0,500}body\.botIds/u,

@@ -1,8 +1,8 @@
-// The 2-minute health tick: probe everything, persist, alert on transitions.
+// The 2-minute health tick: probe everything, persist, page tier-1 DOWN transitions.
 // Cron-authed. Also runnable by hand with the CRON_SECRET bearer for drills.
 import { cronAuth } from "../seq/_lib/core.mjs";
 import { runTick } from "./_lib/engine.mjs";
-import { alertOnTransitions, repageStillDown } from "./_lib/alert.mjs";
+import { alertOnTransitions } from "./_lib/alert.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -16,8 +16,9 @@ export default async function handler(req, res) {
     const { state, transitions, kvOk } = await runTick({});
     let alerts = [];
     if (process.env.HEALTH_ALERTS_ENABLED === "true") {
+      // DOWN pages only: no recovery notice and no hourly STILL DOWN re-page
+      // (one post per incident, David 2026-09-24/25).
       alerts = await alertOnTransitions(transitions, state);
-      alerts = alerts.concat(await repageStillDown(state));
     }
     return res.status(200).json({
       ok: true,

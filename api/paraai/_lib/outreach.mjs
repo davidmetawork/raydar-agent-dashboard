@@ -77,7 +77,6 @@ import {
   recordContactCapability,
   recordOutreachException,
   releaseOutreachLock,
-  releaseOutreachExceptionAlert,
   releaseOutreachPollSlot,
   resolveOutreachException,
   saveOutreachState,
@@ -1284,7 +1283,10 @@ export async function processMatchRequest(
           "candidate has replied; automatic match send is blocked (intent gate disabled)",
         );
       }
-      // A six-month hold that has run out resumes sending — but never silently.
+      // A six-month hold that has run out resumes sending. The lapse is
+      // journalled on the candidate's outreach state (never silent there),
+      // but it is a routine recruiting FYI, so it is no longer posted to
+      // Slack (2026-09-25, one-channel rule).
       const lapsed = lapsedOffMarketHold(state);
       if (lapsed) {
         state = await saveOutreachState(appendOutreachJournal({
@@ -1292,9 +1294,6 @@ export async function processMatchRequest(
           offMarket: { ...lapsed, lapseNotifiedAt: new Date().toISOString() },
         }, "off_market_hold_lapsed", { requestId: request.id }), state.revision)
           .catch(() => state);
-        await notifySlack(
-          `⏰ Para AI outreach: ${displayName(state.candidateName) || "a candidate"}'s off-market hold has lapsed after ${OFF_MARKET_HOLD_DAYS} days. New roles auto-send again, starting with ${clean(request.roleName) || "this role"} @ ${clean(request.companyName) || "this company"}.`,
-        ).catch(() => false);
       }
     }
 
@@ -2369,7 +2368,6 @@ export async function sweepStaleOutreachExceptions({
   states = [],
   exceptions = [],
   claimImpl = claimOutreachExceptionAlert,
-  notifyImpl = notifySlack,
   resolveImpl = resolveOutreachException,
 } = {}) {
   const delivered = new Set();
@@ -2398,10 +2396,9 @@ export async function sweepStaleOutreachExceptions({
         ttlSeconds: EXPIRY_ALERT_TTL_SECONDS,
       }).catch(() => false);
       if (!claimed) continue;
-      await notifyImpl(expiredUnsentCopy({
-        ...request,
-        candidateName: row.candidateName || request.candidateName,
-      })).catch(() => false);
+      // Resolved as expired_unsent and returned in `expiredUnsent`, but not
+      // posted: a lost match is a per-candidate recruiting item that stays on
+      // the outreach exceptions ledger (2026-09-25, one-channel rule).
       await resolveImpl(requestId, { resolution: "expired_unsent" }).catch(() => null);
       expiredUnsent.push(requestId);
       continue;
@@ -2530,14 +2527,10 @@ export async function escalateNearExpiry(request, code, { now = Date.now() } = {
     { ttlSeconds: EXPIRY_ALERT_TTL_SECONDS },
   ).catch(() => false);
   if (!claimed) return null;
-  const notified = await notifySlack(
-    expiryEscalationCopy(request, code, escalation),
-  ).catch(() => false);
-  if (!notified) {
-    await releaseOutreachExceptionAlert(`${request.id}:expiry-${escalation.rung}`)
-      .catch(() => {});
-  }
-  return { ...escalation, notified };
+  // The rung is claimed (so it is recorded once) but no longer posted to
+  // Slack (2026-09-25, one-channel rule): a blocked candidate's expiry is a
+  // recruiting work item on the outreach exceptions ledger, not a breakage.
+  return { ...escalation, notified: false };
 }
 
 export async function handleOutreachFailure(
@@ -2551,16 +2544,11 @@ export async function handleOutreachFailure(
   const code = clean(error?.code || "OUTREACH_FAILED");
   // One observed Gmail 429 stands the whole lane down (see armGmailBackoff).
   // Alert at most once per 6h so the stand-down is visible without spamming.
+  // The stand-down is self-healing ("requests stay queued; nothing is lost"),
+  // so it is not posted to Slack (2026-09-25, one-channel rule). A mailbox
+  // that stays locked out is the email-inbox-david health tile's to page.
   if (code === "GMAIL_REQUEST_FAILED" && Number(error?.status) === 429) {
-    const until = await armGmailBackoff().catch(() => null);
-    if (until) {
-      const claimed = await claimOutreachExceptionAlert("gmail-429-backoff", { ttlSeconds: 6 * 60 * 60 }).catch(() => false);
-      if (claimed) {
-        await notifySlack(
-          `Para AI outreach: Gmail answered 429 (per-user rate limit) — outreach is standing down until ${until} so the mailbox bucket can recover. Requests stay queued; nothing is lost.`,
-        ).catch(() => {});
-      }
-    }
+    await armGmailBackoff().catch(() => null);
   }
   const tracked = new Set([
     "AUTH_EXPIRED",
@@ -2596,9 +2584,8 @@ export async function handleOutreachFailure(
       retryable: RECOVERABLE_EXCEPTION_CODES.has(code),
     });
     const escalation = await escalateNearExpiry(request, code, { now });
-    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
-    if (!alertClaimed) return { ...record, escalation };
-    await notifySlack(heldAlertCopy(code, request, error)).catch(() => false);
+    // Recorded durably above; not posted (a held match is a recruiting
+    // decision on the Para AI tab, not a breakage; 2026-09-25).
     return { ...record, escalation };
   }
   if (code === "OUTREACH_NO_EMAIL") {
@@ -2610,18 +2597,11 @@ export async function handleOutreachFailure(
       retryable: true,
     });
     const escalation = await escalateNearExpiry(request, code, { now });
-    const alertClaimed = await claimOutreachExceptionAlert(request.id).catch(() => false);
-    if (!alertClaimed) return record;
-    const copy = missingEmailAlertCopy(request, error?.discovery);
-    // Slack-only by David's order (2026-08-18): the old Gmail fallback emailed
-    // the same contended mailbox this alert exists to protect. A failed Slack
-    // post releases the claim below, so delivery is retried next tick, and the
-    // blocked candidate stays durable in KV either way.
-    const notified = await notifySlack(copy.slack).catch(() => false);
-    if (!notified) {
-      await releaseOutreachExceptionAlert(request.id).catch(() => {});
-    }
-    return { ...record, notified, escalation };
+    // The blocked candidate stays durable in KV (recordOutreachException
+    // above) and on the Para AI tab. It is no longer posted to Slack
+    // (2026-09-25, one-channel rule): a missing email is a per-candidate
+    // recruiting item, not a system breakage.
+    return { ...record, notified: false, escalation };
   }
   const record = await recordOutreachException({
     request,

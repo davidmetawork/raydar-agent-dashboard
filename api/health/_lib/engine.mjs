@@ -6,7 +6,8 @@
 //  - One slow probe must never sink the tick (allSettled + per-probe timeout).
 //  - A probe we cannot run is UNKNOWN, never OK. Silence is not success.
 //  - Entering UNKNOWN or DOWN needs two consecutive ticks (transient network
-//    flaps are constant); leaving them is immediate.
+//    flaps are constant); leaving them is immediate. HEALTH_DOWN_TICKS_OVERRIDES
+//    can lengthen the DOWN debounce for named tiles (see downTicksOverrides).
 import { CATALOG, byId } from "./catalog.mjs";
 import { EVALUATORS } from "./evaluators.mjs";
 import { hGet, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
@@ -18,6 +19,66 @@ const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
 /** States that must be seen twice in a row before they stick. */
 const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
+/** Ticks a debounced state must be seen in a row, unless overridden below. */
+export const DEFAULT_DEBOUNCE_TICKS = 2;
+const MAX_DOWN_TICKS = 60; // two hours at 2-minute ticks
+
+/**
+ * Per-tile DOWN debounce, read from HEALTH_DOWN_TICKS_OVERRIDES (JSON, e.g.
+ * {"booking-door":8}). Unset, empty or unparseable means every tile keeps the
+ * two-tick default, exactly as before. An override can only LENGTHEN the
+ * debounce (2..60 ticks), never shorten it, and it applies to entering DOWN
+ * only: UNKNOWN keeps two ticks.
+ *
+ * Why it exists: on 2026-09-23 the booking-door tile paged five times for
+ * eight-minute admission closures that fixed themselves. Eight ticks means the
+ * door must read closed for about fifteen minutes before it pages #notify.
+ */
+export function downTicksOverrides(env = process.env) {
+  const raw = String(env?.HEALTH_DOWN_TICKS_OVERRIDES || "").trim();
+  if (!raw) return {};
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return {}; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const out = {};
+  for (const [id, value] of Object.entries(parsed)) {
+    const ticks = Number(value);
+    if (Number.isInteger(ticks) && ticks >= DEFAULT_DEBOUNCE_TICKS && ticks <= MAX_DOWN_TICKS) {
+      out[id] = ticks;
+    }
+  }
+  return out;
+}
+
+/** How many consecutive ticks `state` needs before tile `id` enters it. */
+export function debounceTicksFor(id, state, overrides = {}) {
+  if (state === "DOWN" && overrides[id]) return overrides[id];
+  return DEFAULT_DEBOUNCE_TICKS;
+}
+
+/**
+ * The debounce step for one tile. Returns the HELD tile record (the tile keeps
+ * its previous state and counts the pending one) or null when the raw state
+ * should be applied now. A first observation, a repeat of the current state
+ * and a non-debounced state (OK, DEGRADED) are always applied immediately;
+ * leaving DOWN or UNKNOWN is immediate.
+ */
+export function holdForDebounce(before, raw, needTicks, nowIso) {
+  const state = raw?.state;
+  if (!DEBOUNCED.has(state) || !before?.state || before.state === state) return null;
+  const pendingCount = before.pending === state
+    ? Math.max(1, Number(before.pendingCount) || 1) + 1
+    : 1;
+  if (pendingCount >= needTicks) return null;
+  return {
+    ...before,
+    pending: state,
+    pendingCount,
+    pendingReason: raw.reason || null,
+    metrics: raw.metrics || before.metrics || null,
+    lastCheckedAt: nowIso,
+  };
+}
 
 export const worst = (states) =>
   states.reduce((acc, s) => (STATE_ORDER[s] > STATE_ORDER[acc] ? s : acc), "OK");
@@ -241,6 +302,7 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 7. Debounce, transitions, incidents
+  const downOverrides = downTicksOverrides();
   const tiles = {};
   const transitions = [];
   const incidentOps = [];
@@ -254,19 +316,14 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     const raw = results[check.id] || { state: "UNKNOWN", reason: "not evaluated" };
     let state = raw.state;
-    // Two consecutive ticks required to ENTER a debounced state.
-    if (DEBOUNCED.has(state) && before.state && before.state !== state) {
-      const pendingSame = before.pending === state;
-      if (!pendingSame) {
-        tiles[check.id] = {
-          ...before,
-          pending: state,
-          pendingReason: raw.reason || null,
-          metrics: raw.metrics || before.metrics || null,
-          lastCheckedAt: nowIso,
-        };
-        continue;
-      }
+    // Consecutive ticks required to ENTER a debounced state: two by default,
+    // more for a tile named in HEALTH_DOWN_TICKS_OVERRIDES (DOWN only).
+    const held = holdForDebounce(
+      before, raw, debounceTicksFor(check.id, state, downOverrides), nowIso,
+    );
+    if (held) {
+      tiles[check.id] = held;
+      continue;
     }
     const changed = before.state !== state;
     // An incident spans one continuous departure from OK: it opens on the

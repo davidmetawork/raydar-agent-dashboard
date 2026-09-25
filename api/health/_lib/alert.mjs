@@ -61,57 +61,34 @@ export async function sendSlack(text, { channel: channelOverride = "" } = {}) {
   return false;
 }
 
-const dur = (fromIso) => {
-  const ms = Date.now() - Date.parse(fromIso || "");
-  if (!Number.isFinite(ms) || ms < 0) return "unknown";
-  const m = Math.round(ms / 60000);
-  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
-};
-
 /**
- * Fires pages for tier-1 DOWN transitions and recovery notices for any tile
- * leaving DOWN. Everything else is digest-only, by policy.
+ * Pages tier-1 DOWN transitions. Nothing else posts, by policy (David,
+ * 2026-09-24/25: one critical-only #notify channel, one post per incident).
+ *
+ * Deliberately absent, and pinned by test/health-alert-one-post.test.mjs:
+ *  - no RECOVERED notice: a recovery is a success, and success posts are
+ *    removed rather than moved. It was also the unthrottled half: it fired on
+ *    every DOWN exit, even for DOWN episodes whose page the flap slot had
+ *    suppressed (about 11 recoveries against 5 pages on 2026-09-23).
+ *  - no hourly STILL DOWN re-page: a problem posts once, when it starts. The
+ *    tile stays red on monitor.raydar.xyz/health until it clears.
+ *
+ * The DOWN page keeps its 1h NX slot per tile, so a tile flapping in and out
+ * of DOWN inside an hour still posts once.
  */
 export async function alertOnTransitions(transitions, state) {
   const sent = [];
   for (const t of transitions) {
     const tile = state.tiles[t.id] || {};
     if (tile.ackUntil) continue; // acknowledged: never alert
-
-    if (t.to === "DOWN" && t.tier === 1) {
-      const won = await hSetNx(K.alertSent(t.id, "DOWN"), { at: t.at }, RE_PAGE_SECONDS);
-      if (won === "OK" || won === true) {
-        await sendSlack(
-          `🔴 DOWN: ${t.name} — ${t.reason || "no reason given"}\n`
-          + `since ${t.at} · https://monitor.raydar.xyz/health`,
-        );
-        sent.push({ id: t.id, kind: "page" });
-      }
-    } else if (t.from === "DOWN" && t.to !== "DOWN") {
-      const wasPaged = byTier1(t);
-      if (wasPaged) {
-        await sendSlack(`🟢 RECOVERED: ${t.name} after ${dur(t.sinceLast)} — now ${t.to}`);
-        sent.push({ id: t.id, kind: "recovery" });
-      }
-    }
-  }
-  return sent;
-}
-
-const byTier1 = (t) => t.tier === 1;
-
-/** Re-page anything still DOWN whose dedupe marker has aged out. */
-export async function repageStillDown(state) {
-  const sent = [];
-  for (const [id, tile] of Object.entries(state.tiles)) {
-    if (tile.state !== "DOWN" || tile.tier !== 1 || tile.ackUntil) continue;
-    const won = await hSetNx(K.alertSent(id, "DOWN"), { at: new Date().toISOString() }, RE_PAGE_SECONDS);
+    if (t.to !== "DOWN" || t.tier !== 1) continue;
+    const won = await hSetNx(K.alertSent(t.id, "DOWN"), { at: t.at }, RE_PAGE_SECONDS);
     if (won === "OK" || won === true) {
       await sendSlack(
-        `🔴 STILL DOWN (${dur(tile.since)}): ${tile.name} — ${tile.reason || ""}\n`
-        + `https://monitor.raydar.xyz/health`,
+        `🔴 DOWN: ${t.name} — ${t.reason || "no reason given"}\n`
+        + `since ${t.at} · https://monitor.raydar.xyz/health`,
       );
-      sent.push({ id, kind: "repage" });
+      sent.push({ id: t.id, kind: "page" });
     }
   }
   return sent;

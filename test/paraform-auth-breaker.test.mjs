@@ -426,7 +426,7 @@ test("after the daily slot lapses, one still-down reminder posts with day N", as
   assert.equal(notify.messages.length, 2);
 });
 
-test("going green clears the flag and slots and posts the resumed message", async () => {
+test("going green clears the flag and slots and posts nothing (no recovery notes)", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
   await openReadCircuit(kv, notify);
@@ -435,11 +435,13 @@ test("going green clears the flag and slots and posts the resumed message", asyn
   assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
   assert.equal(kv.store.has(AUTH_OPEN_ALERT_KEY), false);
   assert.equal(kv.store.has(AUTH_REMINDER_ALERT_KEY), false);
-  assert.match(notify.messages.at(-1), /cookie healthy — resumed/);
+  assert.equal(resumed.alertDelivered, false);
+  assert.equal(notify.messages.filter((text) => /resumed/.test(text)).length, 0);
+  assert.equal(notify.messages.length, 1, "only the OPEN page");
   // A cleared circuit that breaks again alerts again.
   const reopened = await openReadCircuit(kv, notify, NOW + 2 * 3600_000);
   assert.equal(reopened.opened, true);
-  assert.equal(notify.messages.length, 3);
+  assert.equal(notify.messages.length, 2);
 });
 
 test("a mutation 401 opens the circuit even while all read probes are green", async () => {
@@ -501,7 +503,7 @@ test("only a later successful mutation clears the write-auth latch", async () =>
   assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
 });
 
-test("overlapping green ticks post exactly one resumed message", async () => {
+test("overlapping green ticks close the episode exactly once and post nothing", async () => {
   const kv = fakeKv();
   const notify = notifyRecorder(true);
   await openReadCircuit(kv, notify);
@@ -523,7 +525,7 @@ test("overlapping green ticks post exactly one resumed message", async () => {
     ),
   ]);
   assert.equal([first, second].filter((tick) => tick.resumed).length, 1);
-  assert.equal(notify.messages.filter((text) => /resumed/.test(text)).length, 1);
+  assert.equal(notify.messages.filter((text) => /resumed/.test(text)).length, 0);
   assert.equal(kv.store.has(AUTH_FLAG_KEY), false);
 });
 

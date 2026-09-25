@@ -12,9 +12,9 @@
 //   PARAAI_REPLY_SUBMIT_APPROVED    the yes path
 //   PARAAI_REPLY_PASS_APPROVED      the no path, one phase behind submit
 //   PARAAI_REPLY_OFFMARKET_APPROVED the candidate-level off-market write
-import { notifySlack, fetchCall } from "./core.mjs";
+import { fetchCall } from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
-import { takeAlertSlot, listJobs } from "./store.mjs";
+import { listJobs } from "./store.mjs";
 import {
   listOutreachStates,
   getReplyWatermark,
@@ -329,16 +329,11 @@ export async function replanReplyRecord(record, { requests, jobs, config = reply
   return next;
 }
 
-async function alertReview(record, plan) {
-  const key = `reply-review:${record.replyId}`;
-  if (!(await takeAlertSlot(key, 24 * 3600).catch(() => false))) return false;
-  const who = record.candidateName || "A candidate";
-  const roles = (plan.requestIds || []).length;
-  return notifySlack(
-    `⚠️ Para AI reply needs a decision: ${who} replied and the classifier could not act `
-    + `(${plan.reason}). ${roles} pending request${roles === 1 ? "" : "s"}. `
-    + `Review: https://monitor.raydar.xyz/paraai`,
-  ).catch(() => false);
+// A reply that needs a decision is a per-candidate review item on the Para AI
+// tab. It is no longer posted to Slack (2026-09-25, one-channel rule); the
+// record's needs_review status is the signal.
+async function alertReview() {
+  return false;
 }
 
 export async function runReplyTick({ config = replyConfig(), now = Date.now(), fetchImpl = fetch } = {}) {

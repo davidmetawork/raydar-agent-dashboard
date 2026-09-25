@@ -637,7 +637,7 @@ test("the recorded error names the cause instead of a DOMException number", asyn
 // Webhook behaviour
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("invitee.canceled records and alerts but NEVER unpauses", async () => {
+test("invitee.canceled records, posts nothing, and NEVER unpauses", async () => {
   let paused = 0;
   const alerts = [];
   const body = { event: "invitee.canceled", payload: { uri: "https://api.calendly.com/i/1", email: "x@example.com" } };
@@ -649,7 +649,7 @@ test("invitee.canceled records and alerts but NEVER unpauses", async () => {
   });
   assert.equal(res.status, 202);
   assert.equal(paused, 0, "cancellation must never touch the pause path");
-  assert.match(alerts.join(" "), /never auto-resumed/i);
+  assert.deepEqual(alerts, [], "a cancellation is an FYI: no Slack (2026-09-25 one-channel rule)");
 });
 
 test("invitee.created pauses via the booking path and reports counts only", async () => {

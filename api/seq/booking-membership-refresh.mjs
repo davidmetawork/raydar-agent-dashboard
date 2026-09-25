@@ -110,15 +110,12 @@ async function handleBookingMembershipRefresh(req, res) {
       // webhook→pause cycle after every immutable membership refresh.
       includePausedLead: includeConfiguredPauseCanary,
     });
+    // No Slack for a refresh that did not publish (2026-09-25, one-channel
+    // rule). One of its codes, membership_refresh_checkpointed, is the normal
+    // resumable checkpoint, and it posted a :rotating_light: about every 40
+    // minutes. A snapshot that really goes stale is the booking sweep's to
+    // report (its stale-sweep page); the attempt record below keeps the code.
     await recordAttempt(result.ok ? "success" : "failure", { result });
-    if (!result.ok && (await shouldAlert(
-      `membership-refresh-${result.error}`,
-      3600,
-    ))) {
-      await notifySlack(
-        `:rotating_light: Booking membership refresh did not publish a generation (${String(result.error || "unknown").slice(0, 100)}). The sweep will fail closed when the current immutable snapshot reaches 60 minutes old.`,
-      ).catch(() => {});
-    }
     return res.status(200).json({
       ok: result.ok,
       complete: result.complete,
@@ -143,12 +140,8 @@ async function handleBookingMembershipRefresh(req, res) {
     const code = String(
       error?.code || error?.message || "membership_refresh_error",
     ).slice(0, 120);
+    // Recorded, not posted: the sweep's stale page is the persistent signal.
     await recordAttempt("failure", { error: code }).catch(() => {});
-    if (await shouldAlert(`membership-refresh-${code}`, 3600)) {
-      await notifySlack(
-        `:rotating_light: Booking membership refresh failed before publication (${code}). No incomplete generation was made current.`,
-      ).catch(() => {});
-    }
     return res.status(200).json({
       ok: false,
       complete: false,

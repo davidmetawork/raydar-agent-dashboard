@@ -24,9 +24,9 @@
 //   sets the flag (fail open). The same correction binds future consumers:
 //   when the flag endpoint (GET /api/ops/paraform-auth) is unreachable, a
 //   lane MUST fail OPEN to its normal per-lane behavior.
-// - Exactly one Slack alert when the circuit opens, at most one daily
-//   "still down (day N)" reminder, and one "cookie healthy — resumed" post
-//   when the probe goes green. The Para AI lane is known to have no Slack
+// - Exactly one Slack alert when the circuit opens and at most one daily
+//   "still down (day N)" reminder. Going green posts nothing (the "cookie
+//   healthy — resumed" post was removed 2026-09-25: no recovery notes). The Para AI lane is known to have no Slack
 //   token configured in production; delivery is therefore recorded on the
 //   flag and surfaced by the ops endpoint instead of being assumed.
 // - The probe consumes the shared cookie through the existing core.mjs
@@ -417,14 +417,14 @@ export async function runAuthProbeTick(
     await kvImpl(["DEL", AUTH_REMINDER_ALERT_KEY]);
     const claimed = Number(await kvImpl(["DEL", AUTH_FLAG_KEY])) === 1;
     if (!claimed) return { status: "healthy", down: false, resumed: false };
-    const delivered = await notifyImpl(
-      `✅ Paraform cookie healthy — resumed (auth circuit closed; was down since ${existing.since || "unknown"}). Observe-only: no lane was held by the flag.`,
-    ).catch(() => false);
+    // Closing the circuit posts nothing (2026-09-25, one-channel rule: no
+    // "recovered" notes). `resumed: true` still marks the one tick that
+    // closed the episode, and GET /api/ops/paraform-auth shows the state.
     return {
       status: "healthy",
       down: false,
       resumed: true,
-      alertDelivered: delivered === true,
+      alertDelivered: false,
     };
   }
 

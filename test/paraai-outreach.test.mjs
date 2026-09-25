@@ -1392,12 +1392,13 @@ test("a lost match alarms once, and an exception never outlives its request", as
     notifyImpl: async (text) => { notices.push(text); return true; },
     resolveImpl: async (id, options) => { resolved.push([id, options.resolution]); return null; },
   });
-  // Loud only for the one that cost a placement: asked for, never emailed, expired.
+  // The one that cost a placement (asked for, never emailed, expired) is
+  // claimed once and resolved as expired_unsent, but no longer posted to
+  // Slack (2026-09-25 one-channel rule): it is a per-candidate recruiting
+  // item on the exceptions ledger, and Slack must never carry candidate names.
   assert.deepEqual(sweep.expiredUnsent, ["request-expired"]);
   assert.deepEqual(claims, ["request-expired:expired-unsent"]);
-  assert.match(notices[0], /EXPIRED UNSENT/);
-  assert.match(notices[0], /Dan Example/);
-  assert.equal(notices.length, 1, "resolved-elsewhere exceptions must never page a human");
+  assert.deepEqual(notices, [], "no expired-unsent or resolved-elsewhere exception pages a human");
   // Silent for everything already answered another way. A pending request is still
   // real work and an absent one is ambiguous, so neither is touched.
   assert.deepEqual(sweep.closed, [
