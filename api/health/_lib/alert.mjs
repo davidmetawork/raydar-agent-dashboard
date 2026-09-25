@@ -11,15 +11,20 @@
 // Standing directive (docs/agent-memory/feedback_notify_only_actionable.md):
 // alert only when a human must act; routine self-healing stays silent.
 import { hGet, hSet, hSetNx, K } from "./kv.mjs";
+import { notifyChannel, notifySwitchOn } from "../../_lib/notify-switch.mjs";
 
 const RE_PAGE_SECONDS = 60 * 60;
 
 // `channel` overrides the alert channel (the daily digest passes its own, so
 // routine summaries never land in the critical-only #notify channel).
-export async function sendSlack(text, { channel: channelOverride = "" } = {}) {
+// `botTokenFirst` (the #notify switch, 2026-09-25): when a bot token and a
+// channel are both present, post by token to that channel even if
+// SLACK_WEBHOOK_URL is set. A webhook's channel is fixed by the webhook, so
+// without this an override would silently land wherever the webhook points.
+export async function sendSlack(text, { channel: channelOverride = "", botTokenFirst = false } = {}) {
   const token = process.env.SLACK_BOT_TOKEN || "";
   const channel = channelOverride || process.env.HEALTH_SLACK_CHANNEL || process.env.SLACK_CHANNEL_ID_ALERTS || "";
-  const webhook = process.env.SLACK_WEBHOOK_URL || "";
+  const webhook = botTokenFirst && token && channel ? "" : process.env.SLACK_WEBHOOK_URL || "";
   if (!webhook && !(token && channel)) {
     console.error("health_alert_undeliverable", { reason: "no slack config" });
     await hSet(K.lastDelivered, { at: new Date().toISOString(), failed: true, reason: "unconfigured" });
@@ -75,18 +80,24 @@ export async function sendSlack(text, { channel: channelOverride = "" } = {}) {
  *
  * The DOWN page keeps its 1h NX slot per tile, so a tile flapping in and out
  * of DOWN inside an hour still posts once.
+ *
+ * With the #notify switch on (api/_lib/notify-switch.mjs) the page goes to
+ * NOTIFY_SLACK_CHANNEL by bot token, the same channel as every other critical
+ * sender, whatever HEALTH_SLACK_CHANNEL says. Switch off: unchanged.
  */
-export async function alertOnTransitions(transitions, state) {
+export async function alertOnTransitions(transitions, state, { env = process.env, send = sendSlack } = {}) {
   const sent = [];
+  const route = notifySwitchOn(env) ? [{ channel: notifyChannel(env), botTokenFirst: true }] : [];
   for (const t of transitions) {
     const tile = state.tiles[t.id] || {};
     if (tile.ackUntil) continue; // acknowledged: never alert
     if (t.to !== "DOWN" || t.tier !== 1) continue;
     const won = await hSetNx(K.alertSent(t.id, "DOWN"), { at: t.at }, RE_PAGE_SECONDS);
     if (won === "OK" || won === true) {
-      await sendSlack(
+      await send(
         `🔴 DOWN: ${t.name} — ${t.reason || "no reason given"}\n`
         + `since ${t.at} · https://monitor.raydar.xyz/health`,
+        ...route,
       );
       sent.push({ id: t.id, kind: "page" });
     }

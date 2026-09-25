@@ -825,3 +825,26 @@ test("#notify switch on: the circuit still opens and latches, but System Health 
   assert.equal(dayLater.down, true);
   assert.deepEqual(notify.messages, [], "no OPEN and no daily reminder once the tile owns the session");
 });
+
+test("#notify switch on: a WRITE-layer 401 still pages #notify once (the tile cannot see it)", async () => {
+  const kv = fakeKv();
+  const notify = notifyRecorder(true);
+  const pages = [];
+  const pageImpl = async (text, options) => { pages.push({ text, options }); return { ok: true, via: "notify" }; };
+  const writeDown = async () => ({
+    healthy: false,
+    reason: "write_auth_expired",
+    evidence: { code: "AUTH_EXPIRED", mode: "write", lane: "paraai_outreach", stage: "digest_mutation" },
+  });
+  const deps = { probeImpl: writeDown, kvImpl: kv, notifyImpl: notify, healthOwnsSession: () => true, pageImpl };
+  const opened = await runAuthProbeTick({ now: NOW }, deps);
+  assert.equal(opened.opened, true);
+  assert.equal(opened.alertDelivered, true);
+  assert.equal(pages.length, 1);
+  assert.match(pages[0].text, /mutation returned 401/);
+  assert.doesNotMatch(pages[0].text, /daily reminder/, "no reminder follows once the switch is on");
+  const dayLater = await runAuthProbeTick({ now: NOW + 26 * 3600_000 }, deps);
+  assert.equal(dayLater.down, true);
+  assert.equal(pages.length, 1, "no daily reminder in #notify");
+  assert.deepEqual(notify.messages, [], "the legacy channel is untouched");
+});

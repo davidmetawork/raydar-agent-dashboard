@@ -316,6 +316,7 @@ const SWITCH_AWARE_LEGACY = [
 // Critical senders that page through pageNotify (one post per incident).
 const PAGE_NOTIFY_CALLERS = [
   "api/ops/n8n-watchdog.mjs",
+  "api/paraai/_lib/auth-probe.mjs",
   "api/paraai/_lib/outreach.mjs",
   "api/paraai/worker.mjs",
   "api/seq/booking-membership-refresh.mjs",

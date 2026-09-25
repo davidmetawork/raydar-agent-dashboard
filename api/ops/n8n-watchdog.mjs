@@ -44,17 +44,29 @@ export function criticalN8nWorkflows(env = process.env) {
   return new Set(configured.length ? configured : DEFAULT_CRITICAL_N8N_WORKFLOWS);
 }
 
+// The #notify slot for a failing critical workflow. Cleared when the workflow
+// recovers, so the TTL is only a leak guard: an outage that outlasts it posts
+// once more, a week later.
+export const N8N_FAILING_SLOT_TTL_SECONDS = 7 * 24 * 3600;
+
 /**
  * Which firing workflows to page now. Pure. -> { page, silent }
- * A workflow re-pages only when its streak grows past what was last paged;
- * with the switch on, a non-critical workflow never pages (`silent`, recorded
- * so it stays quiet).
+ * Switch off: a workflow re-pages only when its streak grows past what was
+ * last paged (alerted[]).
+ * Switch on: EVERY firing critical workflow is offered to pageNotify, whose
+ * per-workflow `n8n-failing:<id>` slot (cleared on recovery) is the once-per-
+ * incident dedupe. alerted[] is not consulted, so an outage already recorded
+ * there in legacy mode still reaches #notify on the first switch-on tick.
+ * A non-critical workflow never pages (`silent`, recorded so it stays quiet).
+ * (If KV is down the slot cannot be taken and pageNotify posts anyway, so a
+ * critical outage re-posts each hourly tick until KV returns: louder, never
+ * silent.)
  */
 export function n8nWatchPlan({ firing, alerted = {}, switchOn = false, critical = new Set() }) {
   const worse = firing.filter((s) => (alerted[s.workflowId] || 0) < s.streak);
   if (!switchOn) return { page: worse, silent: [] };
   return {
-    page: worse.filter((s) => critical.has(s.workflowId)),
+    page: firing.filter((s) => critical.has(s.workflowId)),
     silent: worse.filter((s) => !critical.has(s.workflowId)),
   };
 }
@@ -161,8 +173,12 @@ export default async function handler(req, res) {
       for (const s of plan.page) {
         const sent = await pageNotify(`:rotating_light: n8n workflow is failing repeatedly:\n${describe(s)}`, {
           key: `n8n-failing:${s.workflowId}`,
+          ttlSeconds: N8N_FAILING_SLOT_TTL_SECONDS,
         }).catch(() => ({ ok: false }));
-        if (sent.ok) { alerted[s.workflowId] = s.streak; fresh.push(s); }
+        if (sent.ok) {
+          alerted[s.workflowId] = Math.max(alerted[s.workflowId] || 0, s.streak);
+          if (!sent.skipped) fresh.push(s);
+        }
       }
     } else if (plan.page.length && (await shouldAlert("n8n-failures", 3600))) {
       // alerted[] moves only after a won slot AND a delivered post (fixed
@@ -171,6 +187,9 @@ export default async function handler(req, res) {
       const delivered = await notifySlack(`:rotating_light: n8n workflows are failing repeatedly:\n${plan.page.map(describe).join("\n")}`).catch(() => false);
       if (delivered) for (const s of plan.page) { alerted[s.workflowId] = s.streak; fresh.push(s); }
     }
+    // The watchdog read n8n this tick: an earlier "could not read" incident is
+    // over, so the next one pages again.
+    if (switchOn) await clearNotifySlot("n8n-unreadable").catch(() => {});
     // Clear state for anything that recovered, so a future break re-alerts.
     for (const id of Object.keys(alerted)) {
       if (!streaks.some((s) => s.workflowId === id)) {

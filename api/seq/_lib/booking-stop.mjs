@@ -506,6 +506,13 @@ function secureKeyFragment(value) {
 }
 
 /** Alert at most once per `key` per `windowSeconds`. Returns true if the caller should alert. */
+/** Release a shouldAlert slot (a post that failed, so the next run retries). */
+export async function releaseAlert(key) {
+  if (!kvConfigured()) return false;
+  await kv(["DEL", K.alert(key)]);
+  return true;
+}
+
 export async function shouldAlert(key, windowSeconds = 12 * 3600) {
   if (!kvConfigured()) return true; // no store -> never suppress a real alert
   try {
@@ -1347,7 +1354,13 @@ export async function runBookingSweep({
       "scope",
       () => sequenceScopeLoader({ deadline, coldExclusionPolicy }),
     );
-  } catch {
+  } catch (e) {
+    // A Paraform AUTH_EXPIRED is not a snapshot problem: rethrow it so the
+    // handler confirms it with spaced probes and, if the session really is
+    // dead, records the expiry witness System Health's paraform-session tile
+    // pages on (2026-09-25). Folding it in here hid a dead cookie behind
+    // "membership snapshot unavailable" and never wrote the witness.
+    if (e?.code === "AUTH_EXPIRED") throw e;
     result.error = "membership_snapshot_unavailable";
     result.membershipSnapshotError = "live_scope_unavailable";
     result.durationMs = Date.now() - startedAt;

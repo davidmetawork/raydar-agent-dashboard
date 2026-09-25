@@ -10,7 +10,7 @@
 // refusal (enroll.mjs / release.mjs) is the primary prevention; this is the net.
 import { cors, requireAuth, hasCookie, trpcGet, trpcPost, campaignLeads, cronAuth } from "./_lib/core.mjs";
 import { protectedRecruiterForSequence } from "./_lib/protected.mjs";
-import { shouldAlert } from "./_lib/booking-stop.mjs";
+import { releaseAlert, shouldAlert } from "./_lib/booking-stop.mjs";
 import { pageNotify, systemHealthOwns } from "../_lib/notify.mjs";
 
 export const config = { maxDuration: 120 };
@@ -22,7 +22,7 @@ const DAY_SECONDS = 24 * 3600;
 // (shouldAlert was never imported here, so this used to throw a ReferenceError
 // after requireAuth had already answered 401: the warning never posted.
 // Fixed 2026-09-25.)
-async function warnOnCronRejection(cron) {
+export async function warnOnCronRejection(cron) {
   if (cron.ok || !cron.headerPresent) return;
   const text = `:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`;
   if (systemHealthOwns() || await shouldAlert(`cron-auth-${cron.reason}`, 3600)) {
@@ -65,12 +65,17 @@ export default async function handler(req, res) {
     // process failure the team should know about; a fully-contained state is
     // silent. Deduped per set of sequences for 24h (2026-09-25): it used to
     // re-fire every hourly tick while a pause or disable kept failing. With
-    // the #notify switch on it posts to #notify through pageNotify.
+    // the #notify switch on it posts to #notify through pageNotify. At most
+    // once per 24h per set of sequences (nothing clears the slot early). A
+    // failed post releases the slot so the next hourly tick retries.
     if (apply && actions.length) {
       const lines = actions.map((a) => `• ${a.name} — ${a.recruiter} (${a.disabled ? "disabled" : "already off"}, paused ${a.pausedLeads}/${a.totalLeads})`);
       const key = `seq-guardian:${actions.map((a) => a.sequenceId).sort().join(",")}`.slice(0, 150);
-      if (systemHealthOwns() || await shouldAlert(key, DAY_SECONDS)) {
-        await pageNotify(`🛑 Protected-recruiter guardian stopped ${actions.length} sequence(s):\n${lines.join("\n")}`, { key }).catch(() => {});
+      const owns = systemHealthOwns();
+      if (owns || await shouldAlert(key, DAY_SECONDS)) {
+        const sent = await pageNotify(`🛑 Protected-recruiter guardian stopped ${actions.length} sequence(s):\n${lines.join("\n")}`, { key }).catch(() => ({ ok: false }));
+        // Switch on, pageNotify releases its own slot; off, release ours.
+        if (!sent?.ok && !owns) await releaseAlert(key).catch(() => {});
       }
     }
     return res.status(200).json({ ok: true, apply, flagged: flagged.length, acted: actions.length, actions, ranAt: new Date().toISOString() });

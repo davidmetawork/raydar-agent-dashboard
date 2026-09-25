@@ -8,6 +8,8 @@
 // Guiding rule from the 2026-08-06/07 outage: report what is TRUE, never what
 // is convenient. A tile that cannot tell must say UNKNOWN, not OK.
 
+import { notifySwitchOn } from "../../_lib/notify-switch.mjs";
+
 const OK = (reason = null, metrics) => ({ state: "OK", reason, metrics });
 const DEG = (reason, metrics) => ({ state: "DEGRADED", reason, metrics });
 const DOWN = (reason, metrics) => ({ state: "DOWN", reason, metrics });
@@ -97,18 +99,21 @@ export function webviewStatus({ body, status }) {
 
 /** Derived: Paraform cookie liveness, read from two lanes that already know.
  *
- * With the #notify switch on (NOTIFY_SLACK_CHANNEL set, 2026-09-25) this tile
+ * With the #notify switch on (NOTIFY_SLACK_CHANNEL set and HEALTH_ALERTS_ENABLED=true, 2026-09-25) this tile
  * is the ONE owner of "the Paraform login is dead", so it must not go green
  * while blind: during the 2026-09-17 reader pause both sources answer
  * "paused", which used to read as OK. With the switch on it reports DOWN on
  * the booking sweep's confirmed-expiry witness (the sweep keeps probing
- * through the pause) or on cookieSet:false, and UNKNOWN instead of OK when
+ * through the pause), on cookieSet:false, or on seq health's own Paraform
+ * read answering expired/no_cookie/invalid (the paraai source is often
+ * "paused", so seq must count on its own), and UNKNOWN instead of OK when
  * both sources are paused and there is no witness. Switch off: unchanged.
+ * (The engine still needs two consecutive DOWN ticks before it pages.)
  */
 export function paraformSession({ results, env = process.env }) {
   const seq = results["seq-guardian"]?.raw;
   const paraai = results["paraai-lane"]?.raw;
-  const switchOn = Boolean(String(env?.NOTIFY_SLACK_CHANNEL || "").trim());
+  const switchOn = notifySwitchOn(env);
   if (switchOn) {
     const witness = seq?.bookingStop?.sessionExpiredConfirmedAt;
     if (witness && Number.isFinite(Date.parse(String(witness)))) {
@@ -116,6 +121,10 @@ export function paraformSession({ results, env = process.env }) {
     }
     if (seq && seq.cookieSet === false) {
       return DOWN("PARAFORM_COOKIE is not configured on the dashboard — every Paraform lane is blind", { cookieSet: false });
+    }
+    const seqParaform = String(seq?.paraform?.status || seq?.paraform || "");
+    if (/expired|no_cookie|invalid/i.test(seqParaform)) {
+      return DOWN(`Paraform session ${seqParaform} (seq health read) — every Paraform lane is blind. Recapture the cookie`, { seq: seqParaform });
     }
   }
   if (!seq && !paraai) return UNK("no seq/paraai health available this tick");

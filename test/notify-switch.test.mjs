@@ -60,7 +60,7 @@ test("switch off: pageNotify is exactly today's notifySlack call, no slot, no #n
 });
 
 test("switch on: one post per key to the #notify channel; a failed post releases the slot", async () => {
-  const env = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY" };
+  const env = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
   const { store, kv } = fakeKv();
   const posts = [];
   const notifySend = async (text, options) => { posts.push({ text, options }); return true; };
@@ -69,7 +69,7 @@ test("switch on: one post per key to the #notify channel; a failed post releases
   const second = await pageNotify("down again", { key: "booking-sweep-stale", env, kv, notifySend, legacySend });
   assert.equal(first.ok, true);
   assert.equal(second.skipped, "duplicate");
-  assert.deepEqual(posts, [{ text: "down", options: { channel: "C_NOTIFY" } }]);
+  assert.deepEqual(posts, [{ text: "down", options: { channel: "C_NOTIFY", botTokenFirst: true } }]);
   assert.ok(store.has("notify:booking-sweep-stale"));
   assert.equal(systemHealthOwns(env), true);
 
@@ -82,7 +82,7 @@ test("switch on: KV trouble still posts (an alert that cannot dedupe is still an
   const posts = [];
   await pageNotify("x", {
     key: "k",
-    env: { NOTIFY_SLACK_CHANNEL: "C_NOTIFY" },
+    env: { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" },
     kv: async () => { throw new Error("KV down"); },
     notifySend: async (text) => { posts.push(text); return true; },
   });
@@ -106,7 +106,7 @@ test("paraform-session tile, switch off: unchanged (both paused still reads OK, 
 });
 
 test("paraform-session tile, switch on: DOWN on the sweep's confirmed expiry or a missing cookie", () => {
-  const on = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY" };
+  const on = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
   const witnessed = { ...paused, bookingStop: { sessionExpiredConfirmedAt: "2026-09-25T01:00:00.000Z" } };
   assert.equal(tile(witnessed, pausedParaai, on).state, "DOWN");
   assert.match(tile(witnessed, pausedParaai, on).reason, /confirmed by the booking sweep/);
@@ -114,7 +114,7 @@ test("paraform-session tile, switch on: DOWN on the sweep's confirmed expiry or 
 });
 
 test("paraform-session tile, switch on: both sources paused and no witness is UNKNOWN, never a green lie", () => {
-  const on = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY" };
+  const on = { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" };
   assert.equal(tile(paused, pausedParaai, on).state, "UNKNOWN");
   const live = { paraform: "live", cookieSet: true, bookingStop: {} };
   assert.equal(tile(live, { paraform: "live" }, on).state, "OK");

@@ -2,31 +2,38 @@
 // dashboard PR 2, 2026-09-25). David's rule: Raydar posts in one Slack
 // channel, #notify, only when a person must act, and each incident posts once.
 //
-// NOTIFY_SLACK_CHANNEL is the switch:
-//  - UNSET: pageNotify(text) calls notifySlack(text) exactly as today (the
-//    shared PARAAI_SLACK_CHANNEL, i.e. #paraform-actions). Callers keep their
-//    own existing dedupe. Nothing moves.
-//  - SET: pageNotify takes a KV NX slot `notify:<key>` for ttlSeconds (default
-//    24h) and posts once through the System Health transport to the channel
-//    it names. A failed post releases the slot so the next run retries; KV
-//    trouble posts anyway (an alert that cannot dedupe is still an alert).
-//    systemHealthOwns() is also true: senders whose incident a tier-1 System
-//    Health tile already pages (the Paraform session, a locked mailbox, an
-//    evicted lane) drop their own copy, so one incident posts once.
+// The switch is ON when NOTIFY_SLACK_CHANNEL is set AND HEALTH_ALERTS_ENABLED
+// is exactly "true" (notify-switch.mjs says why both):
+//  - OFF: pageNotify(text) calls notifySlack(text) as before (the shared
+//    PARAAI_SLACK_CHANNEL, i.e. #paraform-actions). Callers keep their own
+//    dedupe. Routing does not move, but some senders' dedupe and scope did
+//    change in this PR (see the PR body's "live on merge" list).
+//  - ON: pageNotify takes a KV NX slot `notify:<key>` for ttlSeconds (default
+//    24h) and posts once through the System Health transport, by bot token,
+//    to the channel NOTIFY_SLACK_CHANNEL names (never SLACK_WEBHOOK_URL,
+//    whose channel is fixed by the webhook). A failed post releases the slot
+//    so the next run retries; KV trouble posts anyway (an alert that cannot
+//    dedupe is still an alert). systemHealthOwns() is also true: senders whose
+//    incident a tier-1 System Health tile already pages (the Paraform session,
+//    a locked mailbox, an evicted lane) drop their own copy.
+//
+// A slot is "once per incident" only where its detector clears it on recovery
+// (the stale sweep, n8n workflows, n8n unreadable, sweep pause errors).
+// Elsewhere (cron-auth, the guardian's sequence set) it is "at most once per
+// 24h".
 //
 // Texts passed here carry no candidate names or emails.
 import { sendSlack } from "../health/_lib/alert.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
+import { notifyChannel, notifySwitchOn } from "./notify-switch.mjs";
+
+export { notifyChannel, notifySwitchOn };
 
 export const NOTIFY_TTL_SECONDS = 24 * 60 * 60;
 
-export function notifyChannel(env = process.env) {
-  return String(env?.NOTIFY_SLACK_CHANNEL || "").trim();
-}
-
 /** True once the switch is on: System Health owns the incidents its tiles page. */
 export function systemHealthOwns(env = process.env) {
-  return Boolean(notifyChannel(env));
+  return notifySwitchOn(env);
 }
 
 function kvEndpoint(env) {
@@ -92,7 +99,7 @@ export async function pageNotify(text, {
   notifySend = sendSlack,
 } = {}) {
   const channel = notifyChannel(env);
-  if (!channel) {
+  if (!notifySwitchOn(env)) {
     const ok = await legacySend(text).then((value) => value !== false).catch(() => false);
     return { ok, via: "legacy" };
   }
@@ -100,7 +107,7 @@ export async function pageNotify(text, {
     const claim = await claimNotifySlot(key, ttlSeconds, { env, kv });
     if (claim === "held") return { ok: true, via: "notify", skipped: "duplicate", key };
   }
-  const ok = await notifySend(text, { channel }).catch(() => false);
+  const ok = await notifySend(text, { channel, botTokenFirst: true }).catch(() => false);
   if (!ok && key) await clearNotifySlot(key, { env, kv });
   return { ok: Boolean(ok), via: "notify", key };
 }

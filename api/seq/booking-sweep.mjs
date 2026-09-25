@@ -37,18 +37,34 @@ import { clearNotifySlot, pageNotify, systemHealthOwns } from "../_lib/notify.mj
 
 export const config = { maxDuration: 300 };
 
-// #notify switch (dashboard PR 2, 2026-09-25). With NOTIFY_SLACK_CHANNEL unset
+// #notify switch (dashboard PR 2, 2026-09-25; api/_lib/notify-switch.mjs). Switch off,
 // every line below behaves exactly as before (shouldAlert + notifySlack). With
 // it set, the sweep posts two things to #notify, each once per incident:
 //   - the stale page ("has not completed a full pass"), the ONE persistent
-//     signal: cleared by the next successful pass, and skipped when the latest
-//     failure is the Paraform session (System Health's tile owns that);
-//   - booked leads it failed to pause.
+//     signal: cleared by the next successful pass, and skipped only while the
+//     sweep's confirmed-expiry witness stands (System Health's
+//     paraform-session tile is DOWN on exactly that witness, so it pages);
+//   - booked leads it failed to pause (slot cleared by a clean pass).
 // No-cookie and AUTH_EXPIRED are left to System Health's paraform-session
 // tile, and the per-pass failure lines (no Calendly, zero leads, budget,
 // incomplete membership, snapshot rejected, Calendly truncated, Raydar index,
 // generic error) are left to the stale page.
 const STALE_KEY = "booking-sweep-stale";
+const PAUSE_ERRORS_KEY = "booking-sweep-pause-errors";
+
+/**
+ * Pure: does the paraform-session tile already page this stale incident?
+ * Only when the sweep's CONFIRMED expiry witness stands, since the tile is DOWN
+ * on exactly that. Never decided from the attempt's error label: a substring
+ * match on "auth" also caught CALENDLY_AUTH, and an unconfirmed AUTH_EXPIRED
+ * (throttling on a live session) leaves the tile OK, so both went silent.
+ * (No cookie never reaches the stale check: the handler returns first, and the
+ * tile pages cookieSet:false.)
+ */
+export function staleOwnedBySessionTile(staleness, { switchOn = systemHealthOwns() } = {}) {
+  if (!switchOn) return false;
+  return Number.isFinite(Date.parse(String(staleness?.sessionExpiredConfirmedAt || "")));
+}
 
 /** A legacy-only line: posted as before while the switch is off, silent once on. */
 async function legacyOnly(slot, ttlSeconds, text) {
@@ -72,7 +88,11 @@ async function warnOnCronRejection(cron) {
   await critical(`cron-auth-${cron.reason}`, 3600, `:warning: A request to a scheduled endpoint carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). If this coincides with a scheduled tick, the cron is now failing closed and needs the secret checked.`, "cron-auth");
 }
 
-async function handleBookingSweep(req, res) {
+export async function handleBookingSweep(req, res, {
+  sweep = runBookingSweep,
+  staleness: readStaleness = sweepStaleness,
+  confirmExpired = isSessionActuallyExpired,
+} = {}) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
@@ -105,23 +125,22 @@ async function handleBookingSweep(req, res) {
 
   // Staleness check runs BEFORE the sweep so a run that is itself about to fail
   // still surfaces that nothing has succeeded recently.
-  let staleness = await sweepStaleness();
-  const staleCauseIsSession = /auth|expired|no_cookie/i.test(String(staleness.latestAttemptError || ""));
-  if (staleness.stale && kvConfigured() && !(systemHealthOwns() && staleCauseIsSession)) {
+  let staleness = await readStaleness();
+  if (staleness.stale && kvConfigured() && !staleOwnedBySessionTile(staleness)) {
     const since = staleness.lastAt ? `since ${staleness.lastAt}` : "ever";
     await critical("sweep-stale", undefined, `:rotating_light: Booking sweep has not completed a full pass ${since}. Candidates who book are not being removed from sequences. Check monitor.raydar.xyz/api/seq/booking-sweep.`, STALE_KEY);
   }
 
   try {
     if (apply) await recordSweepAttempt({ status: "running" });
-    const result = await runBookingSweep({ apply });
+    const result = await sweep({ apply });
     if (apply && !result.ok) {
       await recordSweepAttempt({
         status: "failure",
         result,
         error: sweepAttemptErrorLabel(result),
       });
-      staleness = await sweepStaleness();
+      staleness = await readStaleness();
     }
 
     // A pass that sees zero active leads is a FAILURE, not a clean run. Two
@@ -160,7 +179,10 @@ async function handleBookingSweep(req, res) {
     }
 
     if (apply && result.pauseErrors.length) {
-      await critical("pause-errors", 3600, `:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`, "booking-sweep-pause-errors");
+      await critical("pause-errors", 3600, `:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`, PAUSE_ERRORS_KEY);
+    } else if (apply && result.ok && systemHealthOwns()) {
+      // A clean pass ends the pause-error incident: the next one pages again.
+      await clearNotifySlot(PAUSE_ERRORS_KEY).catch(() => {});
     }
 
     // A pass that paused booked candidates is the control WORKING: a success,
@@ -170,7 +192,7 @@ async function handleBookingSweep(req, res) {
     if (result.ok && apply) {
       await recordSuccessfulSweep(result);
       await recordSweepAttempt({ status: "success", result });
-      staleness = await sweepStaleness();
+      staleness = await readStaleness();
       // The stale incident is over: the next one pages again. A good pass
       // also proves the Paraform session is live.
       await clearSessionExpiredWitness().catch(() => {});
@@ -237,7 +259,7 @@ async function handleBookingSweep(req, res) {
     // Never report (or alert) an expiry on the strength of one 401: Paraform
     // answers 401 to bursts. Confirm with spaced probes first, or a busy pass
     // cries wolf about the cookie and the real alarm stops being believed.
-    const expired = e?.code === "AUTH_EXPIRED" && (await isSessionActuallyExpired());
+    const expired = e?.code === "AUTH_EXPIRED" && (await confirmExpired());
     if (e?.code === "AUTH_EXPIRED" && !expired) {
       // Throttling on a session verified live: any old witness is wrong now.
       await clearSessionExpiredWitness().catch(() => {});

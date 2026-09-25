@@ -76,6 +76,7 @@ import {
   probeOutreachStore,
   recordContactCapability,
   recordOutreachException,
+  releaseOutreachExceptionAlert,
   releaseOutreachLock,
   releaseOutreachPollSlot,
   resolveOutreachException,
@@ -2624,17 +2625,23 @@ export const OUTREACH_PAGE_CODES = Object.freeze(new Set(["GMAIL_AUTH_FAILED", "
 export async function pageOutreachFailure(code, {
   owns = systemHealthOwns,
   claim = claimOutreachExceptionAlert,
+  release = releaseOutreachExceptionAlert,
   page = pageNotify,
 } = {}) {
   if (!OUTREACH_PAGE_CODES.has(code)) return { paged: false, reason: "not_critical" };
-  if (!owns()) {
-    const claimed = await claim(`page:${code}`, { ttlSeconds: 6 * 3600 }).catch(() => true);
+  const switchOn = owns();
+  const slot = `page:${code}`;
+  if (!switchOn) {
+    const claimed = await claim(slot, { ttlSeconds: 6 * 3600 }).catch(() => true);
     if (!claimed) return { paged: false, reason: "deduped" };
   }
   const sent = await page(
     `🚨 Para AI outreach: ${code}. Candidate outreach email is not going out; no duplicate email will be attempted. Review the outreach ledger.`,
     { key: `paraai-outreach:${code}` },
   ).catch(() => ({ ok: false }));
+  // A failed post must not hold the 6h slot (switch on, pageNotify releases
+  // its own), or the next failure within 6h stays silent.
+  if (!sent?.ok && !switchOn) await release(slot).catch(() => {});
   return { paged: Boolean(sent?.ok), reason: sent?.skipped || null };
 }
 
