@@ -2677,6 +2677,7 @@ export async function runOutreachTick({
   config = outreachConfig(),
   now = Date.now(),
   pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
+  historyImpl = readSubmissionRequestHistory,
 } = {}) {
   if (!outreachExecutionEnabled(config)) {
     return {
@@ -2702,7 +2703,7 @@ export async function runOutreachTick({
   }
   try {
     const [history, states, exceptions] = await Promise.all([
-      readSubmissionRequestHistory(),
+      historyImpl(),
       listOutreachStates(),
       listOutreachExceptions(),
     ]);

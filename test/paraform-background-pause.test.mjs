@@ -65,7 +65,10 @@ test("background pause fails closed for missing control configuration and malfor
   );
 });
 
-test("ParaAI worker pause covers recovery, tick, and status before dispatch", async () => {
+// Since 2026-09-25 a paused worker still runs the two interview-request lanes
+// on tick/recover (test/paraai-request-lanes.test.mjs). This process has no
+// state store configured, so here every entrypoint must stay a pure no-op.
+test("ParaAI worker pause with no state store is a no-op for recovery, tick, and status", async () => {
   const previous = process.env.PARAAI_AUTOMATION_RUNNER_KEY;
   process.env.PARAAI_AUTOMATION_RUNNER_KEY = "test-worker-secret";
   const originalFetch = globalThis.fetch;
@@ -81,6 +84,7 @@ test("ParaAI worker pause covers recovery, tick, and status before dispatch", as
       const response = nodeResponse();
       await handleParaaiWorker(request, response, {
         pauseState: async () => ({ paused: true }),
+        requestLanes: async () => { throw new Error("request lanes must not run without a state store"); },
       });
       assert.equal(response.statusCode, 200);
       assert.deepEqual(response.body, {

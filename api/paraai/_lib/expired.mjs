@@ -27,6 +27,7 @@ import {
   firstDeliveredInternalDate,
   outreachMailbox,
   gmailConfigured,
+  searchThreads,
 } from "./outreach-gmail.mjs";
 import { listReplyRecords } from "./reply-store.mjs";
 import { readSubmissionRequestClaim } from "./request-claim.mjs";
@@ -54,6 +55,7 @@ import {
   readExpiredLastRun,
 } from "./expired-store.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
+import { paraformCandidateRecipientPremark } from "./outreach.mjs";
 
 const bool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -112,11 +114,25 @@ export function expiredWriteEnabled(config = expiredConfig()) {
 // Everything that could make "Candidate didn't get back" false, gathered before
 // any decision. Gmail is authoritative (it sees replies the reply lane has not
 // scanned yet); the reply records are a cheap local cross-check.
-export async function gatherContactEvidence(row, { config, replyRecordsByCandidate, now }) {
+export async function gatherContactEvidence(row, {
+  config,
+  replyRecordsByCandidate,
+  now,
+  stateImpl = getOutreachState,
+  threadImpl = getThread,
+  searchImpl = searchThreads,
+}) {
   const evidence = {
     reachedOut: row.reachedOut === true,
+    // Paraform writes reached_out_to_candidate itself, at creation, when a
+    // request is addressed to the candidate. That is not contact by us.
+    vendorPremark: paraformCandidateRecipientPremark(row),
+    // How Raydar delivered THIS request, if it did: "gmail" or a Mailroom
+    // transport such as "mailroom-sendgrid".
+    raydarDelivery: null,
     replyRecords: [],
     gmailReplies: null,
+    mailboxReplies: null,
     gmailError: null,
   };
   const records = replyRecordsByCandidate.get(row.candidateUserId) || [];
@@ -129,9 +145,22 @@ export async function gatherContactEvidence(row, { config, replyRecordsByCandida
 
   if (!config.gmailConfigured) return evidence;
   try {
-    const state = await getOutreachState(row.candidateUserId);
+    const state = await stateImpl(row.candidateUserId);
+    const match = state?.matches?.[row.id];
+    if (match?.sentAt) evidence.raydarDelivery = String(match.transport || "gmail");
+    // Any message from the candidate anywhere in the mailbox since the request
+    // was created counts as getting back (2026-09-25). The thread read below
+    // cannot see a reply to a SendGrid (Mailroom relief) send or to a
+    // hand-sent email, and the September pause recovery sent 38 requests
+    // through SendGrid. Over-counting only sends a row to review.
+    const candidateEmail = String(state?.candidateEmail || "").trim();
+    if (candidateEmail) {
+      const afterSeconds = Math.floor((Number(row.createdAtMs) || 0) / 1000);
+      const found = await searchImpl(config.mailbox, `from:${candidateEmail} after:${afterSeconds}`, 5);
+      evidence.mailboxReplies = Array.isArray(found) ? found.length : 0;
+    }
     if (!state?.threadId) { evidence.gmailReplies = 0; return evidence; }
-    const thread = await getThread(config.mailbox, state.threadId);
+    const thread = await threadImpl(config.mailbox, state.threadId);
     if (!thread) { evidence.gmailReplies = 0; return evidence; }
     const anchor = finiteDate(state.firstOutboundAt) ?? firstDeliveredInternalDate(thread) ?? 0;
     const replies = candidateReplyMessages(thread, config.mailbox, anchor);
@@ -159,15 +188,33 @@ export function planExpiredRow(row, evidence, { config, now, claim }) {
   // A candidate who replied demonstrably DID get back. The reply lane owns that
   // request's truthful outcome (a late submit, or a pass with a real reason), so
   // this lane surfaces it rather than inventing one.
-  if (evidence.gmailReplies > 0 || evidence.replyRecords.length > 0) {
+  if (evidence.gmailReplies > 0 || evidence.mailboxReplies > 0 || evidence.replyRecords.length > 0) {
     return {
       action: "review",
       resolution: "candidate_replied",
-      detail: `gmail=${evidence.gmailReplies ?? "n/a"} records=${evidence.replyRecords.length}`,
+      detail: `gmail=${evidence.gmailReplies ?? "n/a"} mailbox=${evidence.mailboxReplies ?? "n/a"} records=${evidence.replyRecords.length}`,
     };
   }
   if (config.requireReachedOut && !evidence.reachedOut) {
     return { action: "review", resolution: "never_contacted", detail: "reached_out_to_candidate is false" };
+  }
+  // Paraform's own premark says nothing about whether anyone wrote to the
+  // candidate, so without a Raydar delivery for this request the reason
+  // would be unproven (2026-09-25).
+  if (config.requireReachedOut && evidence.vendorPremark && !evidence.raydarDelivery) {
+    return {
+      action: "review",
+      resolution: "never_contacted",
+      detail: "reached-out marker is Paraform's candidate-recipient premark; no Raydar delivery",
+    };
+  }
+  // A non-Gmail delivery is only judged when the mailbox search could run.
+  if (evidence.raydarDelivery && evidence.raydarDelivery !== "gmail" && evidence.mailboxReplies == null) {
+    return {
+      action: "review",
+      resolution: "reply_not_observable",
+      detail: `delivered via ${evidence.raydarDelivery}`,
+    };
   }
   if (config.holdHours > 0 && expiredAt != null && now < expiredAt + config.holdHours * 3600_000) {
     return { action: "hold", resolution: "hold_window", detail: `${config.holdHours}h` };
@@ -299,7 +346,10 @@ export async function runExpiredTick({
       reachedOut: evidence.reachedOut,
       evidence: {
         gmailReplies: evidence.gmailReplies,
+        mailboxReplies: evidence.mailboxReplies,
         replyRecords: evidence.replyRecords.length,
+        vendorPremark: evidence.vendorPremark,
+        raydarDelivery: evidence.raydarDelivery,
         gmailError: evidence.gmailError,
       },
       plan,

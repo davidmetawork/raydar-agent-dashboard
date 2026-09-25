@@ -60,6 +60,15 @@ export function normalizeExpiredRow(row) {
     filterBucket: String(row?.filterBucket || "").toLowerCase() || null,
     reachedOut: row?.reached_out_to_candidate === true,
     reachedOutAt: text(row?.reached_out_to_candidate_at) || null,
+    // With recipientTypes, tells Paraform's own candidate-recipient premark
+    // apart from a real reach-out (see outreach.mjs
+    // paraformCandidateRecipientPremark).
+    reachedOutAtMs: Date.parse(row?.reached_out_to_candidate_at || "") || null,
+    recipientTypes: [...new Set(
+      (Array.isArray(row?.recipient_types) ? row.recipient_types : [])
+        .map((value) => text(value).toUpperCase())
+        .filter(Boolean),
+    )],
     sentToUserId: text(row?.sent_to_user_id) || null,
     hiringManagerName: text(row?.hiringManagerName) || null,
   };

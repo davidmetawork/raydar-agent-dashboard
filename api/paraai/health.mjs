@@ -25,6 +25,7 @@ function envEnabled(name) {
 
 export async function handleParaaiHealth(req, res, {
   pauseState = () => paraformBackgroundPauseState("paraaiWorker"),
+  requestLanesPauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
 } = {}) {
   if (cors(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
@@ -141,7 +142,11 @@ export async function handleParaaiHealth(req, res, {
     health.enrollmentReady = false;
     health.matchShadowReady = false;
     health.automation.ready = false;
-    health.outreach.executionReady = false;
+    // Outreach runs through this pause under its own brake (2026-09-25), so
+    // its readiness follows that brake instead. No Paraform read either way.
+    const lanesPause = await requestLanesPauseState().catch(() => ({ paused: true }));
+    health.outreach.requestLanesPaused = Boolean(lanesPause?.paused);
+    if (lanesPause?.paused) health.outreach.executionReady = false;
     return res.status(200).json(health);
   }
   if (!(await hasParaformCookie())) {

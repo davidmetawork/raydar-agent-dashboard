@@ -16,7 +16,14 @@ process.env.KV_REST_API_TOKEN = "kv-test-token";
 process.env.PARAAI_AUTOMATION_RUNNER_KEY = "runner-test-secret";
 
 const kv = new Map();
+const zsets = new Map();
 const providerCalls = [];
+const zadd = (key, member) => {
+  if (!zsets.has(key)) zsets.set(key, []);
+  const list = zsets.get(key).filter((item) => item !== member);
+  list.push(member);
+  zsets.set(key, list);
+};
 
 function evalScript([script, keyCount, ...rest]) {
   const keys = rest.slice(0, Number(keyCount));
@@ -24,6 +31,7 @@ function evalScript([script, keyCount, ...rest]) {
   if (script.includes("return {1, ARGV[1]}")) {
     // createOutreachState: insert once.
     const existing = kv.get(keys[0]);
+    zadd(keys[1], args[3]);
     if (existing) return [0, existing];
     kv.set(keys[0], args[0]);
     return [1, args[0]];
@@ -34,6 +42,7 @@ function evalScript([script, keyCount, ...rest]) {
     if (!raw) return -1;
     if (Number(JSON.parse(raw).revision || 0) !== Number(args[0])) return 0;
     kv.set(keys[0], args[1]);
+    zadd(keys[1], args[4]);
     return 1;
   }
   if (script.includes("redis.call('GET', KEYS[1]) == ARGV[1]")) {
@@ -54,6 +63,7 @@ function command([name, ...args]) {
       return "OK";
     }
     case "DEL": return kv.delete(args[0]) ? 1 : 0;
+    case "ZREVRANGE": return [...(zsets.get(args[0]) || [])].reverse();
     case "EVAL": return evalScript(args);
     default: throw new Error(`unexpected KV command in test: ${name}`);
   }
@@ -78,6 +88,13 @@ const {
   processDueFollowup,
   runOutreachTick,
 } = await import("../api/paraai/_lib/outreach.mjs");
+const {
+  expiredConfig,
+  gatherContactEvidence,
+  planExpiredRow,
+} = await import("../api/paraai/_lib/expired.mjs");
+const { normalizeExpiredRow } = await import("../api/paraai/_lib/expired-actions.mjs");
+const { handleParaaiHealth } = await import("../api/paraai/health.mjs");
 const { createOutreachState, getOutreachState } = await import("../api/paraai/_lib/outreach-store.mjs");
 const { runExpiredTick } = await import("../api/paraai/_lib/expired.mjs");
 const { handleParaaiWorker, runRequestLanes } = await import("../api/paraai/worker.mjs");
@@ -108,6 +125,7 @@ const openOutreachConfig = () => ({
 
 test.beforeEach(() => {
   kv.clear();
+  zsets.clear();
   providerCalls.length = 0;
 });
 
@@ -312,4 +330,210 @@ test("a lane failure under the pause marks the paused response degraded", async 
   });
   assert.equal(response.body.ok, true);
   assert.equal(response.body.degraded, true);
+});
+
+test("the tick cancels every closed-request nudge without spending the batch on them", async () => {
+  // batchSize 1: two closed-request nudges are cancelled AND the one open
+  // nudge is still attempted, proving cancellations use no send slot.
+  await seedDueFollowup("candidate-a", "request-closed-a");
+  await seedDueFollowup("candidate-b", "request-open");
+  await seedDueFollowup("candidate-c", "request-closed-c");
+  const created = Date.parse("2026-09-15T00:00:00.000Z");
+  const history = [
+    { id: "request-closed-a", status: "expired", candidateUserId: "candidate-a", roleId: "role-a", reachedOut: true, createdAtMs: created, reachedOutAtMs: created + 3_600_000, recipientTypes: [] },
+    { id: "request-open", status: "pending", candidateUserId: "candidate-b", roleId: "role-b", reachedOut: true, createdAtMs: created, reachedOutAtMs: created + 3_600_000, recipientTypes: [] },
+    { id: "request-closed-c", status: "dismissed", candidateUserId: "candidate-c", roleId: "role-c", reachedOut: true, createdAtMs: created, reachedOutAtMs: created + 3_600_000, recipientTypes: [] },
+  ];
+  const result = await runOutreachTick({
+    config: { ...openOutreachConfig(), batchSize: 1 },
+    now: Date.parse("2026-09-25T20:00:00.000Z"),
+    pauseState: async () => ({ paused: false }),
+    historyImpl: async () => history,
+  });
+  const followups = result.results.filter((item) => item.followup);
+  assert.equal(followups.filter((item) => item.action === "canceled_request_closed").length, 2);
+  // The open one reaches Gmail, which this process cannot, so it errors
+  // rather than being cancelled or skipped.
+  assert.equal(followups.filter((item) => item.action === "error").length, 1);
+  assert.equal(result.processed, 0);
+  assert.equal((await getOutreachState("candidate-a")).followup, null);
+  assert.equal((await getOutreachState("candidate-c")).followup, null);
+  assert.equal((await getOutreachState("candidate-b")).followup?.ownerMatchId, "request-open");
+});
+
+test("a paused worker never coerces a non-string mode into a lane run", async () => {
+  for (const body of [{ mode: ["tick"] }, { mode: { toString: () => "tick" } }, { mode: 1 }]) {
+    let calls = 0;
+    const response = nodeResponse();
+    await handleParaaiWorker({ method: "POST", headers: auth, body, query: {} }, response, {
+      pauseState: async () => ({ paused: true }),
+      requestLanes: async () => { calls += 1; return {}; },
+    });
+    assert.equal(calls, 0);
+    assert.deepEqual(response.body, { ok: true, paused: true, reason: "paraai_worker_paused" });
+  }
+});
+
+test("the paused response says when both lanes are braked, and counts expired row errors", async () => {
+  const braked = nodeResponse();
+  await handleParaaiWorker({ method: "POST", headers: auth, body: { mode: "tick" }, query: {} }, braked, {
+    pauseState: async () => ({ paused: true }),
+    requestLanes: async () => ({
+      outreach: { enabled: true, processed: 0, reason: "request_lanes_paused" },
+      outreachError: null,
+      expired: { ok: true, ran: false, reason: "request_lanes_paused" },
+      expiredError: null,
+    }),
+  });
+  assert.equal(braked.body.requestLanes, "paused");
+  assert.equal(braked.body.degraded, false);
+
+  const rowErrors = nodeResponse();
+  await handleParaaiWorker({ method: "POST", headers: auth, body: { mode: "tick" }, query: {} }, rowErrors, {
+    pauseState: async () => ({ paused: true }),
+    requestLanes: async () => ({
+      outreach: { enabled: true, processed: 0 },
+      outreachError: null,
+      expired: { ok: true, ran: true, errors: 1 },
+      expiredError: null,
+    }),
+  });
+  assert.equal(rowErrors.body.requestLanes, "running");
+  assert.equal(rowErrors.body.degraded, true);
+});
+
+// ---------------------------------------------------------------- expired truth
+
+const armed = () => ({
+  ...expiredConfig({
+    PARAAI_EXPIRED_APPROVED: "true",
+    PARAAI_EXPIRED_DRY_RUN: "false",
+    PARAAI_EXPIRED_NOT_BEFORE: "2026-09-16T00:00:00Z",
+    PARAAI_EXPIRED_DISMISS_APPROVED: "true",
+  }),
+  gmailConfigured: true,
+  mailbox: "david@raydar.xyz",
+});
+const createdIso = "2026-09-18T19:31:32.707Z";
+const rawRow = (overrides = {}) => ({
+  id: "request-x",
+  status: "expired",
+  created_at: createdIso,
+  reached_out_to_candidate: true,
+  reached_out_to_candidate_at: "2026-09-19T16:00:00.000Z",
+  recipient_types: ["RECRUITER"],
+  candidate: { candidate_user_id: "candidate-x" },
+  role: { id: "role-x" },
+  ...overrides,
+});
+const noReplies = new Map();
+const now = Date.parse("2026-09-25T21:00:00.000Z");
+
+async function evidenceFor(row, { state, search = async () => [], thread = async () => ({ messages: [] }) } = {}) {
+  return gatherContactEvidence(normalizeExpiredRow(row), {
+    config: armed(),
+    replyRecordsByCandidate: noReplies,
+    now,
+    stateImpl: async () => state,
+    searchImpl: search,
+    threadImpl: thread,
+  });
+}
+
+test("Paraform's own candidate-recipient premark is not contact by us", async () => {
+  const premarked = rawRow({
+    recipient_types: ["RECRUITER", "CANDIDATE"],
+    reached_out_to_candidate_at: "2026-09-18T19:31:40.000Z",
+  });
+  const evidence = await evidenceFor(premarked, { state: null });
+  assert.equal(evidence.vendorPremark, true);
+  assert.equal(evidence.raydarDelivery, null);
+  const plan = planExpiredRow(normalizeExpiredRow(premarked), evidence, { config: armed(), now, claim: null });
+  assert.equal(plan.action, "review");
+  assert.equal(plan.resolution, "never_contacted");
+
+  // The same premark with our own Gmail delivery of this request is contact.
+  const delivered = await evidenceFor(premarked, {
+    state: { candidateEmail: "x@example.test", threadId: "t", matches: { "request-x": { sentAt: "2026-09-18T19:40:00.000Z", transport: "gmail" } } },
+  });
+  assert.equal(delivered.raydarDelivery, "gmail");
+  assert.equal(planExpiredRow(normalizeExpiredRow(premarked), delivered, { config: armed(), now, claim: null }).action, "dismiss");
+});
+
+test("any message from the candidate anywhere in the mailbox since creation blocks the reason", async () => {
+  const queries = [];
+  const state = {
+    candidateEmail: "x@example.test",
+    threadId: "t",
+    matches: { "request-x": { sentAt: "2026-09-20T00:00:00.000Z", transport: "mailroom-sendgrid" } },
+  };
+  const evidence = await evidenceFor(rawRow(), {
+    state,
+    search: async (mailbox, query) => { queries.push([mailbox, query]); return [{ id: "reply-thread" }]; },
+  });
+  assert.deepEqual(queries, [["david@raydar.xyz", `from:x@example.test after:${Math.floor(Date.parse(createdIso) / 1000)}`]]);
+  assert.equal(evidence.mailboxReplies, 1);
+  const plan = planExpiredRow(normalizeExpiredRow(rawRow()), evidence, { config: armed(), now, claim: null });
+  assert.equal(plan.action, "review");
+  assert.equal(plan.resolution, "candidate_replied");
+
+  // A SendGrid delivery with a clean mailbox search is provably unanswered.
+  const quiet = await evidenceFor(rawRow(), { state });
+  assert.equal(planExpiredRow(normalizeExpiredRow(rawRow()), quiet, { config: armed(), now, claim: null }).action, "dismiss");
+});
+
+test("a SendGrid delivery whose mailbox cannot be searched goes to review", () => {
+  const row = normalizeExpiredRow(rawRow());
+  const plan = planExpiredRow(row, {
+    reachedOut: true,
+    vendorPremark: false,
+    raydarDelivery: "mailroom-sendgrid",
+    replyRecords: [],
+    gmailReplies: 0,
+    mailboxReplies: null,
+    gmailError: null,
+  }, { config: armed(), now, claim: null });
+  assert.equal(plan.action, "review");
+  assert.equal(plan.resolution, "reply_not_observable");
+});
+
+test("a mailbox search failure holds the row for the next pass instead of deciding", async () => {
+  const evidence = await evidenceFor(rawRow(), {
+    state: { candidateEmail: "x@example.test", threadId: "t", matches: {} },
+    search: async () => { throw Object.assign(new Error("429"), { code: "GMAIL_REQUEST_FAILED" }); },
+  });
+  assert.equal(evidence.gmailError, "GMAIL_REQUEST_FAILED");
+  assert.equal(planExpiredRow(normalizeExpiredRow(rawRow()), evidence, { config: armed(), now, claim: null }).action, "hold");
+});
+
+test("health reports outreach readiness from the request-lanes brake while the worker is paused", async () => {
+  const gateEnv = {
+    PARAAI_OUTREACH_APPROVED: "true",
+    PARAAI_OUTREACH_SEND_APPROVED: "true",
+    PARAAI_OUTREACH_DRY_RUN: "false",
+    PARAAI_OUTREACH_NOT_BEFORE: "2026-07-18T17:00:00.000Z",
+    GOOGLE_SA_KEY_FILE: "/private/key.json",
+  };
+  const prior = Object.fromEntries(Object.keys(gateEnv).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, gateEnv);
+  try {
+    for (const [lanesPaused, ready] of [[false, true], [true, false]]) {
+      const response = nodeResponse();
+      await handleParaaiHealth({ method: "GET", headers: {}, query: {} }, response, {
+        pauseState: async () => ({ paused: true }),
+        requestLanesPauseState: async () => ({ paused: lanesPaused }),
+      });
+      assert.equal(response.body.paused, true);
+      assert.equal(response.body.paraform, "paused");
+      assert.equal(response.body.automation.ready, false);
+      assert.equal(response.body.outreach.requestLanesPaused, lanesPaused);
+      assert.equal(response.body.outreach.executionReady, ready);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.deepEqual(providerCalls, [], "health under the pause makes no provider call");
 });

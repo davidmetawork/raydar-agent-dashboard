@@ -415,10 +415,17 @@ export async function handleParaaiWorker(req, res, {
       return res.status(200).json(paused);
     }
     const lanes = await requestLanes();
+    const lanesBraked = [lanes.outreach, lanes.expired]
+      .every((result) => result?.reason === "request_lanes_paused");
     return res.status(200).json({
       ...paused,
-      requestLanes: "running",
-      degraded: Boolean(lanes.outreachError || lanes.expiredError),
+      requestLanes: lanesBraked ? "paused" : "running",
+      degraded: Boolean(
+        lanes.outreachError
+        || lanes.expiredError
+        || lanes.expired?.errors > 0
+        || lanes.expired?.authExpired
+      ),
       ...lanes,
     });
   }
@@ -888,6 +895,8 @@ export async function handleParaaiWorker(req, res, {
         || resumeSweepError
         || outreachError
         || expiredError
+        || expired?.errors > 0
+        || expired?.authExpired
         || remainderError
         || remainder?.ok === false
         || resumeOnlyBackfillError
