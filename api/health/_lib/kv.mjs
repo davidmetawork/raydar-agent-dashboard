@@ -138,4 +138,7 @@ export const K = {
   incidentIndex: "hlth:incidents",
   selftest: "hlth:selftest",
   digestSent: (day) => `hlth:digest:${day}`,
+  // Rate-limits the manual #notify test-page endpoint (api/health/test-page.mjs)
+  // to one send per 10 minutes — a single, non-parameterized key.
+  testPageSent: "hlth:testpage:lastSent",
 };

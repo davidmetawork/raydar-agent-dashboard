@@ -1,11 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
-
 import {
   PARAFORM_BACKGROUND_PAUSE_KEYS,
   backgroundPauseKvCommand,
   backgroundPauseStatusFromRaw,
   canonicalBackgroundPauseRecord,
 } from "../_lib/paraform-background-pause.mjs";
+import { runnerAuthorized } from "../_lib/runner-key-auth.mjs";
 
 const DEFAULT_SCOPE = "paraaiWorker";
 
@@ -26,17 +25,6 @@ const RESUME_SCRIPT = `
   end
   return 3
 `;
-
-function equalSecret(left, right) {
-  const a = Buffer.from(String(left || ""));
-  const b = Buffer.from(String(right || ""));
-  return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
-}
-
-function runnerAuthorized(req, env) {
-  const token = String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "");
-  return equalSecret(token, env.PARAAI_AUTOMATION_RUNNER_KEY);
-}
 
 function bodyOf(req) {
   if (typeof req.body === "string") {
