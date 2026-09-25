@@ -10,7 +10,7 @@
 //
 // Standing directive (docs/agent-memory/feedback_notify_only_actionable.md):
 // alert only when a human must act; routine self-healing stays silent.
-import { hGet, hSet, hSetNx, K } from "./kv.mjs";
+import { hDel, hGet, hSet, hSetNx, K } from "./kv.mjs";
 import { notifyChannel, notifySwitchOn } from "../../_lib/notify-switch.mjs";
 
 const RE_PAGE_SECONDS = 60 * 60;
@@ -66,41 +66,106 @@ export async function sendSlack(text, { channel: channelOverride = "", botTokenF
   return false;
 }
 
+// An incident's page claim. Short on purpose: it is held only while a send is
+// in flight, then replaced by the long "delivered" marker. If the function is
+// killed mid-send (maxDuration), the claim lapses and a later tick retries.
+const PAGE_CLAIM_SECONDS = 5 * 60;
+// How long a delivered page is remembered for its incident (the incident
+// record's own lifetime, TRANS_TTL in engine.mjs).
+const PAGED_TTL_SECONDS = 31 * 24 * 3600;
+
+const claimed = (result) => result === "OK" || result === true;
+
+/** The incident a DOWN tile belongs to. The engine keeps `incidentAt` on the
+ *  tile for as long as it is away from OK; a tile born DOWN has no incident
+ *  pointer, so its `since` stands in (constant while it stays DOWN). */
+export const pageIncidentKey = (tile) => tile?.incidentAt || tile?.since || "unknown";
+
 /**
- * Pages tier-1 DOWN transitions. Nothing else posts, by policy (David,
- * 2026-09-24/25: one critical-only #notify channel, one post per incident).
+ * Pages tier-1 DOWN incidents: exactly one delivered post per incident.
+ * Nothing else posts, by policy (David, 2026-09-24/25: one critical-only
+ * #notify channel, one post per incident).
  *
- * Deliberately absent, and pinned by test/health-alert-one-post.test.mjs:
+ * Deliberately absent, and pinned by test/notify-routine-removal.test.mjs:
  *  - no RECOVERED notice: a recovery is a success, and success posts are
  *    removed rather than moved. It was also the unthrottled half: it fired on
  *    every DOWN exit, even for DOWN episodes whose page the flap slot had
  *    suppressed (about 11 recoveries against 5 pages on 2026-09-23).
- *  - no hourly STILL DOWN re-page: a problem posts once, when it starts. The
- *    tile stays red on monitor.raydar.xyz/health until it clears.
+ *  - no hourly STILL DOWN re-page: a problem posts once. The tile stays red
+ *    on monitor.raydar.xyz/health until it clears.
  *
- * The DOWN page keeps its 1h NX slot per tile, so a tile flapping in and out
- * of DOWN inside an hour still posts once.
+ * The pass reads the tile STATE, not just this tick's transitions, and marks
+ * an incident paged only after Slack accepts the post (pinned by
+ * test/health-alert-one-post.test.mjs). With the hourly re-page gone, a
+ * transition-only pager would lose an incident for good when:
+ *  - every Slack try fails (or the tick is killed mid-send): the claim is
+ *    released (or lapses) and the next tick sends it;
+ *  - the tile went DOWN while acked, while HEALTH_ALERTS_ENABLED was off, or
+ *    before it became tier 1: it pages once the ack ends or alerts turn on;
+ *  - a second incident starts inside the flap window (below).
+ *
+ * Flap window: at most one page per tile per hour (the 1h NX slot). A new
+ * incident inside that hour is DEFERRED, not dropped: if it is still DOWN
+ * when the hour runs out it pages then, and if it clears first it never posts.
+ *
+ * `transitions` is kept for the call shape; the tile state carries everything
+ * the page needs. `send` and `store` are test seams.
  *
  * With the #notify switch on (api/_lib/notify-switch.mjs) the page goes to
  * NOTIFY_SLACK_CHANNEL by bot token, the same channel as every other critical
  * sender, whatever HEALTH_SLACK_CHANNEL says. Switch off: unchanged.
  */
-export async function alertOnTransitions(transitions, state, { env = process.env, send = sendSlack } = {}) {
+export async function alertOnTransitions(
+  transitions,
+  state,
+  {
+    env = process.env,
+    send = sendSlack,
+    store = { get: hGet, setNx: hSetNx, set: hSet, del: hDel },
+  } = {},
+) {
+  void transitions;
   const sent = [];
   const route = notifySwitchOn(env) ? [{ channel: notifyChannel(env), botTokenFirst: true }] : [];
-  for (const t of transitions) {
-    const tile = state.tiles[t.id] || {};
-    if (tile.ackUntil) continue; // acknowledged: never alert
-    if (t.to !== "DOWN" || t.tier !== 1) continue;
-    const won = await hSetNx(K.alertSent(t.id, "DOWN"), { at: t.at }, RE_PAGE_SECONDS);
-    if (won === "OK" || won === true) {
-      await send(
-        `🔴 DOWN: ${t.name} — ${t.reason || "no reason given"}\n`
-        + `since ${t.at} · https://monitor.raydar.xyz/health`,
-        ...route,
-      );
-      sent.push({ id: t.id, kind: "page" });
+  for (const [id, tile] of Object.entries(state?.tiles || {})) {
+    if (tile?.state !== "DOWN" || tile.tier !== 1) continue;
+    if (tile.ackUntil) continue; // acknowledged: page after the ack, if still DOWN
+    const incident = pageIncidentKey(tile);
+    const pagedKey = K.alertSent(id, `DOWN:${incident}`);
+    const at = new Date().toISOString();
+    // Already delivered for this incident, or another tick is sending it now.
+    if (!claimed(await store.setNx(pagedKey, { at, status: "sending" }, PAGE_CLAIM_SECONDS))) continue;
+    const slotKey = K.alertSent(id, "DOWN");
+    if (!claimed(await store.setNx(slotKey, { at, incident }, RE_PAGE_SECONDS))) {
+      // The slot is this same incident's when an earlier send was cut off
+      // before it could release it: carry on and send. Otherwise this tile
+      // paged a different incident less than an hour ago: defer, retry later.
+      const holder = await store.get(slotKey);
+      if (holder?.incident !== incident) {
+        await store.del(pagedKey);
+        continue;
+      }
     }
+    const delivered = await send(
+      `🔴 DOWN: ${tile.name || id} — ${tile.reason || "no reason given"}\n`
+      + `since ${tile.since || at} · https://monitor.raydar.xyz/health`,
+      ...route,
+    );
+    if (delivered === false) {
+      // Not delivered: release both so the next tick tries again. The
+      // slack-transport tile already records the failure.
+      await store.del(pagedKey);
+      await store.del(slotKey);
+      continue;
+    }
+    try {
+      await store.set(pagedKey, { at, status: "delivered" }, PAGED_TTL_SECONDS);
+    } catch (e) {
+      // The short claim will lapse and the incident may post a second time,
+      // which is the safe side of losing a critical page.
+      console.error("health_page_mark_failed", { id, error: String(e?.message || e) });
+    }
+    sent.push({ id, kind: "page", incident });
   }
   return sent;
 }

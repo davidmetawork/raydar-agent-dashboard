@@ -28,26 +28,45 @@ const MAX_DOWN_TICKS = 60; // two hours at 2-minute ticks
  * {"booking-door":8}). Unset, empty or unparseable means every tile keeps the
  * two-tick default, exactly as before. An override can only LENGTHEN the
  * debounce (2..60 ticks), never shorten it, and it applies to entering DOWN
- * only: UNKNOWN keeps two ticks.
+ * only: UNKNOWN keeps two ticks. Entries that are not accepted (an unknown
+ * tile id, a value outside 2..60) are listed by name in the tick response's
+ * `downTicks.rejected` and logged, so a typo cannot pass for a setting.
  *
  * Why it exists: on 2026-09-23 the booking-door tile paged five times for
  * eight-minute admission closures that fixed themselves. Eight ticks means the
  * door must read closed for about fifteen minutes before it pages #notify.
  */
-export function downTicksOverrides(env = process.env) {
+export function readDownTicksOverrides(env = process.env, knownIds = null) {
+  const report = { effective: {}, rejected: [] };
   const raw = String(env?.HEALTH_DOWN_TICKS_OVERRIDES || "").trim();
-  if (!raw) return {};
+  if (!raw) return report;
   let parsed;
-  try { parsed = JSON.parse(raw); } catch { return {}; }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-  const out = {};
+  try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    report.rejected.push({ key: null, reason: "not a JSON object of tile id to ticks" });
+    return report;
+  }
   for (const [id, value] of Object.entries(parsed)) {
     const ticks = Number(value);
-    if (Number.isInteger(ticks) && ticks >= DEFAULT_DEBOUNCE_TICKS && ticks <= MAX_DOWN_TICKS) {
-      out[id] = ticks;
+    if (knownIds && !knownIds.has(id)) {
+      report.rejected.push({ key: id, reason: "no health tile has this id" });
+    } else if (typeof value !== "number" && typeof value !== "string") {
+      report.rejected.push({ key: id, reason: "ticks must be a whole number" });
+    } else if (Number.isInteger(ticks) && ticks >= DEFAULT_DEBOUNCE_TICKS && ticks <= MAX_DOWN_TICKS) {
+      report.effective[id] = ticks;
+    } else {
+      report.rejected.push({
+        key: id,
+        reason: `ticks must be a whole number from ${DEFAULT_DEBOUNCE_TICKS} to ${MAX_DOWN_TICKS}`,
+      });
     }
   }
-  return out;
+  return report;
+}
+
+/** The accepted overrides only (see readDownTicksOverrides for the report). */
+export function downTicksOverrides(env = process.env) {
+  return readDownTicksOverrides(env).effective;
 }
 
 /** How many consecutive ticks `state` needs before tile `id` enters it. */
@@ -302,7 +321,14 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 7. Debounce, transitions, incidents
-  const downOverrides = downTicksOverrides();
+  // Echoed in the tick response (downTicks) so step 9 of the #notify plan can
+  // read back what actually took effect; a typo'd id or bad value is rejected
+  // there by name and warned here, never silently dropped.
+  const downTicks = readDownTicksOverrides(process.env, new Set(CATALOG.map((c) => c.id)));
+  if (downTicks.rejected.length) {
+    console.warn("health_down_ticks_overrides_rejected", { rejected: downTicks.rejected });
+  }
+  const downOverrides = downTicks.effective;
   const tiles = {};
   const transitions = [];
   const incidentOps = [];
@@ -383,11 +409,11 @@ export async function runTick({ now = Date.now() } = {}) {
       name: check.name,
       ...(incidentAt ? { incidentAt, incidentWorst } : {}),
     };
-    // A first observation counts as a transition. Without this, a check whose
-    // very first result is DOWN records nothing, never fires the initial page,
-    // and is only caught later by the re-page path — which is what happened in
-    // the 2026-08-07 pager drill: the DM read "STILL DOWN (0m)" instead of
-    // "DOWN". A newly added check that is born broken must page like one.
+    // A first observation counts as a transition, so a check whose very first
+    // result is DOWN is recorded like any other (the 2026-08-07 pager drill
+    // read "STILL DOWN (0m)" because it was not). The pager itself works from
+    // the tile state, not this list (api/health/_lib/alert.mjs), so a newly
+    // added check that is born broken pages once like any other incident.
     if (changed) {
       transitions.push({
         id: check.id, name: check.name, tier: check.tier,
@@ -452,5 +478,5 @@ export async function runTick({ now = Date.now() } = {}) {
     await Promise.allSettled(writes);
   }
 
-  return { state, transitions, incidents: incidentOps.map((o) => o.record), kvOk };
+  return { state, transitions, incidents: incidentOps.map((o) => o.record), kvOk, downTicks };
 }

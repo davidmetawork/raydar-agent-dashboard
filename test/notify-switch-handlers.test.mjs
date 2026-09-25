@@ -233,10 +233,19 @@ test("alertOnTransitions routes tile pages to NOTIFY_SLACK_CHANNEL once the swit
   reset();
   const calls = [];
   const send = async (text, options) => { calls.push(options); return true; };
-  const t = { id: "paraform-session", name: "Paraform session", to: "DOWN", tier: 1, at: "2026-09-25T00:00:00Z", reason: "x" };
-  await alertOnTransitions([t], { tiles: {} }, { env: {}, send });
+  const t = { id: "paraform-session", name: "Paraform session", from: "OK", to: "DOWN", tier: 1, at: "2026-09-25T00:00:00Z", reason: "x" };
+  // The pager reads the tile state (one page per incident, PR 229 review).
+  const state = {
+    tiles: {
+      "paraform-session": {
+        state: "DOWN", tier: 1, name: "Paraform session", reason: "x",
+        since: "2026-09-25T00:00:00Z", incidentAt: "2026-09-25T00:00:00Z",
+      },
+    },
+  };
+  await alertOnTransitions([t], state, { env: {}, send });
   store.clear();
-  await alertOnTransitions([t], { tiles: {} }, { env: { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" }, send });
+  await alertOnTransitions([t], state, { env: { NOTIFY_SLACK_CHANNEL: "C_NOTIFY", HEALTH_ALERTS_ENABLED: "true" }, send });
   assert.deepEqual(calls, [undefined, { channel: "C_NOTIFY", botTokenFirst: true }]);
 });
 
