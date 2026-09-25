@@ -144,14 +144,9 @@ async function handleBookingSweep(req, res) {
       await notifySlack(`:warning: Booking sweep failed to pause ${result.pauseErrors.length} booked lead(s). They are still receiving sequence email.`).catch(() => {});
     }
 
-    // Actionable-only: a pass that paused nothing is silent. A pass that paused
-    // someone means outreach was about to embarrass us, and is worth one line.
-    if (apply && result.paused > 0) {
-      const bySeq = {};
-      for (const d of result.decisions) bySeq[d.sequence] = (bySeq[d.sequence] || 0) + 1;
-      const lines = Object.entries(bySeq).map(([s, n]) => `• ${s} — ${n}`);
-      await notifySlack(`:pause_button: Booking stop paused ${result.paused} booked candidate(s):\n${lines.join("\n")}`).catch(() => {});
-    }
+    // A pass that paused booked candidates is the control WORKING: a success,
+    // so it posts nothing (2026-09-25, one-channel rule; it used to post
+    // "Booking stop paused N" with no dedupe). The count is in the response.
 
     if (result.ok && apply) {
       await recordSuccessfulSweep(result);

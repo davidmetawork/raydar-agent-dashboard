@@ -36,6 +36,19 @@ export async function hGet(key) {
   }
 }
 
+/** Like hGet, but tells a missing key ({ok:true, value:null}) apart from a
+ *  failed read ({ok:false}). The tick uses it for hlth:state, where treating a
+ *  KV blip as "no prior state" would re-page ongoing outages. */
+export async function hGetChecked(key) {
+  try {
+    const raw = await kv(["GET", key]);
+    if (raw == null) return { ok: true, value: null };
+    try { return { ok: true, value: JSON.parse(raw) }; } catch { return { ok: true, value: raw }; }
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
 export async function hGetMany(keys) {
   if (!keys.length) return [];
   try {

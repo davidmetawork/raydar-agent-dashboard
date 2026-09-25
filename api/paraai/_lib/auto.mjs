@@ -7,7 +7,6 @@ import {
   isSuccessfulCall,
   normLinkedin,
   normalizeEmail,
-  notifySlack,
   paraAIConfig,
 } from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
@@ -3049,7 +3048,6 @@ export async function alertOnce(
   } = {},
   {
     takeAlertSlotImpl = takeAlertSlot,
-    notifySlackImpl = notifySlack,
   } = {},
 ) {
   // Phase 3 candidate failures are aggregate-only by contract. Their active
@@ -3076,26 +3074,12 @@ export async function alertOnce(
     )
       ? Math.max(60, Number(ttlSeconds))
       : 3600;
-    if (!(await takeAlertSlotImpl(key, ttl))) return false;
-    if (objection) {
-      await notifySlackImpl(
-        `⚠️ Para AI automation: job ${botId} submitted with a recorded sharing objection — review if needed.`,
-      );
-      return true;
-    }
-    if (code === "NO_RESUME_AFTER_RETRIES") {
-      await notifySlackImpl(
-        `⚠️ Para AI automation: job ${botId} needs review. ${RESUME_WAIT_TERMINAL_REASON}.`,
-      );
-      return true;
-    }
-    await notifySlackImpl(
-      `🚨 Para AI automation: ${code} for job ${botId}. ${String(detail || "").slice(0, 160)} ` +
-      (ceiling
-        ? "The consecutive step-failure ceiling was reached; the candidate is in review."
-        : "The durable retry policy remains in control."),
-    );
-    return true;
+    // The slot is still claimed and the return value still says whether this
+    // job/code was flagged, but nothing is posted to Slack (2026-09-25,
+    // one-channel rule). Per-job retries, ceilings and sharing objections are
+    // review items that live on the Para AI tab; a real pipeline stall is the
+    // stuck-job watchdog's to report.
+    return Boolean(await takeAlertSlotImpl(key, ttl));
   } catch { /* durable state and the worker response remain authoritative */ }
   return false;
 }

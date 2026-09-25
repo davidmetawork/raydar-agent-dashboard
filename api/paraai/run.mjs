@@ -1,4 +1,4 @@
-import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
+import { cors, requireAuth } from "./_lib/core.mjs";
 import { reportParaformReadAuthFailure } from "./_lib/auth-probe.mjs";
 import {
   automationConfig,
@@ -22,7 +22,6 @@ import {
   releaseJobLock,
   saveAndEnqueuePhase3ShadowJob,
   storeConfigured,
-  takeAlertSlot,
 } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 120 };
@@ -52,7 +51,10 @@ const statusFor = (code) => {
   return 400;
 };
 
-async function alert(error, jobId) {
+// A manual run failure is shown to the person who clicked, in the API
+// response. It is not posted to Slack (2026-09-25, one-channel rule). The one
+// hand-off kept is AUTH_EXPIRED, which feeds the global Paraform auth circuit.
+async function alert(error) {
   const code = String(error?.code || "RUN_FAILED");
   if (!ALERT_CODES.has(code)) return;
   try {
@@ -61,10 +63,6 @@ async function alert(error, jobId) {
         lane: "paraai_job",
         stage: "manual_run",
       });
-      return;
-    }
-    if (await takeAlertSlot(`${code}:${jobId}`, 3600)) {
-      await notifySlack(`🚨 Para AI: ${code} for job ${jobId || "unknown"} — ${String(error?.message || error).slice(0, 180)}. Review https://monitor.raydar.xyz/#paraai`);
     }
   } catch { /* the API response remains the primary, visible failure path */ }
 }
@@ -157,7 +155,7 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({ ok: true, job });
   } catch (error) {
-    await alert(error, jobId);
+    await alert(error);
     return res.status(statusFor(error?.code)).json({
       ok: false,
       error: error?.code || "run_failed",

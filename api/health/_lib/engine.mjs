@@ -6,10 +6,11 @@
 //  - One slow probe must never sink the tick (allSettled + per-probe timeout).
 //  - A probe we cannot run is UNKNOWN, never OK. Silence is not success.
 //  - Entering UNKNOWN or DOWN needs two consecutive ticks (transient network
-//    flaps are constant); leaving them is immediate.
+//    flaps are constant); leaving them is immediate. HEALTH_DOWN_TICKS_OVERRIDES
+//    can lengthen the DOWN debounce for named tiles (see downTicksOverrides).
 import { CATALOG, byId } from "./catalog.mjs";
 import { EVALUATORS } from "./evaluators.mjs";
-import { hGet, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
+import { hGet, hGetChecked, hGetMany, hSet, K, kvConfigured } from "./kv.mjs";
 
 const SAMPLE_CAP = 720; // 24h at 2-min ticks
 const TRANS_CAP = 200;
@@ -18,6 +19,124 @@ const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
 /** States that must be seen twice in a row before they stick. */
 const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
+/** Ticks a debounced state must be seen in a row, unless overridden below. */
+export const DEFAULT_DEBOUNCE_TICKS = 2;
+const MAX_DOWN_TICKS = 60; // two hours at 2-minute ticks
+
+/**
+ * Per-tile DOWN debounce, read from HEALTH_DOWN_TICKS_OVERRIDES (JSON, e.g.
+ * {"booking-door":8}). Unset, empty or unparseable means every tile keeps the
+ * two-tick default, exactly as before. An override can only LENGTHEN the
+ * debounce (2..60 ticks), never shorten it, and it applies to entering DOWN
+ * only: UNKNOWN keeps two ticks. Entries that are not accepted (an unknown
+ * tile id, a value outside 2..60) are listed by name in the tick response's
+ * `downTicks.rejected` and logged, so a typo cannot pass for a setting.
+ *
+ * Why it exists: on 2026-09-23 the booking-door tile paged five times for
+ * eight-minute admission closures that fixed themselves. Eight ticks means the
+ * door must read closed for about fifteen minutes before it pages #notify.
+ */
+export function readDownTicksOverrides(env = process.env, knownIds = null) {
+  const report = { effective: {}, rejected: [] };
+  const raw = String(env?.HEALTH_DOWN_TICKS_OVERRIDES || "").trim();
+  if (!raw) return report;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    report.rejected.push({ key: null, reason: "not a JSON object of tile id to ticks" });
+    return report;
+  }
+  for (const [id, value] of Object.entries(parsed)) {
+    const ticks = Number(value);
+    if (knownIds && !knownIds.has(id)) {
+      report.rejected.push({ key: id, reason: "no health tile has this id" });
+    } else if (typeof value !== "number" && typeof value !== "string") {
+      report.rejected.push({ key: id, reason: "ticks must be a whole number" });
+    } else if (Number.isInteger(ticks) && ticks >= DEFAULT_DEBOUNCE_TICKS && ticks <= MAX_DOWN_TICKS) {
+      report.effective[id] = ticks;
+    } else {
+      report.rejected.push({
+        key: id,
+        reason: `ticks must be a whole number from ${DEFAULT_DEBOUNCE_TICKS} to ${MAX_DOWN_TICKS}`,
+      });
+    }
+  }
+  return report;
+}
+
+/** The accepted overrides only (see readDownTicksOverrides for the report). */
+export function downTicksOverrides(env = process.env) {
+  return readDownTicksOverrides(env).effective;
+}
+
+/** How many consecutive ticks `state` needs before tile `id` enters it. */
+export function debounceTicksFor(id, state, overrides = {}) {
+  if (state === "DOWN" && overrides[id]) return overrides[id];
+  return DEFAULT_DEBOUNCE_TICKS;
+}
+
+/**
+ * The debounce step for one tile. Returns the HELD tile record (the tile keeps
+ * its previous state and counts the pending one) or null when the raw state
+ * should be applied now. A first observation, a repeat of the current state
+ * and a non-debounced state (OK, DEGRADED) are always applied immediately;
+ * leaving DOWN or UNKNOWN is immediate.
+ */
+export function holdForDebounce(before, raw, needTicks, nowIso) {
+  const state = raw?.state;
+  if (!DEBOUNCED.has(state) || !before?.state || before.state === state) return null;
+  const pendingCount = before.pending === state
+    ? Math.max(1, Number(before.pendingCount) || 1) + 1
+    : 1;
+  if (pendingCount >= needTicks) return null;
+  return {
+    ...before,
+    pending: state,
+    pendingCount,
+    pendingReason: raw.reason || null,
+    metrics: raw.metrics || before.metrics || null,
+    lastCheckedAt: nowIso,
+  };
+}
+
+/**
+ * How long a tile may stay out of DOWN (in DEGRADED or UNKNOWN) and still
+ * rejoin the same DOWN episode when it goes red again. Equal to the pager's
+ * one-hour flap slot (RE_PAGE_SECONDS in alert.mjs).
+ */
+export const DOWN_EPISODE_REJOIN_MS = 60 * 60 * 1000;
+
+/**
+ * The DOWN-episode fields for a tile's next record. The tier-1 pager posts once
+ * per episode (alert.mjs pageIncidentKey), so the episode must be narrower
+ * than the incident: `incidentAt` survives DEGRADED and UNKNOWN until the tile
+ * reads OK, which would let one page cover a DOWN, then hours of DEGRADED,
+ * then a new DOWN with a different reason. (PR 229 review, round 2.)
+ *
+ *  - Entering DOWN starts a new episode (`downEpisodeAt` = now), unless the
+ *    tile left DOWN less than DOWN_EPISODE_REJOIN_MS ago: a short
+ *    DOWN/DEGRADED flap stays one episode, so it pages once.
+ *  - Staying DOWN keeps the episode. A tile already DOWN when this shipped has
+ *    no `downEpisodeAt`; its `since` (the time it entered DOWN) stands in.
+ *  - Leaving DOWN for DEGRADED or UNKNOWN stamps `downLeftAt` and keeps the
+ *    episode, so a quick return can rejoin it.
+ *  - OK (or PAUSED) ends the episode, exactly as it closes the incident.
+ */
+export function nextDownEpisode(before, state, nowIso) {
+  if (state !== "DOWN" && state !== "DEGRADED" && state !== "UNKNOWN") return {};
+  const wasDown = before?.state === "DOWN";
+  const carried = before?.downEpisodeAt || (wasDown ? before?.since : null) || null;
+  if (state === "DOWN") {
+    if (wasDown) return { downEpisodeAt: carried || nowIso };
+    const leftMs = Date.parse(before?.downLeftAt || "");
+    const rejoin = Boolean(carried) && Number.isFinite(leftMs)
+      && Date.parse(nowIso) - leftMs < DOWN_EPISODE_REJOIN_MS;
+    return { downEpisodeAt: rejoin ? carried : nowIso };
+  }
+  if (wasDown) return { downEpisodeAt: carried || nowIso, downLeftAt: nowIso };
+  if (carried && before?.downLeftAt) return { downEpisodeAt: carried, downLeftAt: before.downLeftAt };
+  return {};
+}
 
 export const worst = (states) =>
   states.reduce((acc, s) => (STATE_ORDER[s] > STATE_ORDER[acc] ? s : acc), "OK");
@@ -114,7 +233,7 @@ async function runPull(check) {
 
 /**
  * @param {object} deps injectable for tests: fetchers and clock
- * @returns {{state: object, transitions: Array, kvOk: boolean}}
+ * @returns {{state: object, transitions: Array, kvOk: boolean, stateLoaded: boolean}}
  */
 export async function runTick({ now = Date.now() } = {}) {
   const nowIso = new Date(now).toISOString();
@@ -131,7 +250,19 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 2. Load prior state, beats, acks, and the n8n watchdog's state
-  const prev = (await hGet(K.state)) || { tiles: {} };
+  // A FAILED read of hlth:state is not an empty state. Treating it as one
+  // would make every tile a first observation (fresh `since`, no incident or
+  // DOWN-episode pointer), and persisting that would hand the pager a new key
+  // for an ongoing outage: a duplicate #notify page. So a failed read skips
+  // persistence and alerting for this tick (stateLoaded=false); the next tick
+  // picks up from the last good state. A genuinely missing key (first tick
+  // ever) reads as ok with no value and proceeds normally.
+  const prevRead = await hGetChecked(K.state);
+  const stateLoaded = prevRead.ok;
+  if (!stateLoaded) console.warn("health_state_unreadable", { kvOk });
+  const prev = (prevRead.ok && prevRead.value && typeof prevRead.value === "object")
+    ? prevRead.value
+    : { tiles: {} };
   const beatKeys = CATALOG.filter((c) => c.kind === "beat").map((c) => K.beat(c.probe.lane));
   const ackKeys = CATALOG.map((c) => K.ack(c.id));
   const [beatVals, ackVals, watchdog, lastDelivered, gmailBackoffUntil] = await Promise.all([
@@ -241,6 +372,14 @@ export async function runTick({ now = Date.now() } = {}) {
   }
 
   // ---- 7. Debounce, transitions, incidents
+  // Echoed in the tick response (downTicks) so step 9 of the #notify plan can
+  // read back what actually took effect; a typo'd id or bad value is rejected
+  // there by name and warned here, never silently dropped.
+  const downTicks = readDownTicksOverrides(process.env, new Set(CATALOG.map((c) => c.id)));
+  if (downTicks.rejected.length) {
+    console.warn("health_down_ticks_overrides_rejected", { rejected: downTicks.rejected });
+  }
+  const downOverrides = downTicks.effective;
   const tiles = {};
   const transitions = [];
   const incidentOps = [];
@@ -254,19 +393,14 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     const raw = results[check.id] || { state: "UNKNOWN", reason: "not evaluated" };
     let state = raw.state;
-    // Two consecutive ticks required to ENTER a debounced state.
-    if (DEBOUNCED.has(state) && before.state && before.state !== state) {
-      const pendingSame = before.pending === state;
-      if (!pendingSame) {
-        tiles[check.id] = {
-          ...before,
-          pending: state,
-          pendingReason: raw.reason || null,
-          metrics: raw.metrics || before.metrics || null,
-          lastCheckedAt: nowIso,
-        };
-        continue;
-      }
+    // Consecutive ticks required to ENTER a debounced state: two by default,
+    // more for a tile named in HEALTH_DOWN_TICKS_OVERRIDES (DOWN only).
+    const held = holdForDebounce(
+      before, raw, debounceTicksFor(check.id, state, downOverrides), nowIso,
+    );
+    if (held) {
+      tiles[check.id] = held;
+      continue;
     }
     const changed = before.state !== state;
     // An incident spans one continuous departure from OK: it opens on the
@@ -325,12 +459,14 @@ export async function runTick({ now = Date.now() } = {}) {
       group: check.group,
       name: check.name,
       ...(incidentAt ? { incidentAt, incidentWorst } : {}),
+      // The pager's key: one page per DOWN episode (see nextDownEpisode).
+      ...nextDownEpisode(before, state, nowIso),
     };
-    // A first observation counts as a transition. Without this, a check whose
-    // very first result is DOWN records nothing, never fires the initial page,
-    // and is only caught later by the re-page path — which is what happened in
-    // the 2026-08-07 pager drill: the DM read "STILL DOWN (0m)" instead of
-    // "DOWN". A newly added check that is born broken must page like one.
+    // A first observation counts as a transition, so a check whose very first
+    // result is DOWN is recorded like any other (the 2026-08-07 pager drill
+    // read "STILL DOWN (0m)" because it was not). The pager itself works from
+    // the tile state, not this list (api/health/_lib/alert.mjs), so a newly
+    // added check that is born broken pages once like any other incident.
     if (changed) {
       transitions.push({
         id: check.id, name: check.name, tier: check.tier,
@@ -360,8 +496,9 @@ export async function runTick({ now = Date.now() } = {}) {
     schema: "raydar-health-state-v1", checkedAt: nowIso, overall, criticalDown, counts, tiles,
   };
 
-  // ---- 9. Persist (best effort; a KV failure must not throw the tick away)
-  if (kvOk) {
+  // ---- 9. Persist (best effort; a KV failure must not throw the tick away).
+  // Never persist a tick computed from an unreadable prior state (step 2).
+  if (kvOk && stateLoaded) {
     const writes = [hSet(K.state, state)];
     const minute = Math.floor(now / 60000);
     for (const check of CATALOG) {
@@ -395,5 +532,7 @@ export async function runTick({ now = Date.now() } = {}) {
     await Promise.allSettled(writes);
   }
 
-  return { state, transitions, incidents: incidentOps.map((o) => o.record), kvOk };
+  return {
+    state, transitions, incidents: incidentOps.map((o) => o.record), kvOk, stateLoaded, downTicks,
+  };
 }

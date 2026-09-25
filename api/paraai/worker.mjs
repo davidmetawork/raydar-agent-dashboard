@@ -22,13 +22,8 @@ import {
   reportParaformReadAuthFailure,
   runScheduledAuthProbeTick,
 } from "./_lib/auth-probe.mjs";
-import { runCuratedFitDeadmanTick } from "./_lib/curated-fit-deadman.mjs";
 import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
 import { notifySlack } from "./_lib/core.mjs";
-import {
-  PHASE3_AGGREGATE_ALERT_KEY,
-  PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
-} from "./_lib/phase3-shadow-policy.mjs";
 import { outreachHealth, runOutreachTick } from "./_lib/outreach.mjs";
 import {
   runPhase4SourceCaptureTick,
@@ -157,40 +152,24 @@ export function phase3AggregateSafetyDigest(status) {
     .digest("hex");
 }
 
-function phase3AggregateAlertSlotKey(health) {
-  const episode = Number(health?.failureEpisodeStartedAtMs);
-  return Number.isSafeInteger(episode) && episode > 0
-    ? `${PHASE3_AGGREGATE_ALERT_KEY}:${episode}`
-    : PHASE3_AGGREGATE_ALERT_KEY;
-}
-
+// The aggregate audit's failure streak is RECORDED (it rides on the status
+// response as auditFailureStreak / aggregateAuditFailing) but no longer posted
+// to Slack (2026-09-25, one-channel rule): the message itself said the shadow
+// write fences remain authoritative, so no human had to act.
 export async function phase3ShadowStatusWithEscalation({
   statusImpl = phase3ShadowReleaseStatus,
   recordImpl = recordPhase3ShadowAggregateAuditResult,
-  alertSlotImpl = takeAlertSlot,
-  notifyImpl = notifySlack,
 } = {}) {
   let status;
   try {
     status = await statusImpl();
   } catch (cause) {
     try {
-      const health = await recordImpl({
+      await recordImpl({
         failed: true,
         reason: "status_check_failed",
         exception: true,
       });
-      if (
-        health.shouldAlert
-        && await alertSlotImpl(
-          phase3AggregateAlertSlotKey(health),
-          PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
-        )
-      ) {
-        await notifyImpl(
-          "🚨 Para AI Phase 3 shadow aggregate audit failed on consecutive status checks (status_check_failed). Shadow write fences remain authoritative.",
-        );
-      }
     } catch { /* preserve the primary status failure */ }
     throw cause;
   }
@@ -207,17 +186,6 @@ export async function phase3ShadowStatusWithEscalation({
       decisions: Math.max(0, Number(status.decisions) || 0),
       safetyDigest: phase3AggregateSafetyDigest(status),
     });
-    if (
-      health.shouldAlert
-      && await alertSlotImpl(
-        phase3AggregateAlertSlotKey(health),
-        PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
-      )
-    ) {
-      await notifyImpl(
-        `🚨 Para AI Phase 3 shadow aggregate audit failed on ${health.failureStreak} consecutive status checks (${health.reason}). Shadow write fences remain authoritative.`,
-      );
-    }
   } catch { /* status remains authoritative; the next check retries the streak */ }
   return {
     ...status,
@@ -779,15 +747,11 @@ export async function handleParaaiWorker(req, res, {
     // flag is read via GET /api/ops/paraform-auth, and no lane holds on it
     // yet. Covered by test/paraform-auth-breaker.test.mjs.
     try { await runScheduledAuthProbeTick(); } catch { /* observe-only */ }
-    // Independent dead-man for the GitHub Actions curated-fit lane. This runs
-    // from Vercel/Upstash so a GitHub outage cannot suppress both execution and
-    // its alarm. Aggregate watermark only; no candidate data or Paraform write.
-    try {
-      await runCuratedFitDeadmanTick({
-        alertSlotImpl: takeAlertSlot,
-        notifyImpl: notifySlack,
-      });
-    } catch { /* observe-only */ }
+    // The curated-fit dead-man used to run here. It watched a GitHub Actions
+    // lane that has been paused since 2026-09-01 (D18b retires curate health
+    // checks), and its heartbeat JSON is version 2 while the reader requires
+    // version 1, so on resume it would have posted state_malformed every 3h.
+    // Removed from the tick 2026-09-25; the module is left for reference.
     // Stuck-job watchdog. Every alert this lane had fired on an explicit error
     // code, so the 2026-08-03 outage — a Vercel-killed function that never got
     // to raise one — ran 14 hours in silence while health stayed green. This
@@ -816,59 +780,11 @@ export async function handleParaaiWorker(req, res, {
       phase3Status,
       phase3StatusError,
     } = await runAutomationCycle({ mode, config: automation });
-    if (
-      resumeSweepError &&
-      await takeAlertSlot("resume-wait-sweep-failed", 3600).catch(() => false)
-    ) {
-      await notifySlack(
-        `🚨 Para AI resume-wait sweep failed (${resumeSweepError.error}). Direct-submit queue processing continued.`,
-      ).catch(() => {});
-    }
-    const remainderIssue = remainderError?.error || (
-      remainder?.ok === false ? remainder.status : null
-    );
-    if (
-      remainderIssue
-      && await takeAlertSlot(
-        "phase2-remainder-controller-degraded",
-        3600,
-      ).catch(() => false)
-    ) {
-      await notifySlack(
-        `🚨 Para AI Phase 2 remainder controller requires review (${remainderIssue}). Normal queue processing continued.`,
-      ).catch(() => {});
-    }
-    const resumeOnlyBackfillIssue =
-      resumeOnlyBackfillError?.error || (
-        resumeOnlyBackfill?.ok === false
-          ? resumeOnlyBackfill.status
-          : null
-      );
-    if (
-      resumeOnlyBackfillIssue
-      && await takeAlertSlot(
-        "resume-only-backfill-controller-degraded",
-        3600,
-      ).catch(() => false)
-    ) {
-      await notifySlack(
-        `🚨 Para AI resume-only backfill controller requires review (${resumeOnlyBackfillIssue}). Normal queue processing continued; no resume chase was opened.`,
-      ).catch(() => {});
-    }
-    const phase3ReleaseIssue = phase3ReleaseError?.error || (
-      phase3Release?.ok === false ? phase3Release.status : null
-    );
-    if (
-      phase3ReleaseIssue
-      && await takeAlertSlot(
-        "phase3-shadow-release-controller-degraded",
-        3600,
-      ).catch(() => false)
-    ) {
-      await notifySlack(
-        `🚨 Para AI Phase 3 shadow release requires review (${phase3ReleaseIssue}). Normal queue processing continued.`,
-      ).catch(() => {});
-    }
+    // Sub-controller failures (resume-wait sweep, Phase 2 remainder,
+    // resume-only backfill, Phase 3 shadow release) are reported in this
+    // response's `degraded` flag and error fields, not Slack (2026-09-25,
+    // one-channel rule): each said normal queue processing continued, so no
+    // human had to act. Only "outreach worker failed" below still posts.
     let outreach = null;
     let outreachError = null;
     try {
@@ -898,11 +814,7 @@ export async function handleParaaiWorker(req, res, {
           error: String(error?.code || "recovery_failed"),
           detail: String(error?.message || error).slice(0, 180),
         };
-        if (await takeAlertSlot("auto-recovery-failed", 3600).catch(() => false)) {
-          await notifySlack(
-            `🚨 Para AI recovery scan failed (${recoveryError.error}). Durable queue processing continued; inspect worker health.`,
-          ).catch(() => {});
-        }
+        // Reported in the response, not Slack: durable processing continued.
       }
     }
     return res.status(200).json({

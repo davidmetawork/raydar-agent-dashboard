@@ -525,6 +525,40 @@ test("cancellation is recorded but never auto-unpauses or calls pause", async ()
   assert.equal(writes.some((entry) => entry.value.state === "done"), true);
 });
 
+test("cancellations and pause errors post nothing even with a free alert slot (2026-09-25)", async () => {
+  // Nearly every booking.cancelled is the Scheduler production-monitor canary
+  // cancelling its own test booking: ~64 fake "booking cancelled" posts a
+  // day. Pause errors are retried by the Scheduler and owned by the sweep.
+  const alerts = [];
+  const cancelled = await handleRaydarBookingWebhook(
+    signedRequest(booking({
+      event: "booking.cancelled",
+      eventId: "bevt_test_cancel_quiet",
+      status: "cancelled",
+    })),
+    handlerDeps({
+      alertAllowed: async () => true,
+      alert: async (text) => { alerts.push(text); },
+    }),
+  );
+  assert.equal(cancelled.status, 202);
+  const failed = await handleRaydarBookingWebhook(
+    signedRequest(booking({ eventId: "bevt_test_pause_errors_quiet" })),
+    handlerDeps({
+      alertAllowed: async () => true,
+      alert: async (text) => { alerts.push(text); },
+      pause: async () => ({
+        decisions: [{}],
+        paused: 0,
+        pauseErrors: [{ code: "PAUSE_FAILED" }],
+        deferred: false,
+      }),
+    }),
+  );
+  assert.equal(failed.status, 503);
+  assert.deepEqual(alerts, []);
+});
+
 test("durable replay returns duplicate only after a prior event reached done", async () => {
   let pauseCalls = 0;
   const response = await handleRaydarBookingWebhook(

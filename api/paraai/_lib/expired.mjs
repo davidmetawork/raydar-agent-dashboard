@@ -17,9 +17,7 @@
 // contradicts it: no reply on the outreach thread, no reply-lane record, and
 // Paraform's own reached_out_to_candidate flag set. Anything else is a review
 // card, never a softer reason.
-import { notifySlack } from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
-import { takeAlertSlot } from "./store.mjs";
 import { getOutreachState } from "./outreach-store.mjs";
 import {
   getThread,
@@ -255,20 +253,11 @@ export function planExpiredRow(row, evidence, { config, now, claim }) {
 
 // ------------------------------------------------------------------- alerts
 
-async function alertReview(record, plan) {
-  if (!(await takeAlertSlot(`expired-review:${record.requestId}`, 24 * 3600).catch(() => false))) return false;
-  const who = record.candidateName || "a candidate";
-  const where = [record.roleName, record.companyName].filter(Boolean).join(" at ") || "a role";
-  const why = plan.resolution === "candidate_replied"
-    ? "they replied to our outreach, so \"didn't get back\" would be untrue"
-    : plan.resolution === "never_contacted"
-      ? "Paraform has no record that we reached out"
-      : String(plan.resolution || "needs a look");
-  await notifySlack(
-    `⏳ Expired ParaAI match needs your call: ${who} for ${where} — ${why}. `
-    + "Late submit or add a reason on paraform.com/home.",
-  ).catch(() => {});
-  return true;
+// An expired match that needs a human call is a per-candidate review item.
+// It is no longer posted to Slack (2026-09-25, one-channel rule); the record
+// is saved as needs_review and shows on the Para AI tab.
+async function alertReview() {
+  return false;
 }
 
 // -------------------------------------------------------------------- tick
@@ -459,12 +448,7 @@ export async function runExpiredTick({
       };
       await saveExpiredRecord(record, record.revision).catch(() => {});
       summary.results.push({ requestId: row.id, outcome: "error", code: record.error.code });
-      if (await takeAlertSlot(`expired-error:${row.id}`, 12 * 3600).catch(() => false)) {
-        await notifySlack(
-          `🚨 Para AI expired-match dismissal failed (${record.error.code}) for `
-          + `${record.roleName || "a role"} at ${record.companyName || "a company"}. It is in review, not retried.`,
-        ).catch(() => {});
-      }
+      // In review, not retried, and not posted (2026-09-25, one-channel rule).
     }
   }
 

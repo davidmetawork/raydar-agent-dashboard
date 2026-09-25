@@ -1516,7 +1516,7 @@ test("worker escalation ignores benign timeout/conflict counts but catches hard 
   });
 });
 
-test("aggregate escalation uses one shared alert slot key", async () => {
+test("aggregate escalation records the failure streak but posts nothing", async () => {
   const alertSlots = [];
   const claimedAlertSlots = new Set();
   const notifications = [];
@@ -1577,15 +1577,13 @@ test("aggregate escalation uses one shared alert slot key", async () => {
     },
   });
 
-  assert.deepEqual(alertSlots, Array.from({ length: 2 }, () => ({
-    key: `${PHASE3_AGGREGATE_ALERT_KEY}:${ANCHOR_MS}`,
-    ttl: PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
-  })));
-  assert.equal(notifications.length, 1);
-  assert.equal(
-    notifications[0].includes("hard_technical_failure"),
-    true,
-  );
+  // 2026-09-25 one-channel rule: the streak is recorded on the status, but
+  // no slot is taken and nothing is posted ("shadow write fences remain
+  // authoritative" meant no human had to act).
+  assert.deepEqual(alertSlots, []);
+  assert.deepEqual(notifications, []);
+  assert.equal(typeof PHASE3_AGGREGATE_ALERT_KEY, "string");
+  assert.equal(typeof PHASE3_AGGREGATE_ALERT_TTL_SECONDS, "number");
 });
 
 test("candidate Phase 3 retries and ceilings emit no direct Slack alert", async () => {
@@ -1627,7 +1625,10 @@ test("candidate Phase 3 retries and ceilings emit no direct Slack alert", async 
     dependencies,
   );
   assert.equal(directSlots.at(-1).ttl, 3600);
-  assert.equal(directNotifications.length, 1);
+  // The slot is still claimed per job and code, but alertOnce posts nothing
+  // (2026-09-25 one-channel rule): per-job automation failures are review
+  // items on the Para AI tab.
+  assert.deepEqual(directNotifications, []);
 });
 
 test("a 17-row multi-batch release cannot escalate before cohort admission completes", async () => {

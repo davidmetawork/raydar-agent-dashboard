@@ -140,12 +140,10 @@ export async function handleRaydarBookingWebhook(request, {
     } catch {
       return json({ ok: false, error: "store_unavailable" }, 503);
     }
-    if (
-      event.event === "booking.cancelled"
-      && await alertAllowed(`raydar-cancel:${event.bookingId}`, 3600)
-    ) {
-      await alert(":calendar: Raydar booking cancelled — a paused sequence lead may need resuming. Sequences are never auto-resumed.").catch(() => {});
-    }
+    // No Slack for a cancellation (2026-09-25, one-channel rule). Nearly every
+    // one is the Scheduler production-monitor canary cancelling its own test
+    // booking (reason production_monitor_complete): about 64 fake "booking
+    // cancelled" posts a day. The durable cancel record above is kept.
     return json({ ok: true, event: event.event, recorded: true }, 202);
   }
 
@@ -167,9 +165,8 @@ export async function handleRaydarBookingWebhook(request, {
     return json({ ok: false, error: expired ? "expired" : "error" }, 503);
   }
 
-  if (outcome.pauseErrors?.length && (await alertAllowed("raydar-booking-pause-errors", 3600))) {
-    await alert(`:warning: Raydar booking stop failed to pause ${outcome.pauseErrors.length} lead(s); the hourly native index sweep will retry.`).catch(() => {});
-  }
+  // Pause errors are not posted here: the Scheduler retries this webhook and
+  // the booking sweep owns the one "failed to pause" page.
   if (outcome.pauseErrors?.length) {
     // Leave the durable claim in `received`: the scheduler should retry this
     // idempotent pause until every matched lead passes read-back.

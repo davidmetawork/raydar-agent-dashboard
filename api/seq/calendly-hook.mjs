@@ -57,10 +57,8 @@ export async function handleCalendlyWebhook(request, {
   // invitee.canceled: RECORD ONLY. Auto-unpausing would re-nag someone who
   // cancelled precisely because they are no longer interested — a human decides.
   if (event.event === "invitee.canceled") {
+    // No Slack: a cancellation is an FYI, not a breakage (2026-09-25).
     if (event.inviteeUri) await kvSet(K.cancel(event.inviteeUri), { at: new Date().toISOString(), eventName: event.eventName }, 90 * 24 * 3600);
-    if (await shouldAlert(`cancel:${event.inviteeUri || event.email}`, 3600)) {
-      await alert(`:calendar: Calendly booking cancelled — a paused sequence lead may need resuming (${event.eventName || "booking"}). Sequences are never auto-resumed.`).catch(() => {});
-    }
     return json({ ok: true, event: event.event, recorded: true }, 202);
   }
 
@@ -99,9 +97,8 @@ export async function handleCalendlyWebhook(request, {
     return json({ ok: false, error: expired ? "expired" : "error" }, 503);
   }
 
-  if (outcome.pauseErrors?.length && (await shouldAlert("pause-errors", 3600))) {
-    await alert(`:warning: Booking stop failed to pause ${outcome.pauseErrors.length} lead(s) after a Calendly booking — the hourly sweep will retry.`).catch(() => {});
-  }
+  // Pause errors are not posted here: the booking sweep retries them and owns
+  // the one "failed to pause" page (2026-09-25, one-channel rule).
 
   return json({
     ok: true,
