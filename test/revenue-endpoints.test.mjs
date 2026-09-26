@@ -17,6 +17,10 @@ const noCors = () => false;
 const allowAuth = (email = "someone@raydar.xyz") => async (req) => { req.authedEmail = email; return true; };
 const allowEditor = () => true;
 const denyEditor = (req, res) => { res.status(403).json({ ok: false, error: "editor_only" }); return false; };
+// Every test below that is not itself ABOUT the dashboardReaders brake
+// passes this explicitly, so it exercises the lock/build path it names
+// rather than the real (KV-less-in-test-env, fail-closed) default.
+const notPaused = async () => ({ paused: false, state: "absent" });
 
 function mockRes() {
   const res = {
@@ -224,6 +228,7 @@ test("a stale cache is served immediately when another request already holds the
     activity: async () => ({ payload: { paraform: {} }, refreshedAt: 1 }),
     lock: async () => false, // someone else is rebuilding
     build: async () => { built += 1; return {}; },
+    pauseState: notPaused,
     persistActivity: async () => true, now: () => new Date("2026-08-14T18:00:00Z"),
   });
   const res = mockRes();
@@ -239,6 +244,7 @@ test("a provider failure still returns revenue, because revenue is our own data"
     deals: async () => [deal()], meta: async () => ({}),
     activity: async () => ({ payload: null, refreshedAt: 0 }),
     lock: async () => true, build: async () => { throw new Error("paraform down"); },
+    pauseState: notPaused,
     persistActivity: async () => true, now: () => new Date("2026-08-14T18:00:00Z"),
   });
   const res = mockRes();
@@ -246,6 +252,47 @@ test("a provider failure still returns revenue, because revenue is our own data"
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.revenue.bookedCents, 1000000);
   assert.equal(res.body.activity, null);
+});
+
+// C4 follow-up (2026-09-26 Paraform read-cut pass): the summary handler's
+// OWN inline cold-cache rebuild used to ignore the dashboardReaders brake
+// entirely, unlike the cron warmer (see the matching refresh-handler test
+// below) — a stale cache plus an armed brake still hit webview/the
+// scheduler booking index on the very next page view.
+test("a paused dashboardReaders control stops the summary's inline rebuild too", async () => {
+  let built = 0;
+  const handler = createSummaryHandler({
+    corsHandler: noCors, authHandler: allowAuth(), kvReady: () => true,
+    deals: async () => [deal()], meta: async () => ({}),
+    activity: async () => ({ payload: { paraform: {} }, refreshedAt: 1 }), // very stale
+    lock: async () => true, // would win the lock if it ever got there
+    build: async () => { built += 1; return {}; },
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "incident-x" }),
+    persistActivity: async () => true, now: () => new Date("2026-08-14T18:00:00Z"),
+  });
+  const res = mockRes();
+  await handler(req(), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(built, 0, "a paused control must stop before webview is ever hit");
+  assert.equal(res.body.activityStale, true);
+  assert.equal(res.body.revenue.bookedCents, 1000000, "revenue itself never depends on Paraform");
+});
+
+test("an unreadable pause control fails closed and still serves the stale cache", async () => {
+  let built = 0;
+  const handler = createSummaryHandler({
+    corsHandler: noCors, authHandler: allowAuth(), kvReady: () => true,
+    deals: async () => [deal()], meta: async () => ({}),
+    activity: async () => ({ payload: { paraform: {} }, refreshedAt: 1 }),
+    lock: async () => true,
+    build: async () => { built += 1; return {}; },
+    pauseState: async () => { throw new Error("kv unreachable"); },
+    persistActivity: async () => true, now: () => new Date("2026-08-14T18:00:00Z"),
+  });
+  const res = mockRes();
+  await handler(req(), res);
+  assert.equal(built, 0);
+  assert.equal(res.body.activityStale, true);
 });
 
 test("an operator target override beats the built-in default", async () => {
@@ -269,8 +316,6 @@ test("the warmer refuses an unauthenticated caller", async () => {
   await handler(req(), res);
   assert.equal(res.statusCode, 401);
 });
-
-const notPaused = async () => ({ paused: false, state: "absent" });
 
 test("a double source failure never overwrites the last-good payload", async () => {
   let persisted = 0;
