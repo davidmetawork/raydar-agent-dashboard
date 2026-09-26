@@ -3,15 +3,25 @@
 // request-lane-throttle.mjs). Isolated from outreach-store.mjs/expired-store.mjs
 // on purpose: cooldown, cadence and rate state are shared BETWEEN the two
 // lanes, so they cannot live inside either lane's own single-lane store.
-// Same physical store as the outreach state (same env fallback order), just a
-// separate module so a lane's store outage can never be confused with this
-// throttle's own.
+//
+// Env fallback order (2026-09-26 review): PARAAI_REPLY_* first, matching the
+// established convention for state shared BETWEEN the two lanes —
+// request-claim.mjs (the cross-lane arbitration store) and expired-store.mjs
+// both key off PARAAI_REPLY_KV_REST_API_URL/_TOKEN, not the outreach-only
+// prefix. PARAAI_OUTREACH_*, PARAAI_REPLY_*, PARAAI_INTEREST_* and
+// PARAAI_SOURCE_*_KV_REST_API_URL are independently-set env vars in this repo
+// and are not guaranteed to point at the same physical Upstash instance, so
+// this module falls back through BOTH per-lane prefixes (same layered
+// pattern interest-store.mjs already uses) before the generic var, rather
+// than defaulting straight to one lane's own prefix.
 const KV_URL = String(
-  process.env.PARAAI_OUTREACH_KV_REST_API_URL
+  process.env.PARAAI_REPLY_KV_REST_API_URL
+  || process.env.PARAAI_OUTREACH_KV_REST_API_URL
   || process.env.KV_REST_API_URL
   || "",
 ).replace(/\/+$/, "");
-const KV_TOKEN = process.env.PARAAI_OUTREACH_KV_REST_API_TOKEN
+const KV_TOKEN = process.env.PARAAI_REPLY_KV_REST_API_TOKEN
+  || process.env.PARAAI_OUTREACH_KV_REST_API_TOKEN
   || process.env.KV_REST_API_TOKEN
   || "";
 

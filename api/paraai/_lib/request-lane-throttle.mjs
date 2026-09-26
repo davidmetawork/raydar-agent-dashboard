@@ -48,6 +48,7 @@ const CADENCE_KEY_PREFIX = "paraai:request-lanes:cadence:";
 const IDENTITY_CHECK_KEY = "paraai:request-lanes:identity-check-at";
 const RATE_BUCKET_PREFIX = "paraai:request-lanes:rate-minute:";
 const COUNTER_PREFIX = "paraai:request-lanes:count:";
+const CROSS_LANE_MUTEX_KEY = "paraai:request-lanes:cross-lane-mutex";
 
 export const MIN_COOLDOWN_SECONDS = 60;
 const DEFAULT_RATE_PER_MINUTE = 10;
@@ -61,6 +62,12 @@ export const MIN_CADENCE_SECONDS = 60;
 export const MAX_CADENCE_SECONDS = 300;
 const RATE_BUCKET_TTL_SECONDS = 90;
 const COUNTER_TTL_SECONDS = 3 * 24 * 60 * 60;
+// Longer than core.mjs's own PARAAI_TRPC_TIMEOUT_MS (20s default), so the
+// mutex always outlives the single call it guards even in the worst case,
+// and short enough that a truly stuck call cannot wedge the lanes for long.
+const CROSS_LANE_MUTEX_TTL_SECONDS = 30;
+const CROSS_LANE_MUTEX_MAX_WAIT_MS = 400;
+const CROSS_LANE_MUTEX_RETRY_MS = 40;
 
 function cooldownError(untilMs, reason) {
   const error = new Error(
@@ -114,7 +121,24 @@ export async function requestLaneCooldownStatus({
   if (!requestLaneStoreConfigured()) {
     return { active: false, untilMs: null, reason: null, configured: false };
   }
-  const raw = await kvImpl(["GET", COOLDOWN_KEY]).catch(() => null);
+  // Fail CLOSED on a transient KV read error (2026-09-26 review): a thrown
+  // GET is treated as "assume a cooldown is active" for a short window,
+  // matching admitRequestLaneRate's fail-closed behavior on the same kind of
+  // outage, rather than "no cooldown set" — an unreadable key must never be
+  // read as permission to call Paraform. A genuinely missing key (no error,
+  // just a null/undefined result) still means "no cooldown", same as before.
+  let raw;
+  try {
+    raw = await kvImpl(["GET", COOLDOWN_KEY]);
+  } catch (error) {
+    return {
+      active: true,
+      untilMs: now + MIN_COOLDOWN_SECONDS * 1000,
+      reason: "kv_read_error",
+      configured: true,
+      error: String(error?.message || error).slice(0, 180),
+    };
+  }
   if (!raw) return { active: false, untilMs: null, reason: null, configured: true };
   let parsed;
   try {
@@ -314,6 +338,51 @@ export async function requestLaneAuthStatus({
   }
 }
 
+// ── Cross-lane mutex (2026-09-26 review) ─────────────────────────────────
+// The cooldown above is armed only AFTER a call has actually failed, so on
+// its own it cannot stop two calls that are already in flight before either
+// one has failed. Same-lane overlap is already covered by the per-lane poll
+// locks (acquireOutreachPollSlot / acquireExpiredPollSlot), but nothing
+// previously spanned the two LANES together: if a second, overlapping
+// invocation of the worker route occurs (worker.mjs's own header comment
+// names this as an expected case — "two overlapping invocations (Fly + a
+// manual tick)"), invocation A's outreach tick could be mid-flight on its
+// first Paraform read while invocation B, unable to get A's poll lock, fell
+// through into the expired lane and passed the still-inactive cooldown
+// check before A's read had failed and armed it — both calls would then hit
+// Paraform, and both 401, before either could arm the cooldown.
+//
+// Every Paraform call either lane makes funnels through laneCall() below, so
+// gating laneCall() itself with one shared KV mutex closes this for both
+// lanes at the root, with no changes needed at either call site. It is held
+// only for the duration of a single call (acquire, call, arm-on-failure,
+// release) — never the whole tick — so it costs nothing beyond that single
+// round trip, and legitimate lane throughput (already cadence- and
+// pace-capped well below this) is unaffected.
+async function acquireCrossLaneMutex({ now = Date.now(), kvImpl = requestLaneKv } = {}) {
+  const token = `v1:${now}:${Math.random().toString(36).slice(2)}`;
+  const deadline = now + CROSS_LANE_MUTEX_MAX_WAIT_MS;
+  for (;;) {
+    const result = await kvImpl([
+      "SET", CROSS_LANE_MUTEX_KEY, token, "NX", "EX", CROSS_LANE_MUTEX_TTL_SECONDS,
+    ]);
+    if (result === "OK") return token;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => { setTimeout(resolve, CROSS_LANE_MUTEX_RETRY_MS); });
+  }
+}
+
+async function releaseCrossLaneMutex(token, { kvImpl = requestLaneKv } = {}) {
+  if (!token) return;
+  const script = `
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+      return redis.call('DEL', KEYS[1])
+    end
+    return 0
+  `;
+  await kvImpl(["EVAL", script, 1, CROSS_LANE_MUTEX_KEY, token]).catch(() => {});
+}
+
 // ── The single call path both lanes route their Paraform work through ───
 function throttleSignal(error) {
   const code = String(error?.code || "");
@@ -329,25 +398,42 @@ async function laneCall({
   rawFn,
   kvImpl = requestLaneKv,
 }) {
-  const cooldown = await requestLaneCooldownStatus({ now, kvImpl });
-  if (cooldown.active) throw cooldownError(cooldown.untilMs, cooldown.reason);
-  const paced = await admitRequestLaneRate({ now, kvImpl });
-  if (!paced) throw rateLimitedError();
-  await recordRequestLaneRequest({ lane, kind, now, kvImpl }).catch(() => {});
+  const configured = requestLaneStoreConfigured();
+  // Without a store there is nothing durable to serialize against anyway
+  // (every gate in this module already fails open when unconfigured) —
+  // skip straight to the call rather than mutex-guard a no-op.
+  const mutexToken = configured ? await acquireCrossLaneMutex({ now, kvImpl }) : null;
+  if (configured && !mutexToken) {
+    // Another invocation is inside its own critical section right now.
+    // Treat it exactly like an already-armed cooldown so every existing
+    // call site's handling (stop cleanly, no alert, no retry) applies
+    // unchanged — this is deliberately indistinguishable from a cooldown to
+    // the caller.
+    throw cooldownError(now + MIN_COOLDOWN_SECONDS * 1000, "cross_lane_busy");
+  }
   try {
-    return await rawFn();
-  } catch (error) {
-    const signal = throttleSignal(error);
-    if (!signal) throw error;
-    const retryAfterSeconds = parseRetryAfterSeconds(error?.retryAfter, { now });
-    const armed = await armRequestLaneCooldown({
-      seconds: Math.max(MIN_COOLDOWN_SECONDS, retryAfterSeconds || 0),
-      reason: signal,
-      source: lane,
-      now,
-      kvImpl,
-    }).catch(() => ({ untilMs: now + MIN_COOLDOWN_SECONDS * 1000 }));
-    throw cooldownError(armed.untilMs, signal);
+    const cooldown = await requestLaneCooldownStatus({ now, kvImpl });
+    if (cooldown.active) throw cooldownError(cooldown.untilMs, cooldown.reason);
+    const paced = await admitRequestLaneRate({ now, kvImpl });
+    if (!paced) throw rateLimitedError();
+    await recordRequestLaneRequest({ lane, kind, now, kvImpl }).catch(() => {});
+    try {
+      return await rawFn();
+    } catch (error) {
+      const signal = throttleSignal(error);
+      if (!signal) throw error;
+      const retryAfterSeconds = parseRetryAfterSeconds(error?.retryAfter, { now });
+      const armed = await armRequestLaneCooldown({
+        seconds: Math.max(MIN_COOLDOWN_SECONDS, retryAfterSeconds || 0),
+        reason: signal,
+        source: lane,
+        now,
+        kvImpl,
+      }).catch(() => ({ untilMs: now + MIN_COOLDOWN_SECONDS * 1000 }));
+      throw cooldownError(armed.untilMs, signal);
+    }
+  } finally {
+    if (mutexToken) await releaseCrossLaneMutex(mutexToken, { kvImpl });
   }
 }
 

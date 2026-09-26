@@ -168,6 +168,20 @@ test("a cooldown expires on its own and clearRequestLaneCooldown removes it earl
   assert.equal((await requestLaneCooldownStatus({ now: now + 1000 })).active, false);
 });
 
+test("cooldown status fails CLOSED (assume active), not open, on a KV read error (2026-09-26 review)", async () => {
+  const now = Date.parse("2026-09-26T22:00:00.000Z");
+  const throwingKv = async () => { throw new Error("kv unreachable"); };
+  const status = await requestLaneCooldownStatus({ now, kvImpl: throwingKv });
+  assert.equal(status.active, true, "an unreadable cooldown key must never be read as permission to call Paraform");
+  assert.equal(status.reason, "kv_read_error");
+  assert.ok(status.untilMs > now);
+});
+
+test("the pace check keeps failing CLOSED (throws) on the same kind of KV error, matching the cooldown check's direction", async () => {
+  const throwingKv = async () => { throw new Error("kv unreachable"); };
+  await assert.rejects(admitRequestLaneRate({ kvImpl: throwingKv }));
+});
+
 test("parseRetryAfterSeconds reads delta-seconds and HTTP-dates", () => {
   const now = Date.parse("2026-09-26T22:00:00.000Z");
   assert.equal(parseRetryAfterSeconds("30", { now }), 30);
@@ -294,6 +308,64 @@ test("the shared pace cap stops the 11th call of the minute without any cooldown
   );
   assert.equal(paraformFetchCount, 10, "the 11th call is refused before it is ever sent");
   assert.equal((await requestLaneCooldownStatus()).active, false, "self-pacing is not a vendor-confirmed throttle");
+});
+
+// ── cross-lane mutex (2026-09-26 review finding) ─────────────────────────
+// Without this, two overlapping worker invocations (e.g. a cron tick plus a
+// manual "run now") could each pass the cooldown check before either one's
+// first Paraform call had failed: invocation A's outreach tick mid-flight on
+// its first read, invocation B unable to get A's poll lock so falling
+// through into the expired lane, checks the still-inactive cooldown, and
+// fires its own first read concurrently with A's — both hit Paraform and
+// both 401 before either could arm the cooldown. These tests pin that this
+// can no longer happen: at most one of two concurrent "first calls" ever
+// reaches Paraform.
+test("cross-lane mutex: a mutex already held by another invocation blocks the call before it ever reaches Paraform, without arming a false cooldown", async () => {
+  // Simulate an overlapping invocation's laneCall already inside its own
+  // critical section — the exact window the 429/401 hasn't resolved in yet.
+  kv.set("paraai:request-lanes:cross-lane-mutex", "v1:some-other-invocation");
+  await assert.rejects(
+    requestLaneTrpcGet("user.getCurrentUser", {}, { lane: "outreach" }),
+    (error) => error.code === REQUEST_LANE_COOLDOWN_CODE && /cross_lane_busy/.test(error.message),
+  );
+  assert.equal(paraformFetchCount, 0, "blocked before it ever reached Paraform");
+  assert.equal(
+    (await requestLaneCooldownStatus()).active,
+    false,
+    "a busy mutex is a transient block, not a vendor-confirmed throttle — it must not arm the real cooldown",
+  );
+});
+
+test("cross-lane mutex: two overlapping first calls (one per lane, simulating two overlapping worker invocations) never both reach Paraform", async () => {
+  // Both queued 401s exist only so the SECOND call would also fail vendor-side
+  // if it ever reached Paraform; the assertion below is that it never does.
+  queueParaform({ status: 401, body: {} });
+  queueParaform({ status: 401, body: {} });
+  const [outreachResult, expiredResult] = await Promise.allSettled([
+    requestLaneTrpcGet("submissionRequest.getRecruiterSubmissionRequestHistory", {}, { lane: "outreach" }),
+    requestLaneTrpcGet("submissionRequest.getRecruiterParaAIStatus", {}, { lane: "expired" }),
+  ]);
+  assert.equal(outreachResult.status, "rejected");
+  assert.equal(expiredResult.status, "rejected");
+  assert.equal(outreachResult.reason.code, REQUEST_LANE_COOLDOWN_CODE);
+  assert.equal(expiredResult.reason.code, REQUEST_LANE_COOLDOWN_CODE);
+  assert.equal(
+    paraformFetchCount,
+    1,
+    "the mutex serializes the two concurrent first calls, so only one of them ever reaches Paraform — the other queues behind the mutex and then sees the cooldown the first one just armed",
+  );
+  const status = await requestLaneCooldownStatus();
+  assert.equal(status.active, true);
+  assert.equal(status.reason, "401");
+});
+
+test("cross-lane mutex: released after a successful call, so the next call is never blocked by a stale lock", async () => {
+  queueParaform({ status: 200, body: { result: { data: { json: { ok: true } } } } });
+  await requestLaneTrpcGet("user.getCurrentUser", {}, { lane: "outreach" });
+  queueParaform({ status: 200, body: { result: { data: { json: { ok: true } } } } });
+  const result = await requestLaneTrpcGet("user.getCurrentUser", {}, { lane: "expired" });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(paraformFetchCount, 2);
 });
 
 test("boundRequestLaneTrpc is a drop-in trpcGet/trpcPost pair, extra legacy args are harmless", async () => {
