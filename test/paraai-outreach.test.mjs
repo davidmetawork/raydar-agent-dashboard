@@ -65,6 +65,7 @@ import {
   sweepExpiryEscalations,
   sweepStaleOutreachExceptions,
   SUBMISSION_REQUEST_EXPIRY_DAYS,
+  handleOutreachFailure,
   heldAlertCopy,
   isPendingDigestUnavailableError,
   messageForMatch,
@@ -86,6 +87,7 @@ import {
   retryableFailure,
   verifyPendingDigestUnavailable,
 } from "../api/paraai/_lib/outreach.mjs";
+import { REQUEST_LANE_RATE_LIMITED_CODE } from "../api/paraai/_lib/request-lane-throttle.mjs";
 import {
   classifyDeclinedRoles,
   declinableRoles,
@@ -2738,4 +2740,47 @@ test("hold alerts name the verdict and the remedy, never the candidate's words",
   const bounced = heldAlertCopy("OUTREACH_EMAIL_BOUNCED", request);
   assert.match(bounced, /undeliverable/);
   assert.match(bounced, /retries automatically/);
+});
+
+// REGRESSION (PR 234 final review): admitRequestLaneRate() throws
+// REQUEST_LANE_RATE_LIMITED_CODE in completely normal operation — one
+// candidate costs 3-4 Paraform calls and PARAAI_OUTREACH_BATCH allows up to
+// 10, so the shared 10/min bucket is routinely spent mid-tick, with no 429/401
+// involved at all. Before this fix, handleOutreachFailure only special-cased
+// REQUEST_LANE_COOLDOWN_CODE (the 429/401 cooldown) and let a rate-limited
+// candidate fall through to the generic path: recordOutreachException with
+// retryable:false (the code is not in RECOVERABLE_EXCEPTION_CODES), which
+// eligibleNewRequests' systemHeld filter then parks FOREVER, plus an
+// undeduped notifySlack alert per item. Rate limiting must be treated exactly
+// like the cooldown: a clean, silent stop, no exception record, no alert.
+test("a rate-limited candidate is never recorded as a held exception or alerted", async () => {
+  const request = {
+    id: "req-rate-limited",
+    status: "pending",
+    reachedOut: false,
+    candidateUserId: "cand-rate-limited",
+    roleId: "role-1",
+    roleName: "Engineer",
+    createdAtMs: Date.parse("2026-09-20T00:00:00.000Z"),
+  };
+  const error = new Error("Para AI request lanes hit their own per-minute Paraform pace cap");
+  error.code = REQUEST_LANE_RATE_LIMITED_CODE;
+
+  // No KV/Slack env is configured in this test file at all (see the top of
+  // this file: no process.env/globalThis.fetch setup), so the generic path's
+  // recordOutreachException would throw OUTREACH_NOT_CONFIGURED instead of
+  // quietly persisting a held record — proof that the fixed code never
+  // reaches the store for this code, exactly like REQUEST_LANE_COOLDOWN_CODE.
+  const result = await handleOutreachFailure(error, request, { now: Date.now() });
+  assert.equal(result, undefined, "a rate-limited failure returns cleanly, like a cooldown");
+
+  // Since nothing was ever recorded, the request is still eligible next tick —
+  // an empty exceptions list (nothing to have recorded) leaves it eligible.
+  const eligible = eligibleNewRequests(
+    [request],
+    { notBeforeMs: Date.parse("2026-09-01T00:00:00.000Z") },
+    [],
+    [],
+  );
+  assert.deepEqual(eligible.map((row) => row.id), ["req-rate-limited"]);
 });

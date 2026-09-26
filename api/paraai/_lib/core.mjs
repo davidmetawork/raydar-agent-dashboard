@@ -135,13 +135,23 @@ async function paraformHeaders() {
 }
 
 function vendorError(response, body) {
+  // Captured for the request-lane self-throttle (request-lane-throttle.mjs),
+  // which arms its cooldown for max(Retry-After, 60s). Paraform's own 401s
+  // have never been observed to carry one, but a fronting proxy's 429 might,
+  // and reading it here costs every other caller nothing.
+  const retryAfter = typeof response.headers?.get === "function"
+    ? response.headers.get("retry-after")
+    : null;
   if (response.status === 401) {
-    return throttled();
+    const error = throttled();
+    error.retryAfter = retryAfter;
+    return error;
   }
   const message = body?.error?.json?.message || body?.message || `Paraform HTTP ${response.status}`;
   const error = new Error(String(message));
   error.code = body?.error?.json?.code || `HTTP_${response.status}`;
   error.status = response.status;
+  error.retryAfter = retryAfter;
   return error;
 }
 
@@ -281,7 +291,7 @@ export async function trpcPostWithDates(proc, json = {}, dateFields = []) {
   return classifyThrottle(() => trpcPostRaw(proc, json, dateFields));
 }
 
-async function trpcPostRaw(proc, json = {}, dateFields = []) {
+export async function trpcPostRaw(proc, json = {}, dateFields = []) {
   const observedFetch = telemetryFetch(fetch, "paraai");
   // No transport retry: a timeout has no authoritative write verdict and a
   // replay can duplicate a non-idempotent mutation. classifyThrottle may call
