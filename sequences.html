@@ -100,6 +100,7 @@
       <div>
         <label>Enroll in</label>
         <select id="seq"><option value="">Loading sequences…</option></select>
+        <div id="seqSnapshotNote" class="note hidden"></div>
         <div id="tplNote" class="note hidden">This is the 1st-Round template — candidates will be split into role-specific copies by their <b>Active Project</b>, with the role swapped into <code>*INSERT ROLE*</code>.</div>
       </div>
       <div>
@@ -153,12 +154,36 @@ async function loadHealth(){
     else { setHealth("warn","Paraform: "+(h.paraform||"unknown")); }
   }catch(e){ setHealth("bad","backend unreachable"); }
 }
-async function loadSeqs(){
+// The list now comes from a stored snapshot (see api/seq/sequences.mjs) —
+// an ordinary load makes zero Paraform requests. `refresh` is the operator's
+// explicit ask for a live re-read, and is server-paced regardless.
+function fmtSnapshotAge(ms){
+  if(ms==null) return "";
+  const min = Math.round(ms/60000);
+  if(min < 1) return "just now";
+  if(min < 60) return min+" min ago";
+  const hr = Math.round(min/60);
+  if(hr < 24) return hr+" hr ago";
+  return Math.round(hr/24)+" day"+(Math.round(hr/24)===1?"":"s")+" ago";
+}
+async function loadSeqs(refresh){
   loadPending(); // show any scheduled (delayed) cohorts alongside the form
+  const note=$("seqSnapshotNote");
   try{
-    const d = await fetch(API+"/api/seq/sequences",{headers:authHeaders()}).then(r=>r.json());
+    const url=API+"/api/seq/sequences"+(refresh?"?refresh=1":"");
+    const d = await fetch(url,{headers:authHeaders()}).then(r=>r.json());
     SEQS = d.sequences||[];
     const sel=$("seq");
+    if(note){
+      if(d.warming){ note.textContent="Loading the sequence list for the first time…"; note.classList.remove("hidden"); }
+      else if(d.source==="snapshot"||d.source==="live"){
+        const age = d.snapshotAgeMs!=null ? fmtSnapshotAge(d.snapshotAgeMs) : null;
+        note.innerHTML = (age?`List as of ${age}`:"List refreshed") + ` — <a href="#" id="seqRefreshLink">Refresh list</a>` + (d.refreshSkipped==="too_soon" ? " (refreshed too recently; try again shortly)" : "");
+        note.classList.remove("hidden");
+        const link=document.getElementById("seqRefreshLink");
+        if(link) link.addEventListener("click",(e)=>{ e.preventDefault(); loadSeqs(true); });
+      } else { note.classList.add("hidden"); }
+    }
     if(!SEQS.length){ sel.innerHTML='<option value="">(no sequences — session not set)</option>'; return; }
     sel.innerHTML = SEQS.map(s=>`<option value="${s.id}">${s.name}${s.enabled?"":" (disabled)"}</option>`).join("");
     onSeqChange();

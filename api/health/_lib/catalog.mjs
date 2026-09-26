@@ -356,7 +356,7 @@ export const CATALOG = [
       evaluate: "paraformMailboxes",
     },
     registry: "/products/email-lanes-health/",
-    note: "The ~27 Paraform-connected sending accounts (26 cold-outreach aliases + david@raydar.xyz). Roster cached 25 min to respect Paraform background-load limits.",
+    note: "The ~27 Paraform-connected sending accounts (26 cold-outreach aliases + david@raydar.xyz). Roster cached 60 min to respect Paraform background-load limits.",
   },
   {
     id: "email-paraform-sequences",

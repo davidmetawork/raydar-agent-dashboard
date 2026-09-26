@@ -9,6 +9,14 @@
 //
 // This is the fix for the 45-second Analytics wait: the wait was caused by
 // fetching Paraform inline on every request.
+//
+// dashboardReaders BRAKE (2026-09-26 Paraform read-cut pass): the 5-minute
+// cron warmer (refresh.mjs) already honors the operator's `dashboardReaders`
+// background-pause brake, but this inline cold-cache rebuild did not — a
+// stale cache plus an armed brake meant the very next page view still hit
+// webview/the scheduler booking index live. Now a paused control skips the
+// inline rebuild the same way an unwon lock does: serve what's cached and
+// say so, never race to refresh around the brake.
 
 import { cors, isEditor, privateJson, requireAuth } from "./_lib/core.mjs";
 import { buildActivity } from "./_lib/activity.mjs";
@@ -16,6 +24,7 @@ import {
   claimActivityLock, kvConfigured, listDeals, readActivity, readMeta, writeActivity,
 } from "./_lib/store.mjs";
 import { DEFAULT_TARGET_CENTS, summarize } from "./_lib/model.mjs";
+import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 
 export const config = { maxDuration: 60 };
 
@@ -32,6 +41,7 @@ export function createSummaryHandler({
   persistActivity = writeActivity,
   lock = claimActivityLock,
   build = buildActivity,
+  pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
   now = () => new Date(),
 } = {}) {
   return async function handler(req, res) {
@@ -50,9 +60,14 @@ export function createSummaryHandler({
 
       const ageSeconds = refreshedAt ? Math.floor(at.getTime() / 1000) - refreshedAt : Infinity;
       if (ageSeconds > STALE_SECONDS) {
-        // Only one request rebuilds; everyone else serves what we have and says
-        // so, rather than queueing behind a provider call.
-        if (await lock().catch(() => false)) {
+        const backgroundPause = await pauseState().catch(() => ({ paused: true, state: "unreadable" }));
+        if (backgroundPause?.paused) {
+          // The operator brake wins over "the cache looks stale": serve what
+          // we have, marked stale, rather than rebuild around the brake.
+          stale = Boolean(cached.payload);
+        } else if (await lock().catch(() => false)) {
+          // Only one request rebuilds; everyone else serves what we have and says
+          // so, rather than queueing behind a provider call.
           try {
             payload = await build({ now: at });
             refreshedAt = Math.floor(at.getTime() / 1000);

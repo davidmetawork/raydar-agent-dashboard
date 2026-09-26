@@ -19,7 +19,12 @@ import { hasCookie, trpcGet } from "../seq/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 const CACHE_KEY = "hlth:mailboxes:cache";
-const CACHE_FRESH_MS = 25 * 60 * 1000;
+// 60 min (2026-09-26 Paraform read-cut pass, was 25 min): this roster
+// changes on the order of days, not minutes, so widening the cache window
+// is a pure load cut with no loss of real signal. See
+// docs/research/paraform-quota-plan-2026-09-25.md, "Put a brake or cache on
+// the unbraked readers" -> "Mailboxes tile: 60-minute cache".
+const CACHE_FRESH_MS = 60 * 60 * 1000;
 const CACHE_TTL_SECONDS = 24 * 3600; // stale-but-present beats absent on a Paraform blip
 
 function authed(req) {

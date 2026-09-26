@@ -471,6 +471,7 @@
       <section>
         <div class="sec-head"><h3>Candidates</h3><span class="count" id="cd-count"></span></div>
         <p class="fu-intro">Every candidate call in one place. Source and Call Type are evidence-backed; blanks are explicit Unknowns, and edits save automatically.</p>
+        <p class="fu-intro" id="cd-paraai-age" style="margin-top:-8px"></p>
         <div class="cd-bar">
           <input id="cd-q" type="text" placeholder="Search candidates…" autocomplete="off" oninput="cdFilters.q=this.value;renderRoster()" />
           <select id="cd-ftype" onchange="cdFilters.type=this.value;renderRoster()">
@@ -1882,6 +1883,19 @@
     const CD_OUTCOMES = ["Sent List","No Matches - Para AI","Submitted","Disengage","Reschedule Email Sequence"];
     const cdEsc = (s) => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     let rosterRows=null, rosterAt=0, rosterParaAIAt=0, rosterParaAILoading=false, rosterOutcomeLoading=false, rosterOutcomeRetryTimer=null, rosterOutcomeVerified=false, rosterOutcomeVerifyFailed=false, cdVisible=[], cdErr=null;   // cdErr = { key, field } — inline save-failure marker
+    // Para AI status now comes from a stored snapshot (api/roster/paraai-status.mjs) —
+    // an ordinary read makes zero Paraform requests. rosterParaAIMeta labels its age;
+    // refreshRosterParaAI(true) is the explicit, server-paced "Refresh now" action.
+    let rosterParaAIMeta = {};
+    function fmtSnapshotAge(ms){
+      if(ms==null) return "";
+      const min = Math.round(ms/60000);
+      if(min < 1) return "just now";
+      if(min < 60) return min+" min ago";
+      const hr = Math.round(min/60);
+      if(hr < 24) return hr+" hr ago";
+      return Math.round(hr/24)+" day"+(Math.round(hr/24)===1?"":"s")+" ago";
+    }
     const cdFilters = { q:"", type:"all", status:"all", paraai:"all", outcome:"all", range:"30", matchQueue:false };
     const cdNormName = (value) => String(value||"").normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g," ");
 
@@ -2093,6 +2107,16 @@
       $("cd-count").textContent = cdFilters.matchQueue
         ? `${rows.length} candidate${rows.length===1?"":"s"} need a match outcome`
         : `${rows.length} call${rows.length===1?"":"s"} · ${rosterOutcomeVerified?queueCount+" in Match Queue":"verifying Match Queue"}`;
+      const ageEl=$("cd-paraai-age");
+      if(ageEl){
+        if(rosterParaAIMeta.warming) ageEl.innerHTML="Para AI status: loading for the first time…";
+        else if(rosterParaAIMeta.fetchedAt){
+          const age=fmtSnapshotAge(rosterParaAIMeta.snapshotAgeMs);
+          ageEl.innerHTML=`Para AI status as of ${age} — <a href="#" id="cdParaAIRefreshLink">Refresh now</a>`+(rosterParaAIMeta.refreshSkipped==="too_soon"?" (refreshed too recently; try again shortly)":"");
+          const link=document.getElementById("cdParaAIRefreshLink");
+          if(link) link.addEventListener("click",(e)=>{ e.preventDefault(); refreshRosterParaAI(true); });
+        } else ageEl.innerHTML="";
+      }
       const qb=$("cd-fqueue");
       if(qb){
         qb.classList.toggle("on",cdFilters.matchQueue);
@@ -2200,8 +2224,17 @@
           row.outcomeConflict=hit?.outcomeConflict===true;
         }
         rosterParaAIAt=Date.now();
+        rosterParaAIMeta={
+          warming: j?.warming===true,
+          fetchedAt: j?.fetchedAt||null,
+          snapshotAgeMs: j?.snapshotAgeMs!=null ? j.snapshotAgeMs : null,
+          refreshSkipped: j?.refreshSkipped||null,
+        };
         renderRoster();
         if(!rosterOutcomeVerified) refreshRosterOutcomes();
+        // A cold-start "warming" answer has no rows to apply yet — try again
+        // shortly rather than leaving the tab on an empty first read.
+        if(j?.warming===true) setTimeout(()=>refreshRosterParaAI(),4000);
       }catch(e){
         // A failed authoritative read must never create a false green state.
         rosterOutcomeVerified=false;
