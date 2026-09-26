@@ -9,6 +9,10 @@ import { cors, requireAuth, cronAuth } from "./_lib/core.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { drainPendingBookings } from "./_lib/booking-protection-worker.mjs";
 import { oldestPendingAgeMs } from "./_lib/booking-protection-queue.mjs";
+import {
+  createPacer,
+  pacedApplyDecisionsOverrides,
+} from "./_lib/booking-protection-pace.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
@@ -29,7 +33,10 @@ async function handleBookingWorker(req, res) {
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
 
   try {
-    const result = await drainPendingBookings({});
+    const pace = createPacer();
+    const result = await drainPendingBookings({
+      applyDecisionsOverrides: pacedApplyDecisionsOverrides(pace),
+    });
     const stuckAgeMs = await oldestPendingAgeMs().catch(() => null);
     if (
       stuckAgeMs != null
@@ -58,6 +65,7 @@ async function handleBookingWorker(req, res) {
       matched: result.matched,
       paused: result.paused,
       deferred: result.deferred,
+      cancelled: result.cancelled,
       pauseErrors: result.pauseErrors.length,
       liveSetReady: result.liveSetReady,
       oldestPendingAgeMinutes: stuckAgeMs == null ? null : Math.round(stuckAgeMs / 60000),

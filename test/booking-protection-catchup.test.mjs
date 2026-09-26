@@ -14,6 +14,13 @@ import {
   bookTimeRotorCheck,
 } from "../api/seq/_lib/booking-protection-catchup.mjs";
 import { LIVESET_SCHEMA } from "../api/seq/_lib/booking-protection-liveset.mjs";
+import { applyDecisions } from "../api/seq/_lib/booking-stop.mjs";
+import {
+  createPacer,
+  pacedApplyDecisionsOverrides,
+  pacedRelationshipStatusLoader,
+  PACE_MIN_INTERVAL_MS,
+} from "../api/seq/_lib/booking-protection-pace.mjs";
 
 const NOW = Date.parse("2026-09-26T12:00:00.000Z");
 
@@ -156,4 +163,98 @@ test("bookTimeRotorCheck does nothing (0 checks) when the live-set index is stal
   const out = await bookTimeRotorCheck({ now: NOW, loadLive: async () => null });
   assert.equal(out.checked, 0);
   assert.equal(out.rows, 0);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pacer wiring (review finding: neither catchUpBookingIndexes' applyDecisions
+// calls nor bookTimeRotorCheck's relationshipStatusLoader calls ever ran
+// through the pacer — every test above injects its own mocks instead of
+// exercising the real defaults). These drive the REAL applyDecisions and the
+// REAL cachedRelationshipStatus (via booking-protection-pace.mjs's exported
+// helpers — the exact composition booking-catchup.mjs wires in production)
+// against a fake `fetch`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("bookTimeRotorCheck, driven through pacedRelationshipStatusLoader, paces its Paraform profile reads", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let now = NOW;
+  let state = null;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  });
+  global.fetch = async (url) => {
+    calls.push({ url: String(url), at: now });
+    return Response.json({ result: { data: { json: { candidate_user_relationship_status: null } } } });
+  };
+  try {
+    const out = await bookTimeRotorCheck({
+      now: NOW,
+      loadLive: async () => usableLiveSet({
+        "a@example.com": [{ ccu: "ccu_1", cu: "cu_1", n: "A", s: "seq_1", sn: "No Show - Agent Call", t: "2026-01-01T00:00:00.000Z" }],
+        "b@example.com": [{ ccu: "ccu_2", cu: "cu_2", n: "B", s: "seq_1", sn: "No Show - Agent Call", t: "2026-01-01T00:00:00.000Z" }],
+      }),
+      loadRotor: async () => null,
+      saveRotor: async () => {},
+      relationshipStatusLoader: pacedRelationshipStatusLoader(pace),
+      budget: 2,
+    });
+    assert.equal(out.checked, 2);
+    assert.equal(calls.length, 2, "one profile read per row — no burst-tuned retry ladder firing extra requests");
+    assert.ok(
+      calls[1].at - calls[0].at >= PACE_MIN_INTERVAL_MS,
+      "the rotor's Paraform reads are spaced by the pacer, not fired back-to-back",
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("catchUpBookingIndexes, driven through the real applyDecisions + pacedApplyDecisionsOverrides, makes exactly 2 paced Paraform requests for a real match", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let now = NOW;
+  let state = null;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  });
+  global.fetch = async (url) => {
+    calls.push({ url: String(url), at: now });
+    if (String(url).includes("updateCandidatePauseStatus")) {
+      return Response.json({ result: { data: { json: { ok: true } } } });
+    }
+    return Response.json({
+      result: { data: { json: { leads: [{ ccu_id: "ccu_1", is_paused: true }] } } },
+    });
+  };
+  const store = processedStore();
+  try {
+    const out = await catchUpBookingIndexes({
+      now: NOW,
+      loadLive: async () => usableLiveSet({
+        "candidate@example.com": [{ ccu: "ccu_1", cu: "cu_1", n: "Cand", s: "seq_1", sn: "No Show - Agent Call", t: "2026-07-01T00:00:00.000Z" }],
+      }),
+      fetchRaydarIndex: async () => ({
+        complete: true,
+        index: new Map([["candidate@example.com", { bookedAt: Date.parse("2026-08-01T00:00:00.000Z"), startsAt: null, eventName: "Agent Call", status: "active", bookingId: "bk_1" }]]),
+      }),
+      fetchCalendlyIndex: async () => ({ index: new Map() }),
+      applyDecisionsImpl: (decisions) => applyDecisions(decisions, pacedApplyDecisionsOverrides(pace)),
+      processedRead: store.read,
+      processedClaim: store.claim,
+    });
+    assert.equal(out.raydar.paused, 1);
+    assert.equal(calls.length, 2, "one pause + one read-back search");
+    assert.ok(calls[1].at - calls[0].at >= PACE_MIN_INTERVAL_MS);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

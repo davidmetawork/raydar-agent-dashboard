@@ -38,6 +38,43 @@ export const config = { maxDuration: 60 };
 const MAX_BODY_BYTES = 64 * 1024;
 const EVENT_TTL_SECONDS = 180 * 24 * 3600;
 
+// Item 3 requires the hook to "skip Scheduler test/canary bookings". The v1
+// event contract (raydar-booking-contract.mjs) has no dedicated test/canary
+// flag on the wire — this repo does not own that contract, so rather than
+// silently mark the requirement done with no way to satisfy it, this
+// recognizes the two signals that ARE available today and are both
+// deliberately OFF by default (matching nothing) until configured:
+//   - a reserved `sourceAttribution` marker, for a producer that tags
+//     synthetic bookings that way (the existing convention: see
+//     pause-canary-rearm.mjs's own "operator_pause_canary" tag for Raydar's
+//     side of this);
+//   - an explicit `bookingId` allow-list, for wiring in the Scheduler's own
+//     known cutover-canary booking IDs (scheduler/lib/cutover-canary-config.mjs
+//     SCHEDULER_CANARY_*_BOOKING_ID / SCHEDULER_CANARY_AGENT_BURST_BOOKING_IDS
+//     in the main Raydar repo) by copying them into this dashboard's env.
+// See the PR body's "Docs follow-up" for what still needs confirming with
+// whoever owns the Scheduler webhook producer.
+const DEFAULT_TEST_SOURCE_ATTRIBUTIONS = "scheduler_test,scheduler_canary,cutover_canary";
+
+function parsedCsvSet(value) {
+  return new Set(
+    String(value || "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  );
+}
+
+function isTestOrCanaryBooking(event, env = process.env) {
+  const markers = parsedCsvSet(
+    env.RAYDAR_BOOKING_TEST_SOURCE_ATTRIBUTIONS ?? DEFAULT_TEST_SOURCE_ATTRIBUTIONS,
+  );
+  if (event.sourceAttribution && markers.has(event.sourceAttribution)) return true;
+  const testBookingIds = parsedCsvSet(env.RAYDAR_BOOKING_TEST_BOOKING_IDS);
+  if (testBookingIds.has(event.bookingId)) return true;
+  return false;
+}
+
 const json = (value, status = 200) =>
   Response.json(value, { status, headers: { "cache-control": "no-store" } });
 
@@ -121,6 +158,21 @@ export async function handleRaydarBookingWebhook(request, {
     }
   } catch {
     return json({ ok: false, error: "store_unavailable" }, 503);
+  }
+
+  if (isTestOrCanaryBooking(event)) {
+    try {
+      await durableWrite(write, eventKey, {
+        state: "done",
+        receivedAt: new Date(nowMs).toISOString(),
+        processedAt: new Date().toISOString(),
+        event: event.event,
+        skippedTest: true,
+      }, EVENT_TTL_SECONDS);
+    } catch {
+      return json({ ok: false, error: "store_unavailable" }, 503);
+    }
+    return json({ ok: true, event: event.event, skippedTest: true }, 202);
   }
 
   if (

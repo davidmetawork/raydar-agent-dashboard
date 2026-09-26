@@ -9,6 +9,7 @@ import {
   raydarPauseCanaryIdentityFingerprint,
   raydarWebhookSecretFingerprint,
   K as LEGACY_K,
+  kvGet as legacyKvGet,
   kvSet as legacyKvSet,
 } from "./booking-stop.mjs";
 import {
@@ -36,6 +37,7 @@ export async function drainPendingBookings({
   loadLive = loadLiveSet,
   applyDecisionsImpl = applyDecisions,
   writeProof = legacyKvSet,
+  readCancelRecord = legacyKvGet,
   pauseCanaryFingerprint = process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
   webhookSecret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
   apply = process.env.BOOKING_STOP_APPLY !== "0",
@@ -48,6 +50,7 @@ export async function drainPendingBookings({
     matched: 0,
     paused: 0,
     deferred: 0,
+    cancelled: 0,
     pauseErrors: [],
     liveSetReady: false,
   };
@@ -62,6 +65,21 @@ export async function drainPendingBookings({
   for (const eventId of eventIds.slice(0, maxJobsPerRun)) {
     const job = await readJob(eventId);
     if (!job) { await removeJob(eventId); continue; }
+
+    // The hook durably records a booking.cancelled/rescheduled event under
+    // K.raydarCancel(bookingId) (raydar-booking-hook.mjs) but a job for the
+    // ORIGINAL booking.confirmed event can already be queued (or still
+    // waiting behind a backlog) when that cancellation lands. Check the
+    // cancel record before matching — a cancelled booking must never pause a
+    // sequence lead, and this costs zero Paraform requests either way.
+    if (job.bookingId) {
+      const cancelled = await readCancelRecord(LEGACY_K.raydarCancel(job.bookingId));
+      if (cancelled) {
+        out.cancelled++;
+        await removeJob(eventId);
+        continue;
+      }
+    }
 
     if (!out.liveSetReady) {
       // Leave it queued. The next tick retries once the daily job publishes

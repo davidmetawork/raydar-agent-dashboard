@@ -22,6 +22,7 @@ import {
   kvIncr,
   kvExpire,
 } from "./booking-protection-store.mjs";
+import { cachedRelationshipStatus } from "./booking-stop.mjs";
 
 // 6.5s spacing -> ~9.2 requests/minute, safely under the seat's 10/min cap
 // with margin for clock jitter between ticks.
@@ -50,7 +51,7 @@ export function createPacer({
   minIntervalMs = PACE_MIN_INTERVAL_MS,
   defaultBackoffMs = PACE_DEFAULT_BACKOFF_MS,
 } = {}) {
-  return async function paced(fn) {
+  async function pacedOnce(fn) {
     const nowMs = now();
     const state = (await loadState()) || {};
     if (Number.isFinite(state.backoffUntil) && nowMs < state.backoffUntil) {
@@ -76,6 +77,22 @@ export function createPacer({
       await saveState({ lastRequestAt: now(), backoffUntil });
       throw error;
     }
+  }
+
+  // "One in flight" (item 6) has to hold even when a caller with its own
+  // internal concurrency (e.g. booking-stop.mjs applyDecisions' 2-way
+  // read-back verify loop) awaits this pacer from two call sites at once.
+  // The durable KV state above only serializes ACROSS separate serverless
+  // invocations; within one process, two concurrent callers would both read
+  // `lastRequestAt` before either wrote it back and both fire together. This
+  // chain makes every call to `paced(fn)` in this process queue behind the
+  // one before it, so requests this pacer issues are never more than one in
+  // flight regardless of how many callers hold a reference to it.
+  let chain = Promise.resolve();
+  return function paced(fn) {
+    const result = chain.then(() => pacedOnce(fn));
+    chain = result.then(() => undefined, () => undefined);
+    return result;
   };
 }
 
@@ -134,4 +151,61 @@ export function pacedTrpcClient(pace = createPacer()) {
     get: (proc, json) => pace(() => singleShotTrpc("GET", proc, json)),
     post: (proc, json) => pace(() => singleShotTrpc("POST", proc, json)),
   };
+}
+
+/**
+ * The `applyDecisionsOverrides` booking-stop.mjs's `applyDecisions()` was
+ * built to accept (see the comment at its definition) — routing its two
+ * Paraform calls (pause + read-back search) through THIS pacer instead of
+ * core.mjs's burst-tuned `trpcPost`/`trpcGet` + `withThrottleRetry` ladder.
+ *
+ * Every production caller in the lightweight booking-protection system
+ * (booking-worker.mjs, booking-catchup.mjs) must build one pacer per
+ * invocation and pass its overrides through — see those files for why this
+ * exists (item 6: <=10/min, one in flight, wait-don't-retry-hard on refusal).
+ *
+ * `concurrency: 1` bounds the pause loop to one in flight; `mutateThrottleRetry`
+ * is replaced with a single attempt (no internal retry ladder — a refusal is
+ * pushed to `pauseErrors` and the job stays queued for the next, paced tick,
+ * exactly per item 6) so a refusal costs one request, not up to six over 31s.
+ * `searchLead` reimplements campaignLeadBySearch's own response-shaping
+ * (match the returned lead to the exact ccu_id that was mutated) without its
+ * `withThrottleRetry` wrapper, for the same reason.
+ */
+export function pacedApplyDecisionsOverrides(pace) {
+  const client = pacedTrpcClient(pace);
+  return {
+    concurrency: 1,
+    mutateThrottleRetry: (fn) => fn(),
+    mutatePause: (ccuId) =>
+      client.post("campaigns.updateCandidatePauseStatus", {
+        campaign_to_candidate_user_id: ccuId,
+        is_paused: true,
+      }),
+    searchLead: async (sequenceId, email, { expectedCcuId = null } = {}) => {
+      if (!email) return null;
+      const r = await client.get("campaigns.getCampaignLeads", {
+        campaign_id: sequenceId,
+        search: String(email),
+      });
+      const leads = Array.isArray(r?.leads) ? r.leads : [];
+      if (expectedCcuId == null) return leads[0] || null;
+      const target = String(expectedCcuId);
+      return leads.find((lead) => String(lead?.ccu_id || "") === target) || null;
+    },
+  };
+}
+
+/**
+ * A `relationshipStatusLoader(cuId)` for the Book Time rotor
+ * (booking-protection-catchup.mjs bookTimeRotorCheck) that routes its one
+ * Paraform profile read through this pacer, while keeping
+ * `cachedRelationshipStatus`'s own 30-minute KV cache (so a cache hit costs
+ * zero Paraform requests and never touches the pacer at all).
+ */
+export function pacedRelationshipStatusLoader(pace) {
+  return (cuId) => cachedRelationshipStatus(cuId, {
+    fetchProfile: () => pace(() =>
+      singleShotTrpc("GET", "candidateUser.getCandidateProfileInfo", { candidateUserId: cuId })),
+  });
 }

@@ -408,6 +408,65 @@ test("native webhook fails closed when the durable replay store is unavailable",
   assert.equal((await response.json()).error, "store_unavailable");
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Test/canary skip (item 3: "Skip Scheduler test/canary bookings"). The v1
+// wire contract has no dedicated flag for this — see raydar-booking-hook.mjs's
+// isTestOrCanaryBooking() comment — so this recognizes a reserved
+// sourceAttribution marker and a configurable bookingId allow-list, both OFF
+// by default (matching nothing unless configured).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("a booking tagged with a reserved test/canary sourceAttribution is recorded but never enqueued", async () => {
+  let enqueueCalls = 0;
+  const writes = [];
+  const event = booking({ sourceAttribution: "scheduler_canary" });
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(event),
+    handlerDeps({
+      enqueue: async () => { enqueueCalls++; },
+      write: async (key, value) => { writes.push({ key, value }); return "OK"; },
+    }),
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(payload.skippedTest, true);
+  assert.equal(enqueueCalls, 0, "a canary-tagged booking must never reach the pause path");
+  assert.equal(writes.some((entry) => entry.value.state === "done" && entry.value.skippedTest), true);
+});
+
+test("a booking whose id is in the configured test-booking-id allow-list is recorded but never enqueued", async () => {
+  const prev = process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS;
+  process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS = "bk_other,bk_test_001";
+  try {
+    let enqueueCalls = 0;
+    const event = booking({ bookingId: "bk_test_001" });
+    const response = await handleRaydarBookingWebhook(
+      signedRequest(event),
+      handlerDeps({ enqueue: async () => { enqueueCalls++; } }),
+    );
+    const payload = await response.json();
+    assert.equal(response.status, 202);
+    assert.equal(payload.skippedTest, true);
+    assert.equal(enqueueCalls, 0);
+  } finally {
+    if (prev === undefined) delete process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS;
+    else process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS = prev;
+  }
+});
+
+test("an ordinary booking with an unrelated sourceAttribution is still enqueued (the skip list is not overly broad)", async () => {
+  let seen = null;
+  const event = booking({ sourceAttribution: "linkedin_inmail" });
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(event),
+    handlerDeps({ enqueue: async (job) => { seen = job; } }),
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(payload.skippedTest, undefined);
+  assert.equal(seen?.eventId, event.eventId);
+});
+
 test("native webhook retries when durable settlement cannot be written", async () => {
   const response = await handleRaydarBookingWebhook(
     signedRequest(booking()),

@@ -11,10 +11,16 @@ import assert from "node:assert/strict";
 import { drainPendingBookings } from "../api/seq/_lib/booking-protection-worker.mjs";
 import {
   K,
+  applyDecisions,
   raydarPauseCanaryIdentityFingerprint,
   raydarWebhookProofStatus,
 } from "../api/seq/_lib/booking-stop.mjs";
 import { LIVESET_SCHEMA } from "../api/seq/_lib/booking-protection-liveset.mjs";
+import {
+  createPacer,
+  pacedApplyDecisionsOverrides,
+  PACE_MIN_INTERVAL_MS,
+} from "../api/seq/_lib/booking-protection-pace.mjs";
 
 const SECRET = "raydar-booking-test-secret-that-is-long-enough";
 const NOW_MS = Date.parse("2026-07-29T18:00:00.000Z");
@@ -226,4 +232,111 @@ test("proof-writing failures never re-queue an already-verified pause", async ()
   const result = await drainPendingBookings(deps);
   assert.equal(result.paused, 1);
   assert.deepEqual(deps._removed, ["bevt_test_001"], "the pause itself already passed read-back verification");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel-record check (review finding: K.raydarCancel was write-only — the
+// hook recorded a booking.cancelled/rescheduled event but nothing ever read
+// it back before matching/pausing the original booking.confirmed job).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("a job whose booking was cancelled before the worker runs is dropped without matching or pausing", async () => {
+  let applyCalls = 0;
+  const cancelRecords = new Map([[K.raydarCancel("bk_test_001"), { at: "2026-07-29T17:59:30.000Z" }]]);
+  const deps = baseDeps({
+    readCancelRecord: async (key) => cancelRecords.get(key) || null,
+    applyDecisionsImpl: async () => { applyCalls++; return { paused: 1, pauseErrors: [] }; },
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.cancelled, 1);
+  assert.equal(result.processed, 0);
+  assert.equal(result.matched, 0);
+  assert.equal(applyCalls, 0, "a cancelled booking must never reach applyDecisions");
+  assert.deepEqual(deps._removed, ["bevt_test_001"], "the cancelled job is dequeued, not left to retry forever");
+});
+
+test("a job with no recorded cancellation still matches and pauses normally", async () => {
+  const deps = baseDeps({
+    readCancelRecord: async () => null,
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.cancelled, 0);
+  assert.equal(result.paused, 1);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pacer wiring (review finding: drainPendingBookings' real applyDecisions
+// default path was never exercised with the actual pacer — every test above
+// injects its own applyDecisionsImpl stub instead). This drives the REAL
+// applyDecisions (booking-stop.mjs) through the REAL pacedApplyDecisionsOverrides
+// (booking-protection-pace.mjs), the exact composition booking-worker.mjs
+// wires in production, against a fake `fetch`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("the real applyDecisions default path, driven through pacedApplyDecisionsOverrides, makes exactly 2 paced Paraform requests for one match", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let now = 2_000_000;
+  let state = null;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: () => now,
+    sleep: async (ms) => { calls.push({ sleptMs: ms }); now += ms; },
+  });
+  global.fetch = async (url) => {
+    calls.push({ url: String(url), at: now });
+    if (String(url).includes("updateCandidatePauseStatus")) {
+      return Response.json({ result: { data: { json: { ok: true } } } });
+    }
+    return Response.json({
+      result: { data: { json: { leads: [{ ccu_id: "ccu_1", is_paused: true }] } } },
+    });
+  };
+  try {
+    const deps = baseDeps({
+      applyDecisionsImpl: applyDecisions,
+      applyDecisionsOverrides: pacedApplyDecisionsOverrides(pace),
+    });
+    const result = await drainPendingBookings(deps);
+    assert.equal(result.paused, 1);
+    const requests = calls.filter((c) => c.url);
+    assert.equal(requests.length, 2, "one pause + one read-back search — no retry ladder firing extra requests");
+    assert.ok(
+      requests[1].at - requests[0].at >= PACE_MIN_INTERVAL_MS,
+      "the two Paraform requests are spaced by the pacer, not fired back-to-back",
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("the real applyDecisions default path never retries hard on a refusal — it costs one request and leaves the job queued", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalls = 0;
+  const pace = createPacer({
+    loadState: async () => null,
+    saveState: async () => {},
+    incrementCount: async () => {},
+    now: () => 3_000_000,
+    sleep: async () => {},
+  });
+  global.fetch = async () => {
+    fetchCalls++;
+    return new Response(null, { status: 401, headers: { "retry-after": "30" } });
+  };
+  try {
+    const deps = baseDeps({
+      applyDecisionsImpl: applyDecisions,
+      applyDecisionsOverrides: pacedApplyDecisionsOverrides(pace),
+    });
+    const result = await drainPendingBookings(deps);
+    assert.equal(result.paused, 0);
+    assert.equal(result.pauseErrors.length, 1);
+    assert.equal(fetchCalls, 1, "single-shot: a refusal is not retried in-process");
+    assert.deepEqual(deps._removed, [], "an unresolved pause stays queued for the next, paced tick");
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   createPacer,
   singleShotTrpc,
+  pacedApplyDecisionsOverrides,
   PACE_MIN_INTERVAL_MS,
   PACE_DEFAULT_BACKOFF_MS,
 } from "../api/seq/_lib/booking-protection-pace.mjs";
@@ -120,6 +121,93 @@ test("singleShotTrpc surfaces a 500 without a Retry-After as retryAfterMs 0", as
     () => singleShotTrpc("POST", "campaigns.updateCandidatePauseStatus", { a: 1 }, { fetchImpl }),
     (error) => error.code === "PARAFORM_REFUSED" && error.retryAfterMs === 0,
   );
+});
+
+test("one in flight: serializes two concurrent callers of the SAME pacer instance, not just sequential ones", async () => {
+  // The durable KV state alone only serializes ACROSS separate invocations —
+  // two concurrent in-process callers (e.g. applyDecisions' 2-way read-back
+  // verify loop) would both read `lastRequestAt` before either wrote it back.
+  // This asserts the in-process queue that makes "one in flight" hold even
+  // then.
+  const clock = fakeClock(1_000_000);
+  let state = null;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: clock.now,
+    sleep: async (ms) => { clock.advance(ms); },
+  });
+  const task = async (label) => pace(async () => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // yield, giving a race a chance to show up
+    inFlight--;
+    return label;
+  });
+  const [a, b] = await Promise.all([task("a"), task("b")]);
+  assert.equal(maxInFlight, 1, "the two calls never ran concurrently");
+  assert.deepEqual([a, b].sort(), ["a", "b"]);
+});
+
+test("pacedApplyDecisionsOverrides: mutatePause posts through the pacer with no retry ladder", async () => {
+  const clock = fakeClock(1_000_000);
+  let state = null;
+  const calls = [];
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: clock.now,
+    sleep: async (ms) => clock.advance(ms),
+  });
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
+    return Response.json({ result: { data: { json: { ok: true } } } });
+  };
+  try {
+    const overrides = pacedApplyDecisionsOverrides(pace);
+    await overrides.mutatePause("ccu_42");
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /campaigns\.updateCandidatePauseStatus/);
+    assert.deepEqual(calls[0].body.json, { campaign_to_candidate_user_id: "ccu_42", is_paused: true });
+
+    let attempts = 0;
+    await assert.rejects(
+      () => overrides.mutateThrottleRetry(async () => { attempts++; throw new Error("refused"); }),
+    );
+    assert.equal(attempts, 1, "mutateThrottleRetry makes exactly one attempt — no in-process retry ladder");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("pacedApplyDecisionsOverrides: searchLead binds the exact ccu_id and returns null when nothing matches", async () => {
+  const clock = fakeClock(1_000_000);
+  let state = null;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: clock.now,
+    sleep: async (ms) => clock.advance(ms),
+  });
+  const originalFetch = global.fetch;
+  global.fetch = async () => Response.json({
+    result: { data: { json: { leads: [{ ccu_id: "ccu_1" }, { ccu_id: "ccu_2", is_paused: true }] } } },
+  });
+  try {
+    const overrides = pacedApplyDecisionsOverrides(pace);
+    const row = await overrides.searchLead("seq_1", "candidate@example.com", { expectedCcuId: "ccu_2" });
+    assert.deepEqual(row, { ccu_id: "ccu_2", is_paused: true });
+    assert.equal(await overrides.searchLead("seq_1", "candidate@example.com", { expectedCcuId: "ccu_missing" }), null);
+    assert.equal(await overrides.searchLead("seq_1", "", { expectedCcuId: "ccu_1" }), null, "no email -> no search at all");
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("singleShotTrpc returns result.data.json on success and throws on a trpc-shaped error body", async () => {

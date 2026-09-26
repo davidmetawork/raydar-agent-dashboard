@@ -818,17 +818,31 @@ const AUTH_RETRY_DELAYS_MS = [600, 1800, 4500, 9000, 15000];
 // cycle it implies), not this TTL.
 const PROFILE_TTL_SECONDS = Number(process.env.BOOKING_STOP_PROFILE_TTL_S || 1800);
 
-export async function cachedRelationshipStatus(cuId, { ttlSeconds = PROFILE_TTL_SECONDS, force = false, onThrottle = null, deadline = null } = {}) {
+export async function cachedRelationshipStatus(cuId, {
+  ttlSeconds = PROFILE_TTL_SECONDS,
+  force = false,
+  onThrottle = null,
+  deadline = null,
+  // Injectable ONLY so the lightweight booking-protection catch-up's Book
+  // Time rotor (booking-protection-catchup.mjs bookTimeRotorCheck, docs/
+  // research/booking-protection-minimum-2026-09-26.md item 6) can route this
+  // one Paraform call through its own paced, single-shot client instead of
+  // core.mjs's burst-tuned retry ladder, while keeping this function's cache
+  // (the thing that actually bounds its own re-read cost). The default below
+  // is the exact call this function has always made — no other caller's
+  // behavior changes.
+  fetchProfile = () => withThrottleRetry(
+    () => trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1),
+    { onThrottle, delays: AUTH_RETRY_DELAYS_MS, deadline },
+  ),
+} = {}) {
   if (!force) {
     const cached = await kvGet(K.profile(cuId));
     if (cached) return cached;
   }
   // Jitter and both retry budgets live in withThrottleRetry now, so a fleet of
   // workers does not retry in lockstep and a timeout is not read as a miss.
-  const p = await withThrottleRetry(
-    () => trpcGet("candidateUser.getCandidateProfileInfo", { candidateUserId: cuId }, 1),
-    { onThrottle, delays: AUTH_RETRY_DELAYS_MS, deadline },
-  );
+  const p = await fetchProfile();
   if (!p) return null;
   const value = {
     status: p.candidate_user_relationship_status || null,

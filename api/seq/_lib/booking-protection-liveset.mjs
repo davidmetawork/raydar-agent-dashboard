@@ -24,6 +24,18 @@
 // currently-protected family (No Show, Audio Failed, both Reschedule
 // sequences, the curated-list follow-ups, the interview chase) is matched by
 // name today.
+//
+// SECOND residual risk, also deliberately accepted and called out in the PR
+// (a review flagged that it was implemented but undisclosed): a lead enrolled
+// into an already-enabled protected sequence AFTER today's build who then
+// books before TOMORROW's rebuild is not in byEmail at all yet, so neither the
+// webhook-triggered worker nor the daily catch-up can match or pause them —
+// they can receive up to one more nudge in the gap. Bounded to <=24h and the
+// step cadence these families use in practice (named sequences are 2+ days
+// apart per candidate), so a rebuild the next day catches it. The appendix's
+// same-day count-delta walk would close this at the cost of the exact daily
+// per-sequence read this redesign exists to remove; left to David to decide
+// whether that trade is worth it (see the PR's Residual risks section).
 import {
   isNudgeSequence,
   seqKeys,

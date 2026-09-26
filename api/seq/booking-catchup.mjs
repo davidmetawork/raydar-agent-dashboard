@@ -5,11 +5,16 @@
 // 10-minute booking-sweep.mjs pass, including its ~100-profile-reads-per-pass
 // rotor.
 import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
-import { shouldAlert } from "./_lib/booking-stop.mjs";
+import { shouldAlert, applyDecisions } from "./_lib/booking-stop.mjs";
 import {
   catchUpBookingIndexes,
   bookTimeRotorCheck,
 } from "./_lib/booking-protection-catchup.mjs";
+import {
+  createPacer,
+  pacedApplyDecisionsOverrides,
+  pacedRelationshipStatusLoader,
+} from "./_lib/booking-protection-pace.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
@@ -28,8 +33,16 @@ async function handleBookingCatchup(req, res) {
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
 
   const out = { ok: true, indexes: null, bookTime: null };
+  // One pacer per invocation, shared by both the index reconciliation and the
+  // Book Time rotor below — item 6's <=10/min, one-in-flight ceiling applies
+  // across every Paraform call this daily job makes, not per sub-step.
+  const pace = createPacer();
+  const pacedApplyDecisionsImpl = (decisions) =>
+    applyDecisions(decisions, pacedApplyDecisionsOverrides(pace));
   try {
-    out.indexes = await catchUpBookingIndexes({});
+    out.indexes = await catchUpBookingIndexes({
+      applyDecisionsImpl: pacedApplyDecisionsImpl,
+    });
     if (
       (out.indexes.raydarError || out.indexes.calendlyError)
       && (await shouldAlert("booking-catchup-index-error", 6 * 3600))
@@ -53,7 +66,10 @@ async function handleBookingCatchup(req, res) {
 
   if (hasCookie()) {
     try {
-      out.bookTime = await bookTimeRotorCheck({});
+      out.bookTime = await bookTimeRotorCheck({
+        relationshipStatusLoader: pacedRelationshipStatusLoader(pace),
+        applyDecisionsImpl: pacedApplyDecisionsImpl,
+      });
       if (out.bookTime.pauseErrors?.length && (await shouldAlert("booking-catchup-booktime-errors", 6 * 3600))) {
         await notifySlack(`:warning: Booking catch-up's Book Time check failed to pause ${out.bookTime.pauseErrors.length} lead(s); retried next run.`).catch(() => {});
       }
