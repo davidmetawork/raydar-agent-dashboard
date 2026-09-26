@@ -11,6 +11,65 @@ import {
   raydarSchedulerBookingStopEnabled,
   raydarSchedulerIndexConfigured,
 } from "./_lib/raydar-booking-index.mjs";
+import {
+  loadLiveSet,
+  liveSetUsable,
+  LIVESET_MAX_AGE_MS,
+} from "./_lib/booking-protection-liveset.mjs";
+import {
+  pendingQueueDepth,
+  oldestPendingAgeMs,
+} from "./_lib/booking-protection-queue.mjs";
+import {
+  LITE_KEYS,
+  kvGet as liteKvGet,
+  kvConfigured as liteKvConfigured,
+} from "./_lib/booking-protection-store.mjs";
+import { alsoPauseIfBookedBeforeJoining } from "./_lib/booking-protection-policy.mjs";
+
+/**
+ * The lightweight design's own health block (docs/research/
+ * booking-protection-minimum-2026-09-26.md). Additive alongside the legacy
+ * `bookingStop.*` fields below, which now report the RETIRED 10-minute
+ * sweep/membership-refresh as increasingly stale by design — that is
+ * expected, not a fault, until it is removed entirely. See "supersedes PR
+ * 231" in the PR description for what replaced it.
+ */
+async function bookingProtectionLiteHealth(now = Date.now()) {
+  if (!liteKvConfigured()) return { configured: false };
+  const [liveSet, liveSetAttempt, catchupAttempt, queueDepth, oldestPendingMs] =
+    await Promise.all([
+      loadLiveSet({}).catch(() => null),
+      liteKvGet(LITE_KEYS.liveSetAttempt).catch(() => null),
+      liteKvGet(LITE_KEYS.catchupAttempt).catch(() => null),
+      pendingQueueDepth().catch(() => null),
+      oldestPendingAgeMs(now).catch(() => null),
+    ]);
+  const liveSetAgeMs = liveSet?.builtAt ? now - Date.parse(liveSet.builtAt) : null;
+  return {
+    configured: true,
+    liveSet: {
+      usable: liveSetUsable(liveSet, now),
+      ageMinutes: liveSetAgeMs == null ? null : Math.round(liveSetAgeMs / 60000),
+      maxAgeMinutes: Math.round(LIVESET_MAX_AGE_MS / 60000),
+      indexedEmails: liveSet?.indexedEmails ?? null,
+      leadsIndexed: liveSet?.leadsIndexed ?? null,
+      sequencesWithActiveLeads: liveSet?.sequencesWithActiveLeads ?? null,
+      incomplete: liveSet?.incomplete ?? null,
+      lastAttemptStatus: liveSetAttempt?.status ?? null,
+      lastAttemptAt: liveSetAttempt?.at ?? null,
+    },
+    pendingQueue: {
+      depth: queueDepth,
+      oldestPendingAgeMinutes: oldestPendingMs == null ? null : Math.round(oldestPendingMs / 60000),
+    },
+    catchup: {
+      lastAttemptStatus: catchupAttempt?.status ?? null,
+      lastAttemptAt: catchupAttempt?.at ?? null,
+    },
+    interviewChasePauseBeforeJoin: alsoPauseIfBookedBeforeJoining(),
+  };
+}
 
 const HEALTH_READ_KEY_PATTERN = /^\S{32,}$/u;
 const CONTRACT_REVISION_PATTERN = /^[a-f0-9]{40}$/iu;
@@ -218,11 +277,18 @@ async function handleSequenceHealth(req, res) {
     bookingStop = { error: "unavailable", currentBookingStopPolicy };
   }
 
+  let bookingProtectionLite = null;
+  try {
+    bookingProtectionLite = await bookingProtectionLiteHealth();
+  } catch {
+    bookingProtectionLite = { error: "unavailable" };
+  }
+
   try {
     const h = await paraformHealth();
-    res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop });
+    res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop, bookingProtectionLite });
   } catch (e) {
-    res.status(200).json({ ok: false, cookieSet: hasCookie(), paraform: "error", detail: String(e.message || e).slice(0, 160), bookingStop });
+    res.status(200).json({ ok: false, cookieSet: hasCookie(), paraform: "error", detail: String(e.message || e).slice(0, 160), bookingStop, bookingProtectionLite });
   }
 }
 

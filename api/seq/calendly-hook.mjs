@@ -2,21 +2,22 @@
 //
 // A candidate books through the Calendly link in a sequence email; Calendly
 // pushes invitee.created here within seconds; every active "please book a call"
-// lead for that address is paused before the next step can fire.
+// lead for that address is enqueued for the background matcher
+// (_lib/booking-protection-worker.mjs) before the next sequence step can fire.
 //
-// This is the replacement for polling. The n8n predecessor spent 124.8s per run
-// fanning out Calendly invitee reads — more than twice its entire 60s budget —
-// to discover something Calendly will simply tell us. The hourly sweep
-// (booking-sweep.mjs) remains as a backstop for dropped deliveries and for the
-// candidates who book from a different address than the sequence targets.
+// LIGHTWEIGHT REDESIGN (2026-09-26, docs/research/booking-protection-minimum-
+// 2026-09-26.md item 3): like the Scheduler hook, this route now only
+// validates, durably records, and enqueues — it never calls Paraform and it
+// always answers OK for anything it can durably record. The daily catch-up
+// (api/seq/booking-catchup.mjs) remains the backstop for dropped deliveries
+// and for candidates who book from a different address than the sequence
+// targets.
 //
 // AUTH: HMAC only. The Google gate in middleware.ts explicitly excludes /api/*
 // (matcher: '/((?!api(?:/|$)|login…).*)'), so there is no session to lean on and
 // none is wanted — Calendly cannot present one. Unsigned requests get a bare 401.
-import { hasCookie } from "./_lib/core.mjs";
 import { verifyCalendlyWebhook, calendlyWebhookEvent } from "./_lib/calendly-webhook.mjs";
 import {
-  pauseForBooking,
   kvGet,
   kvSetNx,
   kvSet,
@@ -24,6 +25,7 @@ import {
   K,
   shouldAlert,
 } from "./_lib/booking-stop.mjs";
+import { enqueuePendingBooking } from "./_lib/booking-protection-queue.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 60 };
@@ -33,10 +35,11 @@ const json = (value, status = 200) =>
 
 export async function handleCalendlyWebhook(request, {
   secret = process.env.CALENDLY_WEBHOOK_SECRET,
-  pause = pauseForBooking,
   alert = notifySlack,
-  hasParaformCookie = hasCookie,
-  apply = process.env.BOOKING_STOP_APPLY !== "0",
+  enqueue = enqueuePendingBooking,
+  claim = kvSetNx,
+  readClaim = kvGet,
+  nowMs = Date.now(),
 } = {}) {
   if (request.method !== "POST") return json({ ok: false, error: "POST_only" }, 405);
 
@@ -66,50 +69,49 @@ export async function handleCalendlyWebhook(request, {
 
   if (event.event !== "invitee.created") return json({ ok: true, ignored: true }, 202);
   if (!event.email) return json({ ok: true, ignored: "no_email" }, 202);
-  if (!hasParaformCookie()) return json({ ok: false, error: "no_cookie" }, 503);
 
-  // Idempotency: Calendly retries, and a retry must not re-run the scan.
-  if (event.inviteeUri && kvConfigured()) {
+  const bookedAtMs = Date.parse(event.createdAt || "");
+  const effectiveBookedAtMs = Number.isFinite(bookedAtMs) ? bookedAtMs : nowMs;
+  const eventId = event.inviteeUri
+    ? `calendly:${event.inviteeUri}`
+    : `calendly:${event.email}:${effectiveBookedAtMs}`;
+
+  // Idempotency: Calendly retries, and a retry must not re-enqueue.
+  if (kvConfigured()) {
     try {
-      const claimed = await kvSetNx(K.event(event.inviteeUri), { at: new Date().toISOString() }, 30 * 24 * 3600);
+      const claimed = await claim(K.event(eventId), { at: new Date(nowMs).toISOString() }, 30 * 24 * 3600);
       if (claimed !== "OK" && claimed !== true) {
-        const prior = await kvGet(K.event(event.inviteeUri)).catch(() => null);
+        const prior = await readClaim(K.event(eventId)).catch(() => null);
         return json({ ok: true, duplicate: true, firstSeen: prior?.at || null }, 202);
       }
     } catch {
-      // KV unreachable: fall through and pause anyway. Pausing twice is a no-op;
-      // NOT pausing is the failure that produced this incident.
+      // KV unreachable for the dedup claim: fall through and enqueue anyway.
+      // Enqueuing twice just makes the worker match twice (a pause is
+      // idempotent); NOT enqueuing is the failure that produced the original
+      // incident this whole system exists to prevent.
     }
   }
 
-  let outcome;
   try {
-    outcome = await pause({
+    await enqueue({
+      eventId,
       email: event.email,
-      bookedAt: event.createdAt || new Date().toISOString(),
+      bookedAtMs: effectiveBookedAtMs,
+      effectiveBookedAtMs,
       startsAt: event.startsAt,
       eventName: event.eventName,
-      apply,
+      source: "calendly",
+      bookingId: eventId,
+      enqueuedAt: new Date(nowMs).toISOString(),
     });
-  } catch (error) {
-    const expired = error?.code === "AUTH_EXPIRED";
-    if (expired && (await shouldAlert("auth-expired"))) {
-      await alert(":rotating_light: Booking stop could not pause a booked candidate — the Paraform session cookie is expired. Recapture it; sequence nudges are unprotected until then.").catch(() => {});
-    }
-    return json({ ok: false, error: expired ? "expired" : "error" }, 503);
-  }
-
-  if (outcome.pauseErrors?.length && (await shouldAlert("pause-errors", 3600))) {
-    await alert(`:warning: Booking stop failed to pause ${outcome.pauseErrors.length} lead(s) after a Calendly booking — the hourly sweep will retry.`).catch(() => {});
+  } catch {
+    return json({ ok: false, error: "store_unavailable" }, 503);
   }
 
   return json({
     ok: true,
     event: event.event,
-    apply,
-    matched: outcome.decisions.length,
-    paused: outcome.paused,
-    pauseErrors: outcome.pauseErrors,
+    queued: true,
   }, 202);
 }
 

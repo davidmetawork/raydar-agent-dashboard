@@ -2,8 +2,8 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 107,
-  "digest": "db39eb451b33fbef43fda513caed3442cefa5ae886b2af5a2fe861042f1e92af",
-  "vercel_json_canonical_sha256": "f5a43d084194dd7561d1ac0bf246cf752ef605e337cd8daebc590e310989e909",
+  "digest": "bc63a3688fdbfe19565ae6d02750093a757082ac41027d28a5de329c333a55f7",
+  "vercel_json_canonical_sha256": "ab148cb972a9b01608f881fdc14d64e736fe754aa938fc6070955112dc8d388e",
   "files": [
     {
       "path": ".vercelignore",
@@ -431,7 +431,7 @@
     },
     {
       "path": "vercel.json",
-      "sha256": "957b3182e632fdb741b4bb18653a9f2537a84feecddd390a1163566d7b9f1491"
+      "sha256": "9dab22e47523f5068ccbd0da7df6d8a07199a5f1776b6bff697ef332a140dbde"
     }
   ]
 }

@@ -652,7 +652,10 @@ test("invitee.canceled records and alerts but NEVER unpauses", async () => {
   assert.match(alerts.join(" "), /never auto-resumed/i);
 });
 
-test("invitee.created pauses via the booking path and reports counts only", async () => {
+test("invitee.created enqueues for the background matcher and reports queued only (never calls Paraform)", async () => {
+  // Lightweight redesign (2026-09-26): the hook only validates, records, and
+  // enqueues now — it never pauses inline. See booking-protection-worker.test.mjs
+  // for the matcher that actually pauses.
   const body = {
     event: "invitee.created",
     payload: {
@@ -666,15 +669,17 @@ test("invitee.created pauses via the booking path and reports counts only", asyn
   let seen = null;
   const res = await handleCalendlyWebhook(req(raw, headers), {
     secret: SECRET,
-    pause: async (args) => { seen = args; return { decisions: [{}], paused: 1, pauseErrors: [] }; },
+    enqueue: async (job) => { seen = job; },
+    claim: async () => "OK",
+    readClaim: async () => null,
     alert: async () => true,
-    hasParaformCookie: () => true,
   });
   const payload = await res.json();
   assert.equal(res.status, 202);
-  assert.equal(payload.paused, 1);
+  assert.equal(payload.queued, true);
   assert.equal(seen.email, "booked@example.com", "email must be normalised");
-  assert.equal(seen.bookedAt, "2026-07-24T00:24:44.730Z");
+  assert.equal(seen.source, "calendly");
+  assert.equal(new Date(seen.bookedAtMs).toISOString(), "2026-07-24T00:24:44.730Z");
   // Response must never carry candidate detail.
   assert.equal(JSON.stringify(payload).includes("example.com"), false);
 });
