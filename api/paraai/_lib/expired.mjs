@@ -59,7 +59,19 @@ import {
   candidateEmailFromParaformSources,
   paraformCandidateRecipientPremark,
 } from "./outreach.mjs";
-import { trpcGet } from "./core.mjs";
+// This lane's own Paraform calls (both here and in expired-actions.mjs) ride
+// the interview-request lanes' shared cooldown brake, not the generic
+// adapter's retry ladder — see request-lane-throttle.mjs (2026-09-26
+// incident).
+import {
+  acquireRequestLaneCadenceSlot,
+  boundRequestLaneTrpc,
+  REQUEST_LANE_COOLDOWN_CODE,
+  requestLaneAuthStatus,
+  requestLaneCooldownStatus,
+} from "./request-lane-throttle.mjs";
+
+const { trpcGet } = boundRequestLaneTrpc("expired");
 
 const bool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -292,6 +304,30 @@ export async function runExpiredTick({
   const lanePause = await pauseState().catch(() => ({ paused: true }));
   if (lanePause?.paused) return { ok: true, ran: false, reason: "request_lanes_paused" };
 
+  // Self-throttle (2026-09-26 incident): a cooldown already armed by a 429/401
+  // blocks every Paraform call this lane would make, so bail before making
+  // any — for every mode, since a forced/manual tick during a cooldown would
+  // just be throttled again. While cooling down after a 401, this is also the
+  // identity check's one chance to run.
+  const cooldown = await requestLaneCooldownStatus().catch(() => ({ active: false }));
+  if (cooldown.active) {
+    if (cooldown.reason === "401") await requestLaneAuthStatus().catch(() => {});
+    return {
+      ok: true,
+      ran: false,
+      reason: "request_lane_cooldown",
+      until: cooldown.untilMs || null,
+    };
+  }
+  // Moves the lane's Paraform work off the worker's 5s tick onto a 1-5 minute
+  // cadence (default 2 min). Only for the organic (automatic) tick — a
+  // manual/force/backfill invocation already bypasses poll_not_due the same
+  // way just below.
+  if (mode === "organic") {
+    const cadenceAdmitted = await acquireRequestLaneCadenceSlot({ lane: "expired" }).catch(() => false);
+    if (!cadenceAdmitted) return { ok: true, ran: false, reason: "request_lane_cadence_not_due" };
+  }
+
   const slot = await acquireExpiredPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!slot && mode === "organic") return { ok: true, ran: false, reason: "poll_not_due" };
 
@@ -312,11 +348,33 @@ export async function runExpiredTick({
     results: [],
   };
 
-  const [history, paraAi, replyRecords] = await Promise.all([
-    readSubmissionRequestHistory(),
-    readParaAiStatus().catch(() => null),
-    listReplyRecords(500).catch(() => []),
-  ]);
+  let history;
+  let paraAi;
+  let replyRecords;
+  try {
+    // Sequential, not Promise.all: readSubmissionRequestHistory and
+    // readParaAiStatus are BOTH real Paraform reads. Firing them concurrently
+    // would let the second start before the first's 401 had a chance to arm
+    // the cooldown, spending two requests on the first failure instead of
+    // one. listReplyRecords is a KV read only, so it stays concurrent with
+    // nothing Paraform-side to race.
+    history = await readSubmissionRequestHistory();
+    paraAi = await readParaAiStatus().catch(() => null);
+    replyRecords = await listReplyRecords(500).catch(() => []);
+  } catch (error) {
+    // The FIRST Paraform call this tick (very often this exact read, the
+    // 2026-09-26 incident's failure point) hit a 429/401 and armed the
+    // cooldown itself. Stop cleanly — no alert, no partial summary.
+    if (error?.code === REQUEST_LANE_COOLDOWN_CODE) {
+      return {
+        ok: true,
+        ran: false,
+        reason: "request_lane_cooldown",
+        until: error.until || null,
+      };
+    }
+    throw error;
+  }
   summary.expiredCount = history.currentUserExpiredCount;
   summary.counts = history.counts;
   summary.paraAi = paraAi;
@@ -442,6 +500,15 @@ export async function runExpiredTick({
         resolution: plan.resolution,
       });
     } catch (error) {
+      // A cooldown armed by an EARLIER row in this same batch (or the
+      // identity check it triggered) — not a fault of this row. Stop the
+      // whole batch here, cleanly, exactly like AUTH_EXPIRED below, but
+      // never as an error and never alerted (request-lane-throttle.mjs
+      // already recorded the cooldown itself).
+      if (error?.code === REQUEST_LANE_COOLDOWN_CODE) {
+        summary.requestLaneCooldown = true;
+        break;
+      }
       if (error?.code === "AUTH_EXPIRED") {
         await reportParaformReadAuthFailure({
           lane: "paraai_expired",

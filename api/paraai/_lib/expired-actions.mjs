@@ -20,9 +20,16 @@
 //   * "Late submit" is the ordinary quick-submit path behind a warning dialog,
 //     so it stays available while the row is expired and disappears once the
 //     row leaves the expired bucket. This lane never fires it.
-import { trpcGet, trpcPost } from "./core.mjs";
+// This lane's Paraform calls ride the interview-request lanes' own cooldown
+// brake, not the shared adapter's retry ladder — see request-lane-throttle.mjs
+// (2026-09-26 incident) for why. `normalizeRequestRow`/`EXPIRY_DAYS` from
+// reply-actions.mjs are pure helpers; the (retired) reply lane's own
+// trpcGet/trpcPost calls in that module are untouched.
+import { boundRequestLaneTrpc } from "./request-lane-throttle.mjs";
 import { normalizeRequestRow, EXPIRY_DAYS } from "./reply-actions.mjs";
 import { claimSubmissionRequest, readSubmissionRequestClaim } from "./request-claim.mjs";
+
+const { trpcGet, trpcPost } = boundRequestLaneTrpc("expired");
 
 // One clock for both lanes: two independently configured expiry boundaries
 // could each believe the same request belongs to them.

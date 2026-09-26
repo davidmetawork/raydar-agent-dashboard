@@ -2,9 +2,22 @@ import {
   firstEmail,
   normalizeEmail,
   notifySlack,
-  trpcGet,
-  trpcPost,
 } from "./core.mjs";
+// The interview-request lanes' own Paraform calls ride a narrower brake than
+// the shared adapter's classifyThrottle (see request-lane-throttle.mjs for
+// the 2026-09-26 incident this exists to stop): one attempt, a shared
+// persisted cooldown on the first 429/401, and a combined <=10/min pace.
+// Every other Para AI lane keeps using core.mjs's trpcGet/trpcPost directly.
+import {
+  acquireRequestLaneCadenceSlot,
+  boundRequestLaneTrpc,
+  REQUEST_LANE_COOLDOWN_CODE,
+  requestLaneAuthStatus,
+  requestLaneCadenceSeconds,
+  requestLaneCooldownStatus,
+  requestLaneCounters,
+  requestLaneRatePerMinute,
+} from "./request-lane-throttle.mjs";
 import {
   reportParaformWriteAuthFailure,
   reportParaformWriteAuthSuccess,
@@ -84,6 +97,8 @@ import {
   saveOutreachState,
   storeConfigured,
 } from "./outreach-store.mjs";
+
+const { trpcGet, trpcPost } = boundRequestLaneTrpc("outreach");
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 const EXCEPTION_RETRY_MS = 5 * 60 * 1000;
@@ -2582,6 +2597,13 @@ export async function handleOutreachFailure(
   } = {},
 ) {
   const code = clean(error?.code || "OUTREACH_FAILED");
+  // The request-lane cooldown already recorded itself (armRequestLaneCooldown)
+  // and every later item this tick hits the same cooldown before it can reach
+  // Paraform (request-lane-throttle.mjs's pre-call check). None of that is a
+  // per-candidate fault, so — like OUTREACH_BUSY below — it is never recorded
+  // as an exception and never pages: one cooldown, one clean stop, no
+  // per-item spam.
+  if (code === REQUEST_LANE_COOLDOWN_CODE) return;
   // One observed Gmail 429 stands the whole lane down (see armGmailBackoff).
   // Alert at most once per 6h so the stand-down is visible without spamming.
   if (code === "GMAIL_REQUEST_FAILED" && Number(error?.status) === 429) {
@@ -2691,6 +2713,27 @@ export async function runOutreachTick({
   // other background brake.
   const lanePause = await pauseState().catch(() => ({ paused: true }));
   if (lanePause?.paused) return { enabled: true, processed: 0, reason: "request_lanes_paused" };
+  // Self-throttle (2026-09-26 incident): a cooldown already armed by a 429/401
+  // blocks every Paraform call this lane would make, so never even enter the
+  // tick — and while cooling down, offer the rate-limited identity check its
+  // one chance to prove or disprove a dead session (request-lane-throttle.mjs).
+  const cooldown = await requestLaneCooldownStatus().catch(() => ({ active: false }));
+  if (cooldown.active) {
+    if (cooldown.reason === "401") {
+      await requestLaneAuthStatus().catch(() => {});
+    }
+    return {
+      enabled: true,
+      processed: 0,
+      reason: "request_lane_cooldown",
+      until: cooldown.untilMs || null,
+    };
+  }
+  // Moves the lane's Paraform work off the worker's 5s tick onto a 1-5 minute
+  // cadence (default 2 min, PARAAI_REQUEST_LANE_CADENCE_SECONDS). The worker
+  // itself keeps ticking fast for its non-Paraform bookkeeping.
+  const cadenceAdmitted = await acquireRequestLaneCadenceSlot({ lane: "outreach" }).catch(() => false);
+  if (!cadenceAdmitted) return { enabled: true, processed: 0, reason: "request_lane_cadence_not_due" };
   const pollToken = await acquireOutreachPollSlot({ ttlSeconds: config.pollLockSeconds });
   if (!pollToken) return { enabled: true, processed: 0, reason: "poll_not_due" };
   // Gmail-429 breaker (2026-08-10): while armed, run no Gmail work at all.
@@ -2795,6 +2838,20 @@ export async function runOutreachTick({
       // but a rising count is the signal to take back to the vendor.
       autoRecoveredNoDigest: results.filter((result) => result.autoRecoveredNoDigest).length,
     };
+  } catch (error) {
+    // The FIRST Paraform call this tick (very often the history read above,
+    // exactly the 2026-09-26 incident's failure point) hit a 429/401 and
+    // armed the cooldown itself. Stop cleanly here — no alert, no per-item
+    // noise — rather than let this surface as a generic worker failure.
+    if (error?.code === REQUEST_LANE_COOLDOWN_CODE) {
+      return {
+        enabled: true,
+        processed: 0,
+        reason: "request_lane_cooldown",
+        until: error.until || null,
+      };
+    }
+    throw error;
   } finally {
     await releaseOutreachPollSlot(pollToken).catch(() => {});
   }
@@ -3051,6 +3108,15 @@ export async function outreachHealth({
     },
     gmail: probe && config.gmailConfigured ? "checking" : null,
     store: probe && config.storeConfigured ? "checking" : null,
+    // Interview-request lanes' self-throttle (2026-09-26): cooldown state and
+    // durable per-lane request counters, so the health route can show the
+    // brake working instead of only its symptoms.
+    requestLaneThrottle: {
+      cooldown: await requestLaneCooldownStatus().catch(() => ({ active: false, configured: false })),
+      counters: await requestLaneCounters().catch(() => ({ total: 0, byLane: {}, configured: false })),
+      cadenceSeconds: requestLaneCadenceSeconds(),
+      ratePerMinute: requestLaneRatePerMinute(),
+    },
   };
   if (probe && config.gmailConfigured) {
     const calendar = await probeCalendarAccess(config.mailbox);
