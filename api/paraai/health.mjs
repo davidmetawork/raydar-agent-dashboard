@@ -1,4 +1,4 @@
-import { authConfig, cors, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
+import { authConfig, cors, ensureParaformSession, hasParaformCookie, listSequences, paraAIConfig, trpcGet } from "./_lib/core.mjs";
 import {
   automationConfig,
   automationExecutionEnabled,
@@ -149,6 +149,7 @@ export async function handleParaaiHealth(req, res, {
     if (lanesPause?.paused) health.outreach.executionReady = false;
     return res.status(200).json(health);
   }
+  await ensureParaformSession();
   if (!(await hasParaformCookie())) {
     health.paraform = "no_cookie";
     return res.status(200).json(health);

@@ -7,7 +7,7 @@
 // request this makes is paced at <= 10/min, one in flight
 // (_lib/booking-protection-pace.mjs).
 import { timingSafeEqual } from "node:crypto";
-import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth, ensureParaformSession } from "./_lib/core.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { completeCampaignLeads } from "./_lib/core.mjs";
 import {
@@ -48,6 +48,7 @@ async function recordAttempt(status, extra = {}) {
 }
 
 async function runRefresh({ triggeredBy }) {
+  await ensureParaformSession();
   if (!hasCookie()) {
     await recordAttempt("failure", { error: "no_cookie" });
     return { ok: false, error: "no_cookie" };

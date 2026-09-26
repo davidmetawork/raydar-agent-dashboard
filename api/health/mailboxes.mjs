@@ -15,7 +15,7 @@
 // the alias inventory should not be public (harvest bait).
 import { timingSafeEqual } from "node:crypto";
 import { hGet, hSet } from "./_lib/kv.mjs";
-import { hasCookie, trpcGet } from "../seq/_lib/core.mjs";
+import { ensureParaformSession, hasCookie, trpcGet } from "../seq/_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 
 const CACHE_KEY = "hlth:mailboxes:cache";
@@ -76,6 +76,7 @@ async function handleMailboxes(req, res) {
     return res.status(200).json(summarize(cached.accounts, cached.fetchedAt));
   }
 
+  await ensureParaformSession();
   if (!hasCookie()) {
     return res.status(200).json({ ok: false, paraform: "no_cookie", error: "no Paraform session configured" });
   }

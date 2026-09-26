@@ -24,7 +24,7 @@ import {
 } from "./_lib/auth-probe.mjs";
 import { runCuratedFitDeadmanTick } from "./_lib/curated-fit-deadman.mjs";
 import { runStuckWatchdogTick } from "./_lib/stuck-watchdog.mjs";
-import { notifySlack } from "./_lib/core.mjs";
+import { ensureParaformSession, notifySlack } from "./_lib/core.mjs";
 import {
   PHASE3_AGGREGATE_ALERT_KEY,
   PHASE3_AGGREGATE_ALERT_TTL_SECONDS,
@@ -416,6 +416,10 @@ export async function handleParaaiWorker(req, res, {
   res.setHeader("Cache-Control", "no-store");
   if (!["GET", "POST"].includes(req.method)) return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
   if (!authorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  // Resolves the durable n8n-store Paraform session (falls back to the static
+  // env value). This talks only to the n8n control plane, never to Paraform
+  // itself, so it does not violate the background-pause ordering below.
+  await ensureParaformSession();
 
   // This must precede store configuration, request dispatch, the Paraform auth
   // probe, every outreach lane, and recovery.  A failed control-plane read is

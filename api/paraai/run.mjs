@@ -1,4 +1,4 @@
-import { cors, notifySlack, requireAuth } from "./_lib/core.mjs";
+import { cors, ensureParaformSession, notifySlack, requireAuth } from "./_lib/core.mjs";
 import { reportParaformReadAuthFailure } from "./_lib/auth-probe.mjs";
 import {
   automationConfig,
@@ -101,6 +101,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
   if (!(await requireAuth(req, res))) return;
+  await ensureParaformSession();
   if (!storeConfigured()) return res.status(503).json({ ok: false, error: "state_store_not_configured" });
   let body;
   try { body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}); }

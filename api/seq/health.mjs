@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { cors, hasCookie, paraformHealth } from "./_lib/core.mjs";
+import { cors, ensureParaformSession, hasCookie, paraformHealth } from "./_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
   raydarWebhookProofStatus,
@@ -285,6 +285,11 @@ async function handleSequenceHealth(req, res) {
   }
 
   try {
+    // Resolve the durable n8n-store session (falls back to the static env
+    // value on any store failure) before the auth probe below, so a dead
+    // static seal no longer reports "expired" while the shared store holds a
+    // live, daily-renewed session. See api/_lib/paraform-session-store.mjs.
+    await ensureParaformSession();
     const h = await paraformHealth();
     res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop, bookingProtectionLite });
   } catch (e) {

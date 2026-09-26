@@ -5,7 +5,7 @@
 // against the live-set index is 0 Paraform requests; only a real match costs
 // 2 (pause + read-back verify). Cheap and safe to run often: an empty queue
 // makes zero Paraform calls at all.
-import { cors, requireAuth, cronAuth } from "./_lib/core.mjs";
+import { cors, requireAuth, cronAuth, ensureParaformSession } from "./_lib/core.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { drainPendingBookings } from "./_lib/booking-protection-worker.mjs";
 import { oldestPendingAgeMs } from "./_lib/booking-protection-queue.mjs";
@@ -31,6 +31,7 @@ async function handleBookingWorker(req, res) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
+  await ensureParaformSession();
 
   try {
     const pace = createPacer();

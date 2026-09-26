@@ -4,8 +4,13 @@
 import { randomUUID } from "node:crypto";
 import { authConfig, cors, requireAuth } from "../../seq/_lib/core.mjs";
 import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
+import {
+  ensureParaformSession,
+  invalidateParaformSessionCache,
+  paraformCookieValue,
+} from "../../_lib/paraform-session-store.mjs";
 
-export { authConfig, cors, requireAuth };
+export { authConfig, cors, ensureParaformSession, requireAuth };
 
 const PARAFORM_BASE = "https://www.paraform.com/api";
 const PARAFORM_ORIGIN = "https://www.paraform.com";
@@ -64,31 +69,31 @@ export function paraAIConfig() {
   };
 }
 
-let cookieCache = null;
-export function clearCookieCache() { cookieCache = null; }
+// Cookie resolution lives in the shared store
+// (api/_lib/paraform-session-store.mjs), used by both this file and
+// api/seq/_lib/core.mjs — one process cache, one resolution order (n8n
+// generational store for account 'david', then the legacy shared
+// generational/chunked n8n variables, then the static env value last)
+// instead of this file's previous env-first / legacy-two-chunk-only
+// fallback. clearCookieCache() is kept as the public name (existing tests
+// and callers use it) but now clears the SHARED cache.
+export function clearCookieCache() { invalidateParaformSessionCache(); }
 
 export async function paraformCookie() {
-  if (cookieCache) return cookieCache;
-  const direct = process.env.PARAFORM_SESSION_COOKIE || process.env.PARAFORM_COOKIE;
-  if (direct) {
-    cookieCache = direct;
-    return cookieCache;
+  await ensureParaformSession();
+  const value = paraformCookieValue();
+  if (!value) {
+    throw new Error("no Paraform session cookie or n8n variable fallback configured");
   }
-  const base = String(process.env.N8N_BASE_URL || "").replace(/\/+$/, "");
-  const key = process.env.N8N_API_KEY || "";
-  if (!base || !key) throw new Error("no Paraform session cookie or n8n variable fallback configured");
-  const response = await fetch(`${base}/api/v1/variables`, {
-    headers: { "X-N8N-API-KEY": key },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`n8n variables read failed: ${response.status}`);
-  cookieCache = paraformCookieFromVariableRows(((await response.json())?.data) || []);
-  return cookieCache;
+  return value;
 }
 
-// n8n caps one variable at 1,000 chars; a ~2 KB WorkOS seal is stored as two
-// ordered chunks selected by an explicit parts marker. Fail closed on any
-// inconsistent chunk state — mirrors lifecycle/_lib/clients.mjs exactly.
+// n8n caps one variable at 1,000 chars; a ~2 KB WorkOS seal used to be stored
+// as exactly two ordered chunks selected by an explicit parts marker. Kept
+// for compatibility with any direct caller/test of the raw two-chunk shape;
+// paraformCookie() above no longer calls this and instead resolves through
+// the shared store, which also understands the newer, unbounded-count
+// generations (mirrors lifecycle/_lib/paraform-session.mjs exactly).
 export function paraformCookieFromVariableRows(rows = []) {
   const variables = new Map(rows.map((entry) => [entry?.key, entry?.value]));
   const parts = Number(variables.get("PARAFORM_SESSION_COOKIE_PARTS") || 0);
