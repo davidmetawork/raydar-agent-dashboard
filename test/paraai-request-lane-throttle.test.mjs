@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 
 // The Para AI interview-request lanes' self-throttle (2026-09-26 incident):
 // every worker tick used to die at its first Paraform read and then run the
@@ -20,6 +21,23 @@ process.env.PARAAI_OUTREACH_KV_REST_API_URL = KV_URL;
 process.env.PARAAI_OUTREACH_KV_REST_API_TOKEN = "kv-test-token";
 process.env.PARAFORM_SESSION_COOKIE = "Fe26.2*test-session*";
 process.env.PARAAI_AUTOMATION_RUNNER_KEY = "runner-test-secret";
+// Only the expired-lane rate-limit regression (below) needs Gmail: it has to
+// reach the real "dismiss" write branch, which requires gatherContactEvidence
+// to resolve a non-null mailboxReplies count, which requires a real (mocked)
+// Gmail search round trip. The service-account key is real (so the module's
+// own RSA-SHA256 JWT signing succeeds); the token/search responses are
+// canned below, same as Paraform and KV.
+const { privateKey } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
+process.env.GOOGLE_SA_KEY_JSON = JSON.stringify({
+  client_email: "test-lane-rate-limit@test.iam.gserviceaccount.com",
+  private_key: privateKey,
+});
+const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 let kv = new Map();
 let zsets = new Map();
@@ -35,12 +53,45 @@ function resetFakes() {
   kvFetchCount = 0;
 }
 
+const zadd = (key, member) => {
+  if (!zsets.has(key)) zsets.set(key, []);
+  const list = zsets.get(key).filter((item) => item !== member);
+  list.push(member);
+  zsets.set(key, list);
+};
+
 function evalScript([script, keyCount, ...rest]) {
   const keys = rest.slice(0, Number(keyCount));
   const args = rest.slice(Number(keyCount));
   if (script.includes("redis.call('GET', KEYS[1]) == ARGV[1]")) {
     if (kv.get(keys[0]) === args[0]) { kv.delete(keys[0]); return 1; }
     return 0;
+  }
+  // createOutreachState / createExpiredRecord: insert-once, indexed by ZADD.
+  if (script.includes("return {1, ARGV[1]}")) {
+    const existing = kv.get(keys[0]);
+    zadd(keys[1], args[3]);
+    if (existing) return [0, existing];
+    kv.set(keys[0], args[0]);
+    return [1, args[0]];
+  }
+  // saveOutreachState / saveExpiredRecord: compare-and-set on revision.
+  if (script.includes("cjson.decode")) {
+    const raw = kv.get(keys[0]);
+    if (!raw) return -1;
+    if (Number(JSON.parse(raw).revision || 0) !== Number(args[0])) return 0;
+    kv.set(keys[0], args[1]);
+    zadd(keys[1], args[4]);
+    return 1;
+  }
+  // claimRequestLaneIdentityCheck: atomic check-then-mark.
+  if (script.includes("tonumber(ARGV[1]) - tonumber(raw)")) {
+    const raw = kv.get(keys[0]);
+    const now = Number(args[0]);
+    const minIntervalMs = Number(args[1]);
+    if (raw != null && now - Number(raw) < minIntervalMs) return 0;
+    kv.set(keys[0], args[0]);
+    return 1;
   }
   throw new Error(`unexpected EVAL in test: ${script.slice(0, 60)}`);
 }
@@ -57,6 +108,11 @@ function command([name, ...args]) {
     case "DEL": return kv.delete(args[0]) ? 1 : 0;
     case "INCR": {
       const next = (Number(kv.get(args[0])) || 0) + 1;
+      kv.set(args[0], String(next));
+      return next;
+    }
+    case "DECR": {
+      const next = (Number(kv.get(args[0])) || 0) - 1;
       kv.set(args[0], String(next));
       return next;
     }
@@ -94,6 +150,16 @@ globalThis.fetch = async (url, init = {}) => {
     };
     return jsonResponse(next.status, next.body, next.headers || {});
   }
+  // Gmail: only the expired rate-limit regression exercises this. The token
+  // exchange is real crypto (the test's generated key signs a real JWT) but
+  // the responses are canned, same as everything else here — no real Google
+  // IO occurs.
+  if (href === GOOGLE_TOKEN_URL) {
+    return jsonResponse(200, { access_token: "test-access-token", expires_in: 3600 });
+  }
+  if (href.startsWith(`${GMAIL_BASE}/threads`)) {
+    return jsonResponse(200, {});
+  }
   throw new Error(`unexpected fetch in test: ${href}`);
 };
 
@@ -121,6 +187,8 @@ const { canonicalBackgroundPauseRecord, PARAFORM_BACKGROUND_PAUSE_KEYS } =
   await import("../api/_lib/paraform-background-pause.mjs");
 const { outreachConfig, runOutreachTick, outreachHealth } = await import("../api/paraai/_lib/outreach.mjs");
 const { runExpiredTick } = await import("../api/paraai/_lib/expired.mjs");
+const { createOutreachState } = await import("../api/paraai/_lib/outreach-store.mjs");
+const { readExpiredRecord } = await import("../api/paraai/_lib/expired-store.mjs");
 
 const openOutreachConfig = () => ({
   ...outreachConfig({}),
@@ -427,6 +495,27 @@ test("identity check: a non-401 failure (transport/5xx) fails open and reports n
   assert.deepEqual(reports, []);
 });
 
+// REGRESSION (2026-09-26 review, cheap follow-up): the identity check used to
+// be a plain GET (requestLaneIdentityCheckDue) followed, in the caller, by an
+// unconditional SET (markRequestLaneIdentityCheck) — two round trips with a
+// window in between where two overlapping invocations could both read "due"
+// before either had written. Both would then fire the real identity read
+// against Paraform, exactly the kind of double call this whole module exists
+// to prevent. The claim is now one atomic EVAL; this pins that only one of
+// two truly concurrent callers ever wins it.
+test("identity check: two concurrent callers in the same window never both fire the real read", async () => {
+  const now = Date.parse("2026-09-26T22:00:00.000Z");
+  let reads = 0;
+  const readImpl = async () => { reads += 1; return {}; };
+  const [first, second] = await Promise.all([
+    requestLaneAuthStatus({ now, readImpl }),
+    requestLaneAuthStatus({ now, readImpl }),
+  ]);
+  assert.equal(reads, 1, "only one of the two overlapping callers ever reaches the identity read");
+  const outcomes = [first.checked, second.checked].sort();
+  assert.deepEqual(outcomes, [false, true], "the loser sees not_due, not a second real check");
+});
+
 // ── the existing operator brake is untouched ─────────────────────────────
 test("the paraaiRequestLanes background-pause brake still parses independently of this module", () => {
   const raw = canonicalBackgroundPauseRecord("paraai-request-lanes-selfthrottle-20260926");
@@ -504,6 +593,97 @@ test("the shared cooldown blocks BOTH lanes: an outreach 401 also stops the expi
   // is the shared identity check taking its single chance, triggered by
   // whichever lane next observes the cooldown.
   assert.equal(paraformFetchCount, 2, "the expired lane's own work never runs; the +1 is the shared identity check, not a lane retry");
+});
+
+// ── PR 234 final review: the pace cap (no 429/401 at all) must be treated
+// exactly like the cooldown, everywhere the cooldown gets a clean stop ──────
+// admitRequestLaneRate() trips in completely normal operation — one candidate
+// costs 3-4 Paraform calls and PARAAI_OUTREACH_BATCH allows up to 10 — with no
+// vendor throttle signal involved. Before this fix, only
+// REQUEST_LANE_COOLDOWN_CODE got the clean "stop, don't record, don't alert"
+// treatment; a rate-limited row/candidate fell to the generic error path.
+test("runExpiredTick: the shared pace cap trips mid-row (no 429/401) and the row is skipped cleanly, never held or alerted", async () => {
+  const now = Date.parse("2026-09-26T22:00:00.000Z");
+  // gatherContactEvidence must resolve a non-null mailboxReplies count for
+  // planExpiredRow to reach "dismiss" (the real write branch, the only one
+  // with a Paraform call inside the per-row try). Preseeding the outreach
+  // state's candidateEmail skips the Paraform email lookup and skips the
+  // Gmail thread read (no threadId), leaving exactly one non-Paraform Gmail
+  // search as the only other network call this row makes.
+  await createOutreachState("cu-rate-limited", { candidateEmail: "candidate@example.test" });
+
+  // Pre-spend the shared 10/min bucket (both lanes combined) to 9. The
+  // request-lane pace check always paces against the real wall clock
+  // (admitRequestLaneRate's own `now` default is Date.now(), never the `now`
+  // threaded through runExpiredTick for business-date logic), so the bucket
+  // key has to be keyed off the real clock too. The tick's own history read
+  // below is the 10th call and is still admitted; every Paraform call after
+  // that — performExpiredDismiss's own status read, the dismiss mutation, and
+  // its read-back verify — lands on an already-spent bucket. The mutation and
+  // status calls swallow their own rejection (matching production's
+  // forgiving handling of those specific calls); the read-back verify does
+  // not, so it is the one that actually surfaces to the per-row catch this
+  // test is pinning.
+  kv.set(`paraai:request-lanes:rate-minute:${Math.floor(Date.now() / 60_000)}`, "9");
+
+  queueParaform({
+    status: 200,
+    body: {
+      result: {
+        data: {
+          json: {
+            requests: [{
+              id: "req-rate-limited",
+              created_at: "2026-09-01T00:00:00.000Z",
+              sent_to_user_id: "user-me",
+              reached_out_to_candidate: true,
+              state: "EXPIRED",
+              status: "expired",
+              status_label: "Expired",
+              filterBucket: "expired",
+              candidate: { id: "cand-1", candidate_user_id: "cu-rate-limited", name: "Test Candidate" },
+              role: { id: "role-1", name: "Product Manager", company: { name: "Example Co" } },
+              hiringManagerName: "Sample Manager",
+            }],
+            counts: { all: 1, pending: 0, submitted: 0, interviewing: 0, expired: 1, dismissed: 0 },
+            currentUserId: "user-me",
+            currentUserExpiredCount: 1,
+          },
+        },
+      },
+    },
+  });
+
+  const result = await runExpiredTick({
+    mode: "organic",
+    now,
+    env: {
+      PARAAI_EXPIRED_APPROVED: "true",
+      PARAAI_EXPIRED_DRY_RUN: "false",
+      PARAAI_EXPIRED_NOT_BEFORE: "2026-08-01T00:00:00.000Z",
+      PARAAI_EXPIRED_DISMISS_APPROVED: "true",
+      PARAAI_EXPIRED_REQUIRE_REACHED_OUT: "false",
+      GOOGLE_SA_KEY_JSON: process.env.GOOGLE_SA_KEY_JSON,
+    },
+    pauseState: async () => ({ paused: false }),
+  });
+
+  assert.equal(result.requestLaneRateLimited, true, "attributed to the pace cap, not a generic failure");
+  assert.equal(result.errors, 0, "never counted as an error");
+  assert.equal(result.review, 0, "never sent to review");
+  assert.equal(result.dismissed, 0, "never recorded as dismissed either — the write was never verified");
+  assert.deepEqual(result.results, [], "the row never reaches a recorded outcome this tick");
+  assert.equal(
+    paraformFetchCount,
+    1,
+    "only the tick's own history read reaches Paraform; the pacer itself refuses every later call before it is ever sent",
+  );
+
+  // Durable state: still "planned" (from createExpiredRecord), never advanced
+  // to "needs_review" — saveExpiredRecord is never reached once the row's
+  // catch breaks the batch.
+  const record = await readExpiredRecord("req-rate-limited");
+  assert.equal(record.status, "planned");
 });
 
 test("runOutreachTick: the request lanes' Paraform work is cadence-gated, not run on every call", async () => {

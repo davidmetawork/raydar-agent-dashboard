@@ -67,6 +67,7 @@ import {
   acquireRequestLaneCadenceSlot,
   boundRequestLaneTrpc,
   REQUEST_LANE_COOLDOWN_CODE,
+  REQUEST_LANE_RATE_LIMITED_CODE,
   requestLaneAuthStatus,
   requestLaneCooldownStatus,
 } from "./request-lane-throttle.mjs";
@@ -373,6 +374,16 @@ export async function runExpiredTick({
         until: error.until || null,
       };
     }
+    // Same clean stop for the shared per-minute pace cap (PR 234 final
+    // review): this read can find the bucket already spent by the other lane
+    // or a prior tick's tail, with no 429/401 at all.
+    if (error?.code === REQUEST_LANE_RATE_LIMITED_CODE) {
+      return {
+        ok: true,
+        ran: false,
+        reason: "request_lane_rate_limited",
+      };
+    }
     throw error;
   }
   summary.expiredCount = history.currentUserExpiredCount;
@@ -507,6 +518,16 @@ export async function runExpiredTick({
       // already recorded the cooldown itself).
       if (error?.code === REQUEST_LANE_COOLDOWN_CODE) {
         summary.requestLaneCooldown = true;
+        break;
+      }
+      // REGRESSION (PR 234 final review): the shared 10/min pace cap can trip
+      // mid-batch with no 429/401 at all — one candidate's dismissal is
+      // several Paraform calls (status read, dismiss mutation, read-back
+      // verify), and the cap is combined across both lanes. Not a fault of
+      // this row either, so it gets the identical clean stop: no
+      // needs_review, no alert, and the next tick re-plans it fresh.
+      if (error?.code === REQUEST_LANE_RATE_LIMITED_CODE) {
+        summary.requestLaneRateLimited = true;
         break;
       }
       if (error?.code === "AUTH_EXPIRED") {

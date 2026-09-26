@@ -298,18 +298,44 @@ export async function requestLaneIdentityCheckDue({
   return !Number.isFinite(lastMs) || now - lastMs >= minIntervalMs;
 }
 
-async function markRequestLaneIdentityCheck({
+// Atomic check-and-mark (2026-09-26 review). The previous shape — a plain GET
+// (requestLaneIdentityCheckDue) followed, in the caller, by an unconditional
+// SET — left a window where two overlapping invocations (the exact scenario
+// this whole module exists to survive: "Fly + a manual tick") could both read
+// "due" before either one's SET landed, so both fired the real identity read
+// against Paraform instead of just one. A single EVAL now reads and, only if
+// still due, writes in one round trip, so at most one overlapping caller ever
+// wins the claim. requestLaneIdentityCheckDue itself is untouched and stays a
+// non-mutating peek (tests and any future caller that just wants to know,
+// without spending the claim, still have it).
+async function claimRequestLaneIdentityCheck({
   now = Date.now(),
   minIntervalMs = IDENTITY_CHECK_MIN_INTERVAL_MS,
   kvImpl = requestLaneKv,
 } = {}) {
-  await kvImpl([
-    "SET",
-    IDENTITY_CHECK_KEY,
-    String(now),
-    "EX",
-    Math.ceil(minIntervalMs / 1000) + 60,
-  ]);
+  const ttlSeconds = Math.ceil(minIntervalMs / 1000) + 60;
+  const script = `
+    local raw = redis.call('GET', KEYS[1])
+    if raw and (tonumber(ARGV[1]) - tonumber(raw)) < tonumber(ARGV[2]) then
+      return 0
+    end
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+    return 1
+  `;
+  try {
+    const result = await kvImpl([
+      "EVAL", script, 1, IDENTITY_CHECK_KEY,
+      String(now), String(minIntervalMs), String(ttlSeconds),
+    ]);
+    return Number(result) === 1;
+  } catch {
+    // Fails OPEN on a KV outage, same direction as the old GET-then-SET pair
+    // (requestLaneIdentityCheckDue's own GET already failed open): this
+    // check's whole job is proving or disproving a dead session while the
+    // cooldown already blocks ordinary traffic, so losing this window's dedup
+    // to a KV hiccup is far cheaper than silently never re-checking again.
+    return true;
+  }
 }
 
 export async function requestLaneAuthStatus({
@@ -320,9 +346,8 @@ export async function requestLaneAuthStatus({
   recordImpl = recordRequestLaneRequest,
   kvImpl = requestLaneKv,
 } = {}) {
-  const due = await requestLaneIdentityCheckDue({ now, minIntervalMs, kvImpl });
-  if (!due) return { checked: false, reason: "not_due", authExpired: false };
-  await markRequestLaneIdentityCheck({ now, minIntervalMs, kvImpl }).catch(() => {});
+  const claimed = await claimRequestLaneIdentityCheck({ now, minIntervalMs, kvImpl });
+  if (!claimed) return { checked: false, reason: "not_due", authExpired: false };
   await recordImpl({ lane: "identity-check", kind: "status", now, kvImpl }).catch(() => {});
   try {
     await readImpl();

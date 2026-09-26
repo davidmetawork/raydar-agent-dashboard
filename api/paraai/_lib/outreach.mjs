@@ -12,6 +12,7 @@ import {
   acquireRequestLaneCadenceSlot,
   boundRequestLaneTrpc,
   REQUEST_LANE_COOLDOWN_CODE,
+  REQUEST_LANE_RATE_LIMITED_CODE,
   requestLaneAuthStatus,
   requestLaneCadenceSeconds,
   requestLaneCooldownStatus,
@@ -2603,7 +2604,16 @@ export async function handleOutreachFailure(
   // per-candidate fault, so — like OUTREACH_BUSY below — it is never recorded
   // as an exception and never pages: one cooldown, one clean stop, no
   // per-item spam.
-  if (code === REQUEST_LANE_COOLDOWN_CODE) return;
+  // REGRESSION (PR 234 final review): the shared 10/min pace cap
+  // (admitRequestLaneRate) trips in ordinary operation — one candidate costs
+  // 3-4 Paraform calls and PARAAI_OUTREACH_BATCH allows up to 10 — with no
+  // 429/401 involved at all. Treated any other way, this fell to the generic
+  // path below: recorded with retryable:false (the code is not in
+  // RECOVERABLE_EXCEPTION_CODES), which eligibleNewRequests' systemHeld filter
+  // then parks FOREVER, plus an alert per item. It is exactly as much "not a
+  // per-candidate fault" as the cooldown above, so it gets the same clean,
+  // silent stop: no exception record, no alert, eligible again next tick.
+  if (code === REQUEST_LANE_COOLDOWN_CODE || code === REQUEST_LANE_RATE_LIMITED_CODE) return;
   // One observed Gmail 429 stands the whole lane down (see armGmailBackoff).
   // Alert at most once per 6h so the stand-down is visible without spamming.
   if (code === "GMAIL_REQUEST_FAILED" && Number(error?.status) === 429) {
@@ -2849,6 +2859,17 @@ export async function runOutreachTick({
         processed: 0,
         reason: "request_lane_cooldown",
         until: error.until || null,
+      };
+    }
+    // Same clean stop for the shared per-minute pace cap (PR 234 final
+    // review): the very first Paraform call of a tick can find the bucket
+    // already spent by the other lane or a prior tick's tail, with no 429/401
+    // at all. Never a generic worker failure either.
+    if (error?.code === REQUEST_LANE_RATE_LIMITED_CODE) {
+      return {
+        enabled: true,
+        processed: 0,
+        reason: "request_lane_rate_limited",
       };
     }
     throw error;
