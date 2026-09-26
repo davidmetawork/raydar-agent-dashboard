@@ -1527,69 +1527,52 @@ test("snapshot health fails closed when the batch reader is absent or truncated"
   assert.equal(truncated.complete, false);
 });
 
-test("cron refresh is separated before sweep and remains below Vercel's project cap", async () => {
+test("the 10-minute refresh/sweep/canary crons are retired; the lightweight design's crons replace them (supersedes PR 231)", async () => {
+  // docs/research/booking-protection-minimum-2026-09-26.md item 1: the
+  // ~272-request definition/membership polling walk that ran 360x/day is
+  // gone. booking-membership-refresh.mjs and booking-sweep.mjs stay in the
+  // repo, unscheduled, as a documented rollback path (see the PR body) — this
+  // test pins that they are no longer wired to a cron, and that what
+  // replaced them is cheap, staggered, and once-daily (or near-continuous but
+  // 0-Paraform-when-idle, for the worker).
   const config = JSON.parse(
     await readFile(
       new URL("../vercel.json", import.meta.url),
       "utf8",
     ),
   );
-  const refresh = config.crons.find(({ path }) =>
-    path === "/api/seq/booking-membership-refresh");
-  const sweep = config.crons.find(({ path }) =>
-    path === "/api/seq/booking-sweep");
-  const rearm = config.crons.find(({ path }) =>
-    path === "/api/seq/rearm-pause-canary");
-  assert.equal(refresh.schedule, "1,11,21,31,41,51 * * * *");
-  assert.equal(rearm.schedule, "6,16,26,36,46,56 * * * *");
-  assert.equal(sweep.schedule, "8,18,28,38,48,58 * * * *");
-  const refreshMinutes = refresh.schedule
-    .split(" ")[0]
-    .split(",")
-    .map(Number)
-    .sort((left, right) => left - right);
-  const refreshIntervals = refreshMinutes.map((minute, index) => {
-    const next = refreshMinutes[(index + 1) % refreshMinutes.length];
-    return (next > minute ? next : next + 60) - minute;
-  });
-  assert.ok(
-    Math.max(...refreshIntervals) * 60 * 1000
-      + BOOKING_MEMBERSHIP_BUILD_BUDGET_MS
-      < BOOKING_MEMBERSHIP_MAX_AGE_MS,
-    "refresh cadence plus the full build budget needs material freshness margin",
+  const byPath = Object.fromEntries(
+    config.crons.map((entry) => [entry.path, entry.schedule]),
   );
-  const sweepMinutes = sweep.schedule
-    .split(" ")[0]
-    .split(",")
-    .map(Number)
-    .sort((left, right) => left - right);
-  const rearmMinutes = rearm.schedule
-    .split(" ")[0]
-    .split(",")
-    .map(Number)
-    .sort((left, right) => left - right);
-  assert.equal(sweepMinutes.length, refreshMinutes.length);
-  assert.equal(rearmMinutes.length, refreshMinutes.length);
-  for (const refreshMinute of refreshMinutes) {
-    const nextSweep = sweepMinutes.find((minute) => minute > refreshMinute)
-      ?? sweepMinutes[0] + 60;
-    const nextRearm = rearmMinutes.find((minute) => minute > refreshMinute)
-      ?? rearmMinutes[0] + 60;
-    assert.ok(
-      (nextSweep - refreshMinute) * 60 * 1000
-        > BOOKING_MEMBERSHIP_BUILD_BUDGET_MS,
-      "each sweep starts only after its refresh build budget has elapsed",
-    );
-    assert.equal(
-      nextRearm - refreshMinute,
-      5,
-      "every refresh receives a canary rearm before its sweep",
-    );
-    assert.equal(
-      nextSweep - refreshMinute,
-      7,
-      "every refresh receives a dedicated sweep in the same ten-minute cycle",
-    );
+  assert.equal(byPath["/api/seq/booking-membership-refresh"], undefined);
+  assert.equal(byPath["/api/seq/booking-sweep"], undefined);
+
+  // The worker can run often because an empty pending queue costs 0 Paraform
+  // requests — six ticks an hour is cheap insurance against a slow drain.
+  assert.match(byPath["/api/seq/booking-worker"], /^\d+(,\d+)* \* \* \* \*$/);
+
+  // Once a day each, and staggered: the live-set refresh must finish before
+  // the catch-up and canary run against it.
+  for (const path of [
+    "/api/seq/booking-liveset-refresh",
+    "/api/seq/booking-catchup",
+    "/api/seq/rearm-pause-canary",
+  ]) {
+    assert.match(byPath[path], /^\d+ \d+ \* \* \*$/, `${path} runs once a day`);
   }
+  const minuteOf = (schedule) => Number(schedule.split(" ")[0]);
+  const hourOf = (schedule) => Number(schedule.split(" ")[1]);
+  const asMinutesFromMidnight = (schedule) =>
+    hourOf(schedule) * 60 + minuteOf(schedule);
+  assert.ok(
+    asMinutesFromMidnight(byPath["/api/seq/booking-liveset-refresh"])
+      < asMinutesFromMidnight(byPath["/api/seq/booking-catchup"]),
+    "the live-set refresh must run before the catch-up that reads it",
+  );
+
   assert.ok(config.crons.length <= 100);
+  // BOOKING_MEMBERSHIP_BUILD_BUDGET_MS / BOOKING_MEMBERSHIP_MAX_AGE_MS still
+  // bound the legacy, now-unscheduled refresh's own contract if it is ever
+  // re-enabled as a rollback — imported here only to keep that import live.
+  assert.ok(BOOKING_MEMBERSHIP_BUILD_BUDGET_MS < BOOKING_MEMBERSHIP_MAX_AGE_MS);
 });

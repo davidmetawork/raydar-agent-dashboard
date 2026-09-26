@@ -4,16 +4,23 @@
 // reconciliation sweep, and Paraform relationship-status detection all remain
 // active. Native events use their own HMAC contract and durable replay keys; no
 // legacy event is relabelled or spoofed as a Raydar scheduler event.
-import { hasCookie } from "./_lib/core.mjs";
+//
+// LIGHTWEIGHT REDESIGN (2026-09-26, docs/research/booking-protection-minimum-
+// 2026-09-26.md item 3): this hook now ONLY validates, durably records, and
+// enqueues. It never calls Paraform and it always answers OK for anything it
+// can durably record — it must, or the Scheduler retries an event 6 times
+// over ~8 minutes and then drops it. Matching against the live-set index (0
+// Paraform requests) and the actual pause (2, only on a real match) happen in
+// the background worker (_lib/booking-protection-worker.mjs, run by
+// api/seq/booking-worker.mjs every few minutes). A non-2xx here means the
+// durable record itself could not be written — a real store outage, not
+// anything about Paraform or a pause outcome.
 import {
   K,
   kvConfigured,
   kvGet,
   kvSet,
   kvSetNx,
-  pauseForBooking,
-  raydarPauseCanaryIdentityFingerprint,
-  raydarWebhookSecretFingerprint,
   shouldAlert,
 } from "./_lib/booking-stop.mjs";
 import {
@@ -23,6 +30,7 @@ import {
 import {
   raydarSchedulerBookingStopEnabled,
 } from "./_lib/raydar-booking-index.mjs";
+import { enqueuePendingBooking } from "./_lib/booking-protection-queue.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 
 export const config = { maxDuration: 60 };
@@ -45,15 +53,11 @@ async function durableWrite(write, key, value, ttlSeconds) {
 export async function handleRaydarBookingWebhook(request, {
   enabled = raydarSchedulerBookingStopEnabled(),
   secret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
-  pauseCanaryFingerprint =
-    process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
-  apply = process.env.BOOKING_STOP_APPLY !== "0",
-  hasParaformCookie = hasCookie,
   storeConfigured = kvConfigured,
   claim = kvSetNx,
   readClaim = kvGet,
   write = kvSet,
-  pause = pauseForBooking,
+  enqueue = enqueuePendingBooking,
   alert = notifySlack,
   alertAllowed = shouldAlert,
   nowMs = Date.now(),
@@ -99,8 +103,6 @@ export async function handleRaydarBookingWebhook(request, {
       error: String(error?.code || "invalid_json"),
     }, 400);
   }
-
-  if (!hasParaformCookie()) return json({ ok: false, error: "no_cookie" }, 503);
 
   const eventKey = K.raydarEvent(event.eventId);
   try {
@@ -149,102 +151,37 @@ export async function handleRaydarBookingWebhook(request, {
     return json({ ok: true, event: event.event, recorded: true }, 202);
   }
 
-  let outcome;
+  // Durably enqueue for the background worker and answer OK — no Paraform
+  // call happens on this path at all. This is the whole point of item 3: the
+  // hook must keep answering OK, or the Scheduler retries an event 6 times
+  // over ~8 minutes and then drops it.
   try {
-    outcome = await pause({
+    await enqueue({
+      eventId: event.eventId,
       email: event.candidate.email,
-      bookedAt: new Date(event.effectiveBookedAtMs).toISOString(),
+      bookedAtMs: event.bookedAtMs,
+      effectiveBookedAtMs: event.effectiveBookedAtMs,
       startsAt: event.startsAt,
       eventName: event.callType === "agent" ? "Agent Call" : "Human Call",
       source: "raydar_scheduler",
-      apply,
+      bookingId: event.bookingId,
+      enqueuedAt: new Date(nowMs).toISOString(),
     });
-  } catch (error) {
-    const expired = error?.code === "AUTH_EXPIRED";
-    if (expired && (await alertAllowed("raydar-booking-auth-expired"))) {
-      await alert(":rotating_light: Raydar booking stop could not pause a booked candidate — the Paraform session cookie is expired.").catch(() => {});
-    }
-    return json({ ok: false, error: expired ? "expired" : "error" }, 503);
-  }
-
-  if (outcome.pauseErrors?.length && (await alertAllowed("raydar-booking-pause-errors", 3600))) {
-    await alert(`:warning: Raydar booking stop failed to pause ${outcome.pauseErrors.length} lead(s); the hourly native index sweep will retry.`).catch(() => {});
-  }
-  if (outcome.pauseErrors?.length) {
-    // Leave the durable claim in `received`: the scheduler should retry this
-    // idempotent pause until every matched lead passes read-back.
-    return json({
-      ok: false,
-      error: "pause_incomplete",
-      pauseErrors: outcome.pauseErrors.length,
-    }, 503);
-  }
-
-  try {
-    const proof = {
-      schema: "raydar-booking-webhook-proof-v1",
-      verifiedAt: new Date(nowMs).toISOString(),
-      secretFingerprint: raydarWebhookSecretFingerprint(secret),
-      apply: Boolean(apply),
-      deferred: Boolean(outcome.deferred),
-      matched: outcome.decisions.length,
-      paused: outcome.paused,
-    };
-    await durableWrite(
-      write,
-      K.raydarWebhookProof,
-      proof,
-      EVENT_TTL_SECONDS,
-    );
-    // Keep the last end-to-end pause proof independently from routine
-    // unmatched bookings. A later valid webhook with zero active sequence
-    // matches proves transport, but it must not erase the controlled canary
-    // evidence needed for cutover.
-    const eventCanaryFingerprint = raydarPauseCanaryIdentityFingerprint({
-      secret,
-      email: event.candidate.email,
-    });
-    if (
-      proof.apply
-      && !proof.deferred
-      && proof.matched >= 1
-      && proof.paused >= 1
-      && /^[a-f0-9]{64}$/u.test(String(pauseCanaryFingerprint || ""))
-      && eventCanaryFingerprint === pauseCanaryFingerprint
-    ) {
-      await durableWrite(
-        write,
-        K.raydarPauseCanaryProof,
-        {
-          ...proof,
-          canaryFingerprint: eventCanaryFingerprint,
-        },
-        EVENT_TTL_SECONDS,
-      );
-    }
     await durableWrite(write, eventKey, {
       state: "done",
       receivedAt: new Date(nowMs).toISOString(),
       processedAt: new Date().toISOString(),
       event: event.event,
-      matched: outcome.decisions.length,
-      paused: outcome.paused,
-      deferred: Boolean(outcome.deferred),
+      queued: true,
     }, EVENT_TTL_SECONDS);
   } catch {
-    // The pause is idempotent. Return 503 so the scheduler retries and the
-    // durable record eventually reaches `done`.
     return json({ ok: false, error: "store_unavailable" }, 503);
   }
 
   return json({
     ok: true,
     event: event.event,
-    apply,
-    matched: outcome.decisions.length,
-    paused: outcome.paused,
-    deferred: Boolean(outcome.deferred),
-    pauseErrors: outcome.pauseErrors.length,
+    queued: true,
   }, 202);
 }
 

@@ -917,6 +917,16 @@ export async function applyDecisions(decisions, {
   concurrency = 2,
   coldExclusionPolicy = parseBookingStopColdExclusions(),
   keys = seqKeys(),
+  // Injectable ONLY so the lightweight booking-protection worker
+  // (booking-protection-worker.mjs) can route these two Paraform calls
+  // through its own paced, single-shot client (docs/research/
+  // booking-protection-minimum-2026-09-26.md item 6) instead of core.mjs's
+  // burst-tuned retry ladder. Every default below is the exact call this
+  // function has always made — no other caller's behavior changes.
+  mutatePause = (ccuId) =>
+    trpcPost("campaigns.updateCandidatePauseStatus", { campaign_to_candidate_user_id: ccuId, is_paused: true }, 1),
+  mutateThrottleRetry = withThrottleRetry,
+  searchLead = campaignLeadBySearch,
 } = {}) {
   const out = {
     paused: 0,
@@ -938,8 +948,8 @@ export async function applyDecisions(decisions, {
     while (i < permitted.length) {
       const d = permitted[i++];
       try {
-        await withThrottleRetry(
-          () => trpcPost("campaigns.updateCandidatePauseStatus", { campaign_to_candidate_user_id: d.ccuId, is_paused: true }, 1),
+        await mutateThrottleRetry(
+          () => mutatePause(d.ccuId),
           { onThrottle: () => { out.throttled++; } }
         );
         attempted.push(d);
@@ -980,7 +990,7 @@ export async function applyDecisions(decisions, {
         continue;
       }
       try {
-        row = await campaignLeadBySearch(d.sequenceId, d.email, {
+        row = await searchLead(d.sequenceId, d.email, {
           expectedCcuId: d.ccuId,
         });
       }

@@ -169,16 +169,20 @@
       "schedule": "17 * * * *"
     },
     {
-      "path": "/api/seq/booking-membership-refresh",
-      "schedule": "1,11,21,31,41,51 * * * *"
+      "path": "/api/seq/booking-worker",
+      "schedule": "3,13,23,33,43,53 * * * *"
+    },
+    {
+      "path": "/api/seq/booking-liveset-refresh",
+      "schedule": "22 5 * * *"
+    },
+    {
+      "path": "/api/seq/booking-catchup",
+      "schedule": "40 5 * * *"
     },
     {
       "path": "/api/seq/rearm-pause-canary",
-      "schedule": "6,16,26,36,46,56 * * * *"
-    },
-    {
-      "path": "/api/seq/booking-sweep",
-      "schedule": "8,18,28,38,48,58 * * * *"
+      "schedule": "10 6 * * *"
     },
     {
       "path": "/api/ops/n8n-watchdog",

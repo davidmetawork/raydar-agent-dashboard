@@ -15,11 +15,8 @@ import {
   campaignLeadBySearch,
 } from "../api/seq/_lib/core.mjs";
 import {
-  K,
   bookedSetWithSources,
   decideLead,
-  raydarPauseCanaryIdentityFingerprint,
-  raydarWebhookProofStatus,
 } from "../api/seq/_lib/booking-stop.mjs";
 import {
   handleRaydarBookingWebhook,
@@ -27,10 +24,6 @@ import {
 
 const SECRET = "raydar-booking-test-secret-that-is-long-enough";
 const NOW_MS = Date.parse("2026-07-29T18:00:00.000Z");
-const CANARY_FINGERPRINT = raydarPauseCanaryIdentityFingerprint({
-  secret: SECRET,
-  email: "candidate@example.com",
-});
 
 function booking(overrides = {}) {
   return {
@@ -92,19 +85,14 @@ function handlerDeps(overrides = {}) {
   return {
     enabled: true,
     secret: SECRET,
-    pauseCanaryFingerprint: CANARY_FINGERPRINT,
-    apply: true,
-    hasParaformCookie: () => true,
     storeConfigured: () => true,
     claim: async () => "OK",
     readClaim: async () => null,
     write: async () => "OK",
-    pause: async () => ({
-      decisions: [],
-      paused: 0,
-      pauseErrors: [],
-      deferred: false,
-    }),
+    // Lightweight redesign (2026-09-26): the hook only enqueues now. It never
+    // calls Paraform and never writes the webhook/canary proof directly — the
+    // background worker does both (booking-protection-worker.test.mjs).
+    enqueue: async () => {},
     alert: async () => {},
     alertAllowed: async () => false,
     nowMs: NOW_MS,
@@ -279,196 +267,58 @@ test("native index item accepts only the pinned current-booking summary", () => 
   );
 });
 
-test("signed scheduler event with source attribution reaches the native pause path", async () => {
+// Lightweight redesign (2026-09-26): the hook only validates, records, and
+// enqueues — it never calls Paraform and never writes the webhook/pause-canary
+// proof itself. Those two things (matching + pausing, and the proof they
+// produce) now belong to the background worker; see
+// booking-protection-worker.test.mjs for "signed scheduler event reaches the
+// pause path", "confirmed webhook persists a secret-bound proof",
+// "transport-only proof cannot masquerade as a canary", "a real non-canary
+// pause cannot mint the canary proof", and "an unmatched booking updates
+// transport proof without erasing canary readiness" — the direct
+// descendants of the five tests this comment replaces.
+
+test("signed scheduler event with source attribution is durably enqueued, not paused inline", async () => {
   const body = booking({ sourceAttribution: "paraform_sequence_agent" });
   let seen = null;
   const response = await handleRaydarBookingWebhook(
     signedRequest(body),
     handlerDeps({
-      pause: async (args) => {
-        seen = args;
-        return {
-          decisions: [],
-          paused: 0,
-          pauseErrors: [],
-          deferred: false,
-        };
-      },
+      enqueue: async (job) => { seen = job; },
     }),
   );
   assert.equal(response.status, 202);
   assert.equal(seen?.email, "candidate@example.com");
+  assert.equal(seen?.source, "raydar_scheduler");
+  assert.equal(seen?.eventId, body.eventId);
 });
 
-test("confirmed native events use the native pause source and return counts only", async () => {
+test("confirmed native events are enqueued and the hook answers OK without ever calling Paraform", async () => {
   let seen = null;
   const response = await handleRaydarBookingWebhook(
     signedRequest(booking()),
     handlerDeps({
-      pause: async (args) => {
-        seen = args;
-        return { decisions: [{}], paused: 1, pauseErrors: [], deferred: false };
-      },
+      enqueue: async (job) => { seen = job; },
     }),
   );
   const payload = await response.json();
   assert.equal(response.status, 202);
-  assert.equal(payload.paused, 1);
+  assert.equal(payload.queued, true);
   assert.equal(seen.source, "raydar_scheduler");
   assert.equal(seen.email, "candidate@example.com");
   assert.equal(JSON.stringify(payload).includes("candidate@example.com"), false);
 });
 
-test("confirmed webhook persists a secret-bound, PII-free success proof", async () => {
-  const writes = [];
+test("the hook still answers OK when enqueue would-be pause inputs (cookie-adjacent state) are irrelevant — it never checks Paraform state at all", async () => {
+  // There is deliberately no hasParaformCookie/pause dependency left to stub:
+  // removing that check is the fix for the original stalling bug (design doc
+  // §"Right now it is down and still costing requests" / item 3).
   const response = await handleRaydarBookingWebhook(
-    signedRequest(booking()),
-    handlerDeps({
-      pause: async () => ({
-        decisions: [{ candidate: "must-not-be-persisted" }],
-        paused: 1,
-        pauseErrors: [],
-        deferred: false,
-      }),
-      write: async (key, value) => {
-        writes.push({ key, value });
-        return "OK";
-      },
-    }),
+    signedRequest(booking({ eventId: "bevt_no_cookie_check" })),
+    handlerDeps(),
   );
   assert.equal(response.status, 202);
-  const proof = writes.find((entry) => entry.key === K.raydarWebhookProof)?.value;
-  assert.equal(proof?.schema, "raydar-booking-webhook-proof-v1");
-  assert.equal(proof?.apply, true);
-  assert.equal(proof?.deferred, false);
-  assert.equal(proof?.matched, 1);
-  assert.equal(proof?.paused, 1);
-  const canaryProof = writes.find((entry) =>
-    entry.key === K.raydarPauseCanaryProof)?.value;
-  assert.deepEqual(canaryProof, {
-    ...proof,
-    canaryFingerprint: CANARY_FINGERPRINT,
-  });
-  assert.equal(JSON.stringify(proof).includes("candidate@example.com"), false);
-  assert.equal(JSON.stringify(proof).includes("must-not-be-persisted"), false);
-  const verifiedStatus = await raydarWebhookProofStatus({
-    read: async (key) =>
-      key === K.raydarPauseCanaryProof ? canaryProof : proof,
-    secret: SECRET,
-    canaryFingerprint: CANARY_FINGERPRINT,
-    now: NOW_MS,
-  });
-  assert.equal(verifiedStatus.verified, true);
-  assert.equal(verifiedStatus.pauseCanaryVerified, true);
-  assert.equal(
-    (await raydarWebhookProofStatus({
-      read: async (key) =>
-        key === K.raydarPauseCanaryProof ? canaryProof : proof,
-      secret: `${SECRET}-rotated`,
-      canaryFingerprint: CANARY_FINGERPRINT,
-      now: NOW_MS,
-    })).verified,
-    false,
-  );
-});
-
-test("transport-only webhook proof cannot masquerade as a pause canary", async () => {
-  const writes = [];
-  const response = await handleRaydarBookingWebhook(
-    signedRequest(booking({ eventId: "bevt_transport_only" })),
-    handlerDeps({
-      write: async (key, value) => {
-        writes.push({ key, value });
-        return "OK";
-      },
-    }),
-  );
-  assert.equal(response.status, 202);
-  const proof = writes.find((entry) =>
-    entry.key === K.raydarWebhookProof)?.value;
-  const status = await raydarWebhookProofStatus({
-    read: async (key) => key === K.raydarWebhookProof ? proof : null,
-    secret: SECRET,
-    canaryFingerprint: CANARY_FINGERPRINT,
-    now: NOW_MS,
-  });
-  assert.equal(status.verified, true);
-  assert.equal(status.matched, 0);
-  assert.equal(status.paused, 0);
-  assert.equal(status.pauseCanaryVerified, false);
-});
-
-test("a real non-canary candidate pause cannot mint the controlled canary proof", async () => {
-  const writes = [];
-  const response = await handleRaydarBookingWebhook(
-    signedRequest(booking({
-      eventId: "bevt_non_canary_pause",
-      candidate: {
-        email: "someone-else@example.com",
-        name: "Someone Else",
-      },
-    })),
-    handlerDeps({
-      pause: async () => ({
-        decisions: [{}],
-        paused: 1,
-        pauseErrors: [],
-        deferred: false,
-      }),
-      write: async (key, value) => {
-        writes.push({ key, value });
-        return "OK";
-      },
-    }),
-  );
-  assert.equal(response.status, 202);
-  assert.equal(
-    writes.some((entry) => entry.key === K.raydarPauseCanaryProof),
-    false,
-  );
-});
-
-test("an unmatched webhook updates transport proof without erasing pause canary readiness", async () => {
-  const store = new Map();
-  const write = async (key, value) => {
-    store.set(key, structuredClone(value));
-    return "OK";
-  };
-  const first = await handleRaydarBookingWebhook(
-    signedRequest(booking({ eventId: "bevt_canary_first" })),
-    handlerDeps({
-      write,
-      pause: async () => ({
-        decisions: [{}],
-        paused: 1,
-        pauseErrors: [],
-        deferred: false,
-      }),
-    }),
-  );
-  assert.equal(first.status, 202);
-
-  const second = await handleRaydarBookingWebhook(
-    signedRequest(booking({
-      eventId: "bevt_unmatched_later",
-      bookingId: "bk_unmatched_later",
-    })),
-    handlerDeps({ write }),
-  );
-  assert.equal(second.status, 202);
-
-  const status = await raydarWebhookProofStatus({
-    read: async (key) => store.get(key) || null,
-    secret: SECRET,
-    canaryFingerprint: CANARY_FINGERPRINT,
-    now: NOW_MS,
-  });
-  assert.equal(status.verified, true);
-  assert.equal(status.latestMatched, 0);
-  assert.equal(status.latestPaused, 0);
-  assert.equal(status.pauseCanaryVerified, true);
-  assert.equal(status.matched, 1);
-  assert.equal(status.paused, 1);
+  assert.equal((await response.json()).queued, true);
 });
 
 test("rescheduled-away webhook is terminal history and never calls pause", async () => {
@@ -526,7 +376,7 @@ test("cancellation is recorded but never auto-unpauses or calls pause", async ()
 });
 
 test("durable replay returns duplicate only after a prior event reached done", async () => {
-  let pauseCalls = 0;
+  let enqueueCalls = 0;
   const response = await handleRaydarBookingWebhook(
     signedRequest(booking()),
     handlerDeps({
@@ -535,12 +385,12 @@ test("durable replay returns duplicate only after a prior event reached done", a
         state: "done",
         receivedAt: "2026-07-29T17:59:01.000Z",
       }),
-      pause: async () => { pauseCalls++; },
+      enqueue: async () => { enqueueCalls++; },
     }),
   );
   assert.equal(response.status, 202);
   assert.equal((await response.json()).duplicate, true);
-  assert.equal(pauseCalls, 0);
+  assert.equal(enqueueCalls, 0);
 });
 
 test("native webhook fails closed when the durable replay store is unavailable", async () => {
@@ -567,30 +417,6 @@ test("native webhook retries when durable settlement cannot be written", async (
   );
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error, "store_unavailable");
-});
-
-test("native webhook does not settle a partially failed pause", async () => {
-  let settlementWrites = 0;
-  const response = await handleRaydarBookingWebhook(
-    signedRequest(booking()),
-    handlerDeps({
-      pause: async () => ({
-        decisions: [{}, {}],
-        paused: 1,
-        pauseErrors: [{ reason: "readback_unavailable" }],
-        deferred: false,
-      }),
-      write: async () => {
-        settlementWrites++;
-        return "OK";
-      },
-    }),
-  );
-  const payload = await response.json();
-  assert.equal(response.status, 503);
-  assert.equal(payload.error, "pause_incomplete");
-  assert.equal(payload.pauseErrors, 1);
-  assert.equal(settlementWrites, 0);
 });
 
 test("native index paginates completely, authenticates, and excludes terminal rows", async () => {
