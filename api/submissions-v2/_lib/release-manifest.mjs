@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 107,
-  "digest": "6c92231286135d9aedf25f25acb7d964894302b966d0dda8d44f13ac2a180e74",
+  "digest": "b37d812b32900e1ad11b798b2a2bd85ae844b497ea5d2f3dbc814974e860058f",
   "vercel_json_canonical_sha256": "ab148cb972a9b01608f881fdc14d64e736fe754aa938fc6070955112dc8d388e",
   "files": [
     {
@@ -32,7 +32,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/paraai/_lib/core.mjs",
-      "sha256": "8a619f49d70a8c2a39cbf1b80cf7a89746bf37616489b12a3260c35597809877"
+      "sha256": "83f6bd8a7f14bfd880089cac249062f838928e2c3a4432d4fcb2348aa46b9749"
     },
     {
       "path": "api/paraai/submission-notify.mjs",
@@ -44,7 +44,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/seq/_lib/core.mjs",
-      "sha256": "807f60d7601cfcdbd49b07392a330853ae5aa23aca7e039ccf70b8ef1c36b2ef"
+      "sha256": "fba297b3ce0f8e78cacf34c37b599a058e3962d435aa229c2e5816552435b041"
     },
     {
       "path": "api/seq/_lib/scheduling-links.mjs",
