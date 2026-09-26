@@ -3,7 +3,7 @@
 // For each due project: members -> booked/in-sequence checks (run NOW, at release —
 // the whole point of the delay) -> ensure role sequence (TPL) or target (SEQ) ->
 // enroll the clean ones -> backfill lead emails -> delete the delay project.
-import { cors, requireAuth, hasCookie, cronAuth, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth, listDelayProjects, projectMembers, deleteDelayProject, ensureRoleSequence, enrollIntoCampaign, enrolledElsewhereSet, archiveImportSet, setLeadEmail, ccuIndex, trpcGet, ensureParaformSession } from "./_lib/core.mjs";
 // Native-Raydar + legacy-Calendly booked check — see enroll.mjs.
 import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
 import { protectedRecruiterForRoleTitle } from "./_lib/protected.mjs";
@@ -25,6 +25,7 @@ export default async function handler(req, res) {
     }
     return;
   }
+  await ensureParaformSession();
   if (!hasCookie()) return res.status(200).json({ ok: false, error: "no_cookie" });
   try {
     const url = new URL(req.url, "http://x");

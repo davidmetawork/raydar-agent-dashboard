@@ -7,6 +7,7 @@
 import {
   cors,
   cronAuth,
+  ensureParaformSession,
   hasCookie,
   requireAuth,
   completeCampaignLeads,
@@ -85,6 +86,7 @@ async function handleBookingMembershipRefresh(req, res) {
     await warnOnCronRejection(cron);
     return;
   }
+  await ensureParaformSession();
   if (!hasCookie()) {
     if (kvConfigured()) {
       await recordAttempt("failure", { error: "no_cookie" }).catch(() => {});

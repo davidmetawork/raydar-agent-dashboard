@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { cors, requireAuth } from "./_lib/core.mjs";
+import { cors, ensureParaformSession, requireAuth } from "./_lib/core.mjs";
 import {
   interestConfig,
   interestStatus,
@@ -103,6 +103,7 @@ export default async function handler(req, res) {
   if (humanOnly) {
     if (!(await humanAuthorized(req, res))) return;
   } else if (!(await authorized(req, res))) return;
+  await ensureParaformSession();
 
   try {
     if (req.method === "GET") {

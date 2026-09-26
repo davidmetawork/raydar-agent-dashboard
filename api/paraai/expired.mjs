@@ -9,7 +9,7 @@
 // David already actioned in the Paraform UI cannot double-fire.
 import { timingSafeEqual } from "node:crypto";
 
-import { cors, requireAuth } from "./_lib/core.mjs";
+import { cors, ensureParaformSession, requireAuth } from "./_lib/core.mjs";
 import {
   expiredConfig,
   expiredHealth,
@@ -68,6 +68,7 @@ function bodyOf(req) {
 export default async function handler(req, res) {
   if (cors(req, res)) return undefined;
   if (!(await authorized(req, res))) return undefined;
+  await ensureParaformSession();
 
   if (req.method === "GET") {
     if (!storeConfigured()) {

@@ -1,6 +1,7 @@
 import {
   cors,
   candidateProfileInfo,
+  ensureParaformSession,
   findCrmCandidate,
   findResumeUri,
   getResume,
@@ -39,6 +40,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
   if (!(await requireAuth(req, res))) return;
+  await ensureParaformSession();
   res.setHeader("Cache-Control", "private, no-store");
   const q = query(req);
   try {

@@ -16,7 +16,7 @@
 //
 // FAIL LOUDLY. The predecessor to this system died for nine days in silence.
 // Everything below that alerts is there because of a specific way that happened.
-import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth, ensureParaformSession } from "./_lib/core.mjs";
 import {
   runBookingSweep,
   recordSweepAttempt,
@@ -52,6 +52,7 @@ async function handleBookingSweep(req, res) {
 
   const apply = new URL(req.url, "http://x").searchParams.get("dry") !== "1";
 
+  await ensureParaformSession();
   // Preconditions are alerts, not silent no-ops: an unconfigured control is
   // indistinguishable from a working one until someone gets a bad email.
   if (!hasCookie()) {

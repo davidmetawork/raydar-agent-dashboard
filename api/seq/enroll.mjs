@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, archiveImportSet, createDelayProject, resolveSequenceCandidate } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, ensureRoleSequence, enrollIntoCampaign, setCandidateEmail, setLeadEmail, ccuIndex, enrolledElsewhereSet, archiveImportSet, createDelayProject, resolveSequenceCandidate, ensureParaformSession } from "./_lib/core.mjs";
 // External-booking-aware check: native Raydar and legacy Calendly bookings are
 // both protected during the measured overlap window.
 import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
@@ -21,6 +21,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!(await requireAuth(req, res))) return;
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+  await ensureParaformSession();
   if (!hasCookie()) return res.status(200).json({ ok: false, error: "no_cookie" });
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});

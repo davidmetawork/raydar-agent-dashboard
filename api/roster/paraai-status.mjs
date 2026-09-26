@@ -19,7 +19,7 @@
 // start — "up to ~36k reads a day per always-open Candidates tab" per
 // docs/research/paraform-quota-plan-2026-09-25.md.
 
-import { cors, requireAuth } from "../paraai/_lib/core.mjs";
+import { cors, ensureParaformSession, requireAuth } from "../paraai/_lib/core.mjs";
 import { listJobs } from "../paraai/_lib/store.mjs";
 import {
   buildParaAIStatusIndex,
@@ -99,6 +99,7 @@ export function createParaAIStatusHandler({
   // The live scan for `outcomes=1` (the tab's periodic outcome recheck).
   async function computeOutcomesOnly() {
     try {
+      await ensureParaformSession();
       const outcomeSnapshot = await loadOutcomeSnapshot({ refresh: true });
       const outcomeIndex = buildOutcomeMembershipIndex(outcomeSnapshot.entries);
       return {
@@ -122,6 +123,7 @@ export function createParaAIStatusHandler({
 
   // The live scan for the full status list (the tab's first-open / refresh read).
   async function computeFull() {
+    await ensureParaformSession();
     const [snapshot, jobsResult, outcomeResult] = await Promise.all([
       loadSnapshot({ refresh: true }),
       Promise.resolve()

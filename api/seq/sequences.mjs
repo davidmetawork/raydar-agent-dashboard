@@ -12,7 +12,7 @@
 // all — see docs/research/paraform-quota-plan-2026-09-25.md, "Put a brake or
 // cache on the unbraked readers" -> "Sequences list: serve it from the
 // stored snapshot".
-import { cors, requireAuth, hasCookie, listSequences } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, listSequences, ensureParaformSession } from "./_lib/core.mjs";
 import {
   claimSequencesRefreshWindow,
   readSequencesSnapshot,
@@ -33,6 +33,7 @@ export function createSequencesHandler({
   corsImpl = cors,
   requireAuthImpl = requireAuth,
   hasCookieImpl = hasCookie,
+  ensureSessionImpl = ensureParaformSession,
   fetchSequences = listSequences,
   readSnapshot = readSequencesSnapshot,
   writeSnapshot = writeSequencesSnapshot,
@@ -61,6 +62,7 @@ export function createSequencesHandler({
       // caller must do the bootstrap read; a burst of simultaneous cold
       // viewers gets an empty-but-honest answer instead of each doing their
       // own live read.
+      await ensureSessionImpl();
       if (!hasCookieImpl()) return res.status(200).json({ ok: false, error: "no_cookie", sequences: [] });
       const won = await claimRefresh();
       if (!won) {
@@ -77,6 +79,7 @@ export function createSequencesHandler({
     }
 
     // Explicit operator "Refresh list" — still paced.
+    await ensureSessionImpl();
     if (!hasCookieImpl()) return res.status(200).json({ ok: false, error: "no_cookie", sequences: [] });
     const won = await claimRefresh();
     if (!won) {

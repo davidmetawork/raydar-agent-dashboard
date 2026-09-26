@@ -4,7 +4,7 @@
 // daily check against Paraform's own Book Time page (item 5). Replaces the
 // 10-minute booking-sweep.mjs pass, including its ~100-profile-reads-per-pass
 // rotor.
-import { cors, requireAuth, hasCookie, cronAuth } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, cronAuth, ensureParaformSession } from "./_lib/core.mjs";
 import { shouldAlert, applyDecisions } from "./_lib/booking-stop.mjs";
 import {
   catchUpBookingIndexes,
@@ -31,6 +31,7 @@ async function handleBookingCatchup(req, res) {
   if (cors(req, res)) return;
   const cron = cronAuth(req);
   if (!cron.ok && !(await requireAuth(req, res))) { await warnOnCronRejection(cron); return; }
+  await ensureParaformSession();
 
   const out = { ok: true, indexes: null, bookTime: null };
   // One pacer per invocation, shared by both the index reconciliation and the

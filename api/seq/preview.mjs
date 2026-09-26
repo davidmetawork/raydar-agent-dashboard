@@ -1,4 +1,4 @@
-import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet } from "./_lib/core.mjs";
+import { cors, requireAuth, hasCookie, buildPlan, enrolledElsewhereSet, ensureParaformSession } from "./_lib/core.mjs";
 // Same external-booking-aware check enroll uses, so the preview cannot promise
 // to enrol someone enroll will skip.
 import { bookedSetWithSources as bookedSet } from "./_lib/booking-stop.mjs";
@@ -9,6 +9,7 @@ export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (!(await requireAuth(req, res))) return;
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+  await ensureParaformSession();
   if (!hasCookie()) return res.status(200).json({ ok: false, error: "no_cookie" });
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});

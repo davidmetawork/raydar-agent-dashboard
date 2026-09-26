@@ -8,7 +8,7 @@
 // card that David already actioned in the Paraform UI cannot double-fire.
 import { timingSafeEqual } from "node:crypto";
 
-import { cors, requireAuth } from "./_lib/core.mjs";
+import { cors, ensureParaformSession, requireAuth } from "./_lib/core.mjs";
 import {
   replyConfig,
   replyHealth,
@@ -98,6 +98,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "GET_or_POST_only" });
   }
   if (!(await authorized(req, res))) return;
+  await ensureParaformSession();
   if (!storeConfigured()) {
     return res.status(503).json({ ok: false, error: "state_store_not_configured" });
   }

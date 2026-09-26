@@ -10,6 +10,13 @@ import { sessionConfig, sessionFromRequest, verifyGoogleCredential } from "../..
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 import {
+  ensureParaformSession,
+  invalidateParaformSessionCache,
+  notifyParaformSessionRejected,
+  paraformCookieValue,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+} from "../../_lib/paraform-session-store.mjs";
+import {
   AGENT_SCHEDULING_URL,
   HUMAN_SCHEDULING_URL,
   rewriteLegacySchedulingLinks,
@@ -17,13 +24,20 @@ import {
 
 export const BASE = "https://www.paraform.com/api";
 
-export function paraformCookieValue(environment = process.env) {
-  return String(
-    environment.PARAFORM_SESSION_COOKIE
-    || environment.PARAFORM_COOKIE
-    || "",
-  );
-}
+// Cookie resolution now lives in the shared store
+// (api/_lib/paraform-session-store.mjs), used by both this file and
+// api/paraai/_lib/core.mjs. paraformCookieValue() stays synchronous and
+// widely used — it reads whatever ensureParaformSession() last resolved
+// (n8n generational store first, then static env), falling back to a direct
+// env read when nothing has been resolved yet. Re-exported here so existing
+// importers of "./_lib/core.mjs" keep working unchanged.
+export {
+  ensureParaformSession,
+  invalidateParaformSessionCache,
+  notifyParaformSessionRejected,
+  paraformCookieValue,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+};
 
 export const CONFIG = {
   TEMPLATE_ID: process.env.TEMPLATE_ID || "ms87yhip8wozzyrkpq6sx51b", // 1st-Round template (disabled, has *INSERT ROLE*)
@@ -153,10 +167,21 @@ const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 // So every trpc call now rides the ladder itself and only reports AUTH_EXPIRED
 // after a SERIAL probe confirms it. Callers cannot forget, because there is
 // nothing left to remember.
-const throttled = () =>
-  Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
-const authExpired = () =>
-  Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" });
+// A 401 on a request marks WHICHEVER candidate produced the cookie (shared
+// namespace, the 'david' account namespace, or the static env value)
+// rejected for 30 minutes, so the next resolution tries the next candidate
+// in order instead of re-deriving the same bad one. See
+// notifyParaformSessionRejected() in api/_lib/paraform-session-store.mjs.
+// This never retries inside the current request — only classifyThrottle's
+// existing ladder below does that.
+const throttled = () => {
+  notifyParaformSessionRejected();
+  return Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
+};
+const authExpired = () => {
+  notifyParaformSessionRejected();
+  return Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" });
+};
 
 async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
   for (let attempt = 0; ; attempt++) {
@@ -440,6 +465,7 @@ export async function crmProjectMembers(
       signal: AbortSignal.timeout(20000),
     });
     if (response.status === 401) {
+      notifyParaformSessionRejected();
       const error = new Error("AUTH_EXPIRED");
       error.code = "AUTH_EXPIRED";
       throw error;
@@ -943,6 +969,7 @@ export async function archiveImportSet(
         },
       );
       if (response.status === 401) {
+        notifyParaformSessionRejected();
         const error = new Error("AUTH_EXPIRED");
         error.code = "AUTH_EXPIRED";
         throw error;
