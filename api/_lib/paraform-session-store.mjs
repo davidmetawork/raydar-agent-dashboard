@@ -202,14 +202,23 @@ export async function listVariables({ base, key, fetchImpl = fetch }) {
   return rows;
 }
 
-// ── Resolution order + process cache ────────────────────────────────────────
+// ── Candidate order, rejection, and process cache ───────────────────────────
 //
-// (a) the n8n generational namespace for the pinned account ('david');
-// (b) the legacy shared generational/chunked variables (DEFAULT_SESSION_NAMESPACE);
-// (c) the static env value (PARAFORM_SESSION_COOKIE || PARAFORM_COOKIE) last.
+// Production renewal (lifecycle/_lib/clients.mjs planRenewal, with write-back)
+// writes the SHARED namespace on every live 200. The account slot ('david')
+// is renewed by a SEPARATE daily job, and other members' account slots lag
+// further still (teammates' generations can be a day old) — so either the
+// shared or the account namespace can independently go stale, and neither
+// outranks the other by construction. Instead of unconditionally preferring
+// the account slot, this module holds an ORDERED CANDIDATE LIST, tries the
+// first one that is both resolvable and not currently in cooldown, and only
+// moves on when a live 401 proves that candidate bad:
+//
+//   default order:            [shared, account('david'), env]
+//   PARAFORM_SESSION_ACCOUNT: [account(<that account>), shared, env]
 //
 // A failure at any store step (unreachable n8n, missing/malformed rows) is
-// swallowed and falls through to the next step — the store being down must
+// swallowed and that candidate is simply absent — the store being down must
 // degrade to the exact old behaviour (static env), never throw.
 
 function staticEnvCookie(environment) {
@@ -224,41 +233,100 @@ function tryResolve(rows, namespace) {
   }
 }
 
-async function resolveFromStore({ environment, fetchImpl }) {
-  const base = String(environment.N8N_BASE_URL || "").replace(/\/+$/u, "");
-  const key = String(environment.N8N_API_KEY || "");
-  if (!base || !key) return null;
+const SLOTS = Object.freeze(["shared", "account", "env"]);
 
-  const accountNamespace = paraformAccountSessionNamespace(
-    environment.PARAFORM_SESSION_ACCOUNT || DEFAULT_PARAFORM_SESSION_ACCOUNT,
-  );
-
-  let rows;
-  try {
-    rows = await listVariables({ base, key, fetchImpl });
-  } catch {
-    return null; // store unreachable — caller falls back to env
-  }
-
-  const account = tryResolve(rows, accountNamespace);
-  if (account) return { value: account.value, generation: account.generation, source: `account-${account.source}` };
-
-  const shared = tryResolve(rows, DEFAULT_SESSION_NAMESPACE);
-  if (shared) return { value: shared.value, generation: shared.generation, source: `shared-${shared.source}` };
-
-  return null; // both namespaces empty/unusable — caller falls back to env
+/** Only an explicit PARAFORM_SESSION_ACCOUNT env var may move the account
+ *  slot ahead of the shared one — its mere presence reorders, regardless of
+ *  which account name it names (the default account namespace is always
+ *  'david' either way, per accountNamespaceFor below). */
+function slotOrder(environment) {
+  const explicitAccount = String(environment.PARAFORM_SESSION_ACCOUNT || "").trim();
+  return explicitAccount ? ["account", "shared", "env"] : SLOTS;
 }
 
-async function resolveParaformSession({ environment, fetchImpl }) {
-  const fromStore = await resolveFromStore({ environment, fetchImpl });
-  if (fromStore && isPlausibleCookie(fromStore.value)) return fromStore;
-  return { value: staticEnvCookie(environment), generation: null, source: "env" };
+function accountNamespaceFor(environment) {
+  return paraformAccountSessionNamespace(
+    environment.PARAFORM_SESSION_ACCOUNT || DEFAULT_PARAFORM_SESSION_ACCOUNT,
+  );
+}
+
+/** Compute all three candidates from one n8n listing (or none, when the
+ *  store is unconfigured/unreachable — `rows` is null in that case). The env
+ *  candidate is always present, even if its value is an empty string, so a
+ *  caller can always fall through to *something* rather than nothing. */
+function candidatesFromRows(rows, environment) {
+  const candidates = { shared: null, account: null, env: null };
+  if (rows) {
+    const shared = tryResolve(rows, DEFAULT_SESSION_NAMESPACE);
+    if (shared && isPlausibleCookie(shared.value)) {
+      candidates.shared = { value: shared.value, generation: shared.generation, slot: "shared" };
+    }
+    const account = tryResolve(rows, accountNamespaceFor(environment));
+    if (account && isPlausibleCookie(account.value)) {
+      candidates.account = { value: account.value, generation: account.generation, slot: "account" };
+    }
+  }
+  candidates.env = { value: staticEnvCookie(environment), generation: null, slot: "env" };
+  return candidates;
+}
+
+// ── in-process rejection (30 minutes) ───────────────────────────────────────
+// No KV marker: neither api/seq/_lib/core.mjs nor api/paraai/_lib/core.mjs
+// already imports a KV helper at this layer (api/health/_lib/kv.mjs is only
+// ever reached from inside a handler, never from this shared module), and
+// this module is loaded by every entrypoint before auth — adding a KV import
+// here purely for a best-effort marker would be a genuinely NEW dependency,
+// which the review explicitly said to skip in that case. In-process only.
+export const PARAFORM_SESSION_REJECTION_TTL_MS = 30 * 60 * 1000;
+
+let rejectedUntil = new Map(); // slot -> epoch ms it becomes usable again
+
+function isRejected(slot, now) {
+  const until = rejectedUntil.get(slot);
+  return typeof until === "number" && until > now;
+}
+
+/** First candidate in `order` that both resolves and isn't in cooldown. If
+ *  every candidate is either unusable or rejected, degrade to the
+ *  highest-priority one that at least resolves (env always does) rather than
+ *  serve nothing — a 30-minute cooldown is a preference, not a hard veto,
+ *  once there is truly nowhere else to go. */
+function pickCandidate(candidates, order, now) {
+  for (const slot of order) {
+    const candidate = candidates[slot];
+    if (candidate && !isRejected(slot, now)) return candidate;
+  }
+  for (const slot of order) {
+    if (candidates[slot]) return candidates[slot];
+  }
+  return candidates.env;
+}
+
+async function resolveParaformSession({ environment, fetchImpl, now }) {
+  const base = String(environment.N8N_BASE_URL || "").replace(/\/+$/u, "");
+  const key = String(environment.N8N_API_KEY || "");
+  let rows = null;
+  if (base && key) {
+    try {
+      rows = await listVariables({ base, key, fetchImpl });
+    } catch {
+      rows = null; // store unreachable — shared/account candidates are simply absent
+    }
+  }
+  const candidates = candidatesFromRows(rows, environment);
+  return pickCandidate(candidates, slotOrder(environment), now);
 }
 
 export const PARAFORM_SESSION_CACHE_TTL_MS = 10 * 60 * 1000;
 
-let cache = { value: null, source: null, generation: null, resolvedAt: 0 };
+// The health budget below is a caller-supplied `timeoutMs`, but a single
+// constant keeps every Scheduler-polled health endpoint tuned identically.
+export const PARAFORM_SESSION_HEALTH_TIMEOUT_MS = 3_000;
+
+let cache = { value: null, slot: null, generation: null, resolvedAt: 0 };
 let inflight = null;
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /**
  * Resolve (and cache, per process, for at most PARAFORM_SESSION_CACHE_TTL_MS)
@@ -267,23 +335,56 @@ let inflight = null;
  * read — those stay synchronous and read whatever this last resolved.
  * Concurrent callers within the same warm process share one in-flight
  * resolution rather than each issuing their own n8n read.
+ *
+ * `timeoutMs`: for a caller on a hard external deadline (the Scheduler's
+ * probeSequenceStop gives api/seq/health.mjs 10s total), pass a budget in ms.
+ * A fresh cache hit always answers instantly regardless. On a cache MISS,
+ * if the store read has not finished within `timeoutMs`, this returns the
+ * static env value for THIS call only (never blocks past the budget) — the
+ * in-flight store read is NOT cancelled and keeps running in the background,
+ * so it still populates the cache (and every candidate's rejection state)
+ * for the next call once it completes.
+ *
+ * `now`: epoch ms to treat as "the current time" for the cache-freshness and
+ * candidate-rejection checks. Defaults to a real Date.now() snapshot; tests
+ * pass an explicit value to prove the 30-minute rejection cooldown and the
+ * 10-minute cache TTL deterministically, without a real wait.
  */
 export async function ensureParaformSession({
   force = false,
   environment = process.env,
   fetchImpl = fetch,
+  timeoutMs = null,
+  now = Date.now(),
 } = {}) {
-  const now = Date.now();
   if (!force && cache.value && now - cache.resolvedAt < PARAFORM_SESSION_CACHE_TTL_MS) {
-    return { value: cache.value, source: cache.source, generation: cache.generation, cached: true };
+    return { value: cache.value, slot: cache.slot, generation: cache.generation, cached: true };
   }
   if (!inflight) {
-    inflight = resolveParaformSession({ environment, fetchImpl })
+    inflight = resolveParaformSession({ environment, fetchImpl, now })
       .then((resolved) => {
-        cache = { ...resolved, resolvedAt: Date.now() };
+        cache = { ...resolved, resolvedAt: now };
         return resolved;
       })
       .finally(() => { inflight = null; });
+    // resolveParaformSession never actually rejects, but a caller that hits
+    // the timeout below stops awaiting this promise — keep that abandonment
+    // from ever surfacing as an unhandled rejection.
+    inflight.catch(() => {});
+  }
+  if (timeoutMs != null && Number.isFinite(timeoutMs) && timeoutMs >= 0) {
+    const budgetExceeded = Symbol("paraform-session-budget-exceeded");
+    const winner = await Promise.race([inflight, sleep(timeoutMs).then(() => budgetExceeded)]);
+    if (winner === budgetExceeded) {
+      return {
+        value: staticEnvCookie(environment),
+        slot: "env",
+        generation: null,
+        cached: false,
+        timedOut: true,
+      };
+    }
+    return { ...winner, cached: false };
   }
   const resolved = await inflight;
   return { ...resolved, cached: false };
@@ -310,30 +411,36 @@ export function hasParaformSessionCookie(environment = process.env) {
 }
 
 /** Unconditional cache clear. Safe to call anytime (tests use this between
- *  cases; production code can use it any time a cookie is known to be bad). */
+ *  cases; production code can use it any time a cookie is known to be bad).
+ *  Does NOT touch candidate rejection state — see notifyParaformSessionRejected. */
 export function invalidateParaformSessionCache() {
-  cache = { value: null, source: null, generation: null, resolvedAt: 0 };
+  cache = { value: null, slot: null, generation: null, resolvedAt: 0 };
 }
 
 /**
  * Call this when a live Paraform request gets a 401 using the currently
- * cached value. Only forces a re-read of the STORE on the next
- * ensureParaformSession() call when the rejected value actually came from
- * the store — an env-sourced value dying is not evidence the store (often
- * unconfigured entirely) has anything new, so this avoids a pointless n8n
- * round trip on every throttle retry when the store was never in play.
+ * cached value. Marks THAT candidate's slot rejected for
+ * PARAFORM_SESSION_REJECTION_TTL_MS (30 minutes) so the next resolution
+ * skips it in favor of the next candidate in order, and invalidates the
+ * cache so the NEXT ensureParaformSession() call actually re-resolves rather
+ * than serve the same now-known-bad value for the rest of the 10-minute TTL.
  * Never retries inside the current request — the caller's existing
  * throttle/backoff ladder is unchanged; this only affects what the NEXT
  * invocation resolves.
  */
-export function notifyParaformSessionRejected() {
-  if (cache.value && cache.source && cache.source !== "env") {
-    invalidateParaformSessionCache();
-  }
+export function notifyParaformSessionRejected({ now = Date.now() } = {}) {
+  // cache.slot (not cache.value) is the guard: a slot resolves to "" when
+  // nothing is configured for it, which is still a real resolution worth
+  // marking rejected — cache.slot is only null in the pristine, nothing-has-
+  // ever-been-resolved state.
+  if (!cache.slot) return;
+  rejectedUntil.set(cache.slot, now + PARAFORM_SESSION_REJECTION_TTL_MS);
+  invalidateParaformSessionCache();
 }
 
 /** Test-only: force the module back to its just-loaded state. */
 export function __resetParaformSessionStateForTests() {
-  cache = { value: null, source: null, generation: null, resolvedAt: 0 };
+  cache = { value: null, slot: null, generation: null, resolvedAt: 0 };
   inflight = null;
+  rejectedUntil = new Map();
 }

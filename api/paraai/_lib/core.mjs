@@ -7,6 +7,7 @@ import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 import {
   ensureParaformSession,
   invalidateParaformSessionCache,
+  notifyParaformSessionRejected,
   paraformCookieValue,
 } from "../../_lib/paraform-session-store.mjs";
 
@@ -71,12 +72,14 @@ export function paraAIConfig() {
 
 // Cookie resolution lives in the shared store
 // (api/_lib/paraform-session-store.mjs), used by both this file and
-// api/seq/_lib/core.mjs — one process cache, one resolution order (n8n
-// generational store for account 'david', then the legacy shared
-// generational/chunked n8n variables, then the static env value last)
-// instead of this file's previous env-first / legacy-two-chunk-only
-// fallback. clearCookieCache() is kept as the public name (existing tests
-// and callers use it) but now clears the SHARED cache.
+// api/seq/_lib/core.mjs — one process cache, one ordered candidate list
+// (shared generational/chunked n8n variables, then the 'david' account
+// generational namespace, then the static env value last — reordered only by
+// an explicit PARAFORM_SESSION_ACCOUNT) instead of this file's previous
+// env-first / legacy-two-chunk-only fallback. clearCookieCache() is kept as
+// the public name (existing tests and callers use it) but now clears the
+// SHARED cache; it does NOT mark any candidate rejected (see
+// notifyParaformSessionRejected below, used by authExpired()/throttled()).
 export function clearCookieCache() { invalidateParaformSessionCache(); }
 
 export async function paraformCookie() {
@@ -161,14 +164,17 @@ function vendorError(response, body) {
 }
 
 function authExpired() {
-  clearCookieCache();
+  // Marks the candidate slot that produced this cookie rejected (30 min) and
+  // invalidates the cache, so the NEXT resolution tries the next candidate
+  // in order instead of unconditionally re-deriving the same one.
+  notifyParaformSessionRejected();
   const error = new Error("AUTH_EXPIRED");
   error.code = "AUTH_EXPIRED";
   return error;
 }
 
 function throttled() {
-  clearCookieCache();
+  notifyParaformSessionRejected();
   const error = new Error("PARAFORM_THROTTLED");
   error.code = "PARAFORM_THROTTLED";
   return error;

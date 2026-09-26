@@ -1,6 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { cors, ensureParaformSession, hasCookie, paraformHealth } from "./_lib/core.mjs";
+import {
+  cors,
+  ensureParaformSession,
+  hasCookie,
+  paraformHealth,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+} from "./_lib/core.mjs";
 import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.mjs";
 import {
   raydarWebhookProofStatus,
@@ -289,7 +295,14 @@ async function handleSequenceHealth(req, res) {
     // value on any store failure) before the auth probe below, so a dead
     // static seal no longer reports "expired" while the shared store holds a
     // live, daily-renewed session. See api/_lib/paraform-session-store.mjs.
-    await ensureParaformSession();
+    //
+    // BUDGETED: the Scheduler's probeSequenceStop gives this whole endpoint a
+    // hard 10s timeout. A cache hit answers instantly regardless; on a cache
+    // miss, cap the n8n read at PARAFORM_SESSION_HEALTH_TIMEOUT_MS (3s) and
+    // fall back to the static env value for THIS response rather than ever
+    // block health on a hung store — the in-flight read keeps running and
+    // still populates the cache for the next tick.
+    await ensureParaformSession({ timeoutMs: PARAFORM_SESSION_HEALTH_TIMEOUT_MS });
     const h = await paraformHealth();
     res.status(200).json({ ok: h.paraform === "live", cookieSet: hasCookie(), ...h, bookingStop, bookingProtectionLite });
   } catch (e) {

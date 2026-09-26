@@ -13,6 +13,8 @@ import {
   notifyParaformSessionRejected,
   paraformCookieValue,
   PARAFORM_SESSION_CACHE_TTL_MS,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+  PARAFORM_SESSION_REJECTION_TTL_MS,
   paraformAccountSessionNamespace,
   resolveSession,
   sessionKeys,
@@ -75,6 +77,8 @@ function fakeN8n(rows, { base = "https://n8n.example.test" } = {}) {
   };
   return { base, key: "test-n8n-key", fetchImpl, calls: () => calls };
 }
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 async function withEnv(env, fn) {
   const previous = {};
@@ -242,12 +246,18 @@ test("listVariables surfaces a non-OK response as an error rather than an empty 
   );
 });
 
-// ── resolution order: account -> shared -> env ──────────────────────────────
+// ── resolution order: shared -> account('david') -> env, by default ────────
+//
+// Production renewal with write-back (lifecycle/_lib/clients.mjs planRenewal)
+// writes the SHARED namespace on every live 200. The account slot is renewed
+// by a separate daily job and can lag (teammates' slots can be a day stale),
+// so the shared namespace is NOT unconditionally subordinate to the account
+// one — it goes first unless PARAFORM_SESSION_ACCOUNT explicitly reorders.
 
-test("resolution order: the account generation wins when present", async () => {
+test("shared wins by default, even when the account slot is ALSO present", async () => {
   const rows = [
-    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
     ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
   ];
   const store = fakeN8n(rows);
   await withEnv({
@@ -256,13 +266,13 @@ test("resolution order: the account generation wins when present", async () => {
     PARAFORM_SESSION_COOKIE: ENV_COOKIE,
   }, async () => {
     const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
-    assert.equal(result.value, ACCOUNT_COOKIE);
-    assert.equal(result.source, "account-generation");
+    assert.equal(result.value, SHARED_GEN_COOKIE);
+    assert.equal(result.slot, "shared");
   });
 });
 
-test("resolution order: the shared generational/chunked namespace wins when the account slot is empty", async () => {
-  const rows = chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 3, SHARED_GEN_COOKIE, 40);
+test("the account generation wins only when the shared namespace has nothing usable", async () => {
+  const rows = chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40);
   const store = fakeN8n(rows);
   await withEnv({
     N8N_BASE_URL: store.base,
@@ -270,12 +280,12 @@ test("resolution order: the shared generational/chunked namespace wins when the 
     PARAFORM_SESSION_COOKIE: ENV_COOKIE,
   }, async () => {
     const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
-    assert.equal(result.value, SHARED_GEN_COOKIE);
-    assert.equal(result.source, "shared-generation");
+    assert.equal(result.value, ACCOUNT_COOKIE);
+    assert.equal(result.slot, "account");
   });
 });
 
-test("resolution order: the shared legacy layout wins over env when there is no generation anywhere", async () => {
+test("the shared legacy layout wins over env when there is no generation anywhere", async () => {
   const rows = legacyChunkRows(DEFAULT_SESSION_NAMESPACE, SHARED_LEGACY_COOKIE.slice(0, 40), SHARED_LEGACY_COOKIE.slice(40));
   const store = fakeN8n(rows);
   await withEnv({
@@ -285,11 +295,11 @@ test("resolution order: the shared legacy layout wins over env when there is no 
   }, async () => {
     const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
     assert.equal(result.value, SHARED_LEGACY_COOKIE);
-    assert.equal(result.source, "shared-legacy");
+    assert.equal(result.slot, "shared");
   });
 });
 
-test("resolution order: the static env value is last, used only when the store has nothing usable", async () => {
+test("the static env value is last, used only when the store has nothing usable", async () => {
   const store = fakeN8n([]);
   await withEnv({
     N8N_BASE_URL: store.base,
@@ -298,7 +308,43 @@ test("resolution order: the static env value is last, used only when the store h
   }, async () => {
     const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
     assert.equal(result.value, ENV_COOKIE);
-    assert.equal(result.source, "env");
+    assert.equal(result.slot, "env");
+  });
+});
+
+test("an explicit PARAFORM_SESSION_ACCOUNT reorders the account slot ahead of shared", async () => {
+  const rows = [
+    ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
+  ];
+  const store = fakeN8n(rows);
+  await withEnv({
+    N8N_BASE_URL: store.base,
+    N8N_API_KEY: store.key,
+    PARAFORM_SESSION_ACCOUNT: "david", // explicit — the mere presence reorders
+  }, async () => {
+    const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
+    assert.equal(result.value, ACCOUNT_COOKIE);
+    assert.equal(result.slot, "account");
+  });
+});
+
+test("PARAFORM_SESSION_ACCOUNT can also select a DIFFERENT account's namespace, still ordered first", async () => {
+  const kyraNamespace = paraformAccountSessionNamespace("kyra");
+  const kyraCookie = `Fe26.2${"k".repeat(70)}`;
+  const rows = [
+    ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(kyraNamespace, 1, kyraCookie, 40),
+  ];
+  const store = fakeN8n(rows);
+  await withEnv({
+    N8N_BASE_URL: store.base,
+    N8N_API_KEY: store.key,
+    PARAFORM_SESSION_ACCOUNT: "kyra",
+  }, async () => {
+    const result = await ensureParaformSession({ fetchImpl: store.fetchImpl });
+    assert.equal(result.value, kyraCookie);
+    assert.equal(result.slot, "account");
   });
 });
 
@@ -309,7 +355,7 @@ test("env fallback: PARAFORM_COOKIE is used when PARAFORM_SESSION_COOKIE is abse
     delete process.env.PARAFORM_SESSION_COOKIE;
     const result = await ensureParaformSession();
     assert.equal(result.value, ENV_COOKIE);
-    assert.equal(result.source, "env");
+    assert.equal(result.slot, "env");
   });
 });
 
@@ -322,7 +368,7 @@ test("an unreachable store degrades to env exactly like before, never throws", a
     const fetchImpl = async () => { throw new Error("network unreachable"); };
     const result = await ensureParaformSession({ fetchImpl });
     assert.equal(result.value, ENV_COOKIE);
-    assert.equal(result.source, "env");
+    assert.equal(result.slot, "env");
   });
 });
 
@@ -336,6 +382,96 @@ test("a store configured with only one half of N8N_BASE_URL/N8N_API_KEY is treat
     const result = await ensureParaformSession({ fetchImpl: async () => { called = true; return n8nListResponse([]); } });
     assert.equal(called, false, "must not attempt a store read with only half the config");
     assert.equal(result.value, ENV_COOKIE);
+  });
+});
+
+// ── cascading rejection through the candidate order ─────────────────────────
+
+test("a 401 on shared falls through to account, then env, on each subsequent resolution", async () => {
+  const rows = [
+    ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
+  ];
+  const store = fakeN8n(rows);
+  await withEnv({
+    N8N_BASE_URL: store.base,
+    N8N_API_KEY: store.key,
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+  }, async () => {
+    const t0 = 1_000_000;
+    const first = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 });
+    assert.equal(first.slot, "shared");
+
+    // A live 401 using the shared-sourced cookie.
+    notifyParaformSessionRejected({ now: t0 + 1 });
+    const second = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 2 });
+    assert.equal(second.slot, "account", "shared is in cooldown, so account is next");
+
+    // A live 401 using the account-sourced cookie too.
+    notifyParaformSessionRejected({ now: t0 + 3 });
+    const third = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 4 });
+    assert.equal(third.slot, "env", "both shared and account are in cooldown");
+  });
+});
+
+test("rejection expires after 30 minutes and the candidate is tried again", async () => {
+  const rows = chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40);
+  const store = fakeN8n(rows);
+  await withEnv({
+    N8N_BASE_URL: store.base,
+    N8N_API_KEY: store.key,
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+  }, async () => {
+    const t0 = 1_000_000;
+    const first = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 });
+    assert.equal(first.slot, "shared");
+
+    notifyParaformSessionRejected({ now: t0 + 1 });
+    const stillCoolingDown = await ensureParaformSession({
+      fetchImpl: store.fetchImpl,
+      now: t0 + 1 + 29 * 60 * 1000, // 29 minutes later — still within the 30-minute cooldown
+    });
+    assert.equal(stillCoolingDown.slot, "env", "shared is still rejected 29 minutes in; only env is left");
+
+    const expired = await ensureParaformSession({
+      fetchImpl: store.fetchImpl,
+      now: t0 + 1 + 31 * 60 * 1000, // 31 minutes later — the cooldown has expired
+      force: true, // bypass the unrelated 10-minute cache TTL to force a fresh pick
+    });
+    assert.equal(expired.slot, "shared", "30 minutes have passed; shared is tried again");
+  });
+});
+
+test("when every candidate is rejected, the highest-priority one is used anyway rather than nothing", async () => {
+  // Only shared ever resolves here (no account rows, empty env) — so once
+  // shared AND env have both been rejected in turn, nothing is left in the
+  // first pass and the fallback must still serve shared rather than "".
+  const rows = chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40);
+  const store = fakeN8n(rows);
+  await withEnv({
+    N8N_BASE_URL: store.base,
+    N8N_API_KEY: store.key,
+    PARAFORM_SESSION_COOKIE: undefined,
+    PARAFORM_COOKIE: undefined,
+  }, async () => {
+    delete process.env.PARAFORM_SESSION_COOKIE;
+    delete process.env.PARAFORM_COOKIE;
+    const t0 = 1_000_000;
+
+    const first = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 });
+    assert.equal(first.slot, "shared");
+    notifyParaformSessionRejected({ now: t0 + 1 }); // rejects "shared"
+
+    const second = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 2 });
+    assert.equal(second.slot, "env", "account never resolves, so env is next");
+    notifyParaformSessionRejected({ now: t0 + 3 }); // rejects "env" too — now everything is rejected
+
+    const third = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 4 });
+    // account still never resolves, and both shared and env are in cooldown —
+    // degrade back to the highest-priority resolvable candidate (shared)
+    // rather than serve an empty string.
+    assert.equal(third.slot, "shared");
+    assert.equal(third.value, SHARED_GEN_COOKIE);
   });
 });
 
@@ -409,16 +545,22 @@ test("notifyParaformSessionRejected invalidates a store-sourced cache so the nex
   });
 });
 
-test("notifyParaformSessionRejected leaves an env-sourced cache alone (no pointless store retry)", async () => {
+test("notifyParaformSessionRejected also invalidates an env-sourced cache (every slot is treated uniformly)", async () => {
+  // With no shared/account rows in the store, env is the only present
+  // candidate. Rejecting it still invalidates the cache and re-reads the
+  // store on the next call (so a shared/account row that appears in the
+  // meantime would be picked up) — it just degrades right back to env via
+  // the "everything is rejected" fallback, since nothing else resolves.
   const store = fakeN8n([]);
   await withEnv({ N8N_BASE_URL: store.base, N8N_API_KEY: store.key, PARAFORM_SESSION_COOKIE: ENV_COOKIE }, async () => {
     const first = await ensureParaformSession({ fetchImpl: store.fetchImpl });
-    assert.equal(first.source, "env");
+    assert.equal(first.slot, "env");
     assert.equal(store.calls(), 1);
     notifyParaformSessionRejected();
     const second = await ensureParaformSession({ fetchImpl: store.fetchImpl });
-    assert.equal(second.cached, true, "an env-sourced rejection must not force a re-read");
-    assert.equal(store.calls(), 1);
+    assert.equal(second.cached, false, "an env-sourced rejection still forces a fresh resolution");
+    assert.equal(second.slot, "env");
+    assert.equal(store.calls(), 2);
   });
 });
 
@@ -545,4 +687,131 @@ test("paraai's clearCookieCache() clears the SAME shared cache seq reads (one sh
 
 test("PARAFORM_SESSION_CACHE_TTL_MS is exactly ten minutes, as specified", () => {
   assert.equal(PARAFORM_SESSION_CACHE_TTL_MS, 10 * 60 * 1000);
+});
+
+test("PARAFORM_SESSION_REJECTION_TTL_MS is exactly thirty minutes, as specified", () => {
+  assert.equal(PARAFORM_SESSION_REJECTION_TTL_MS, 30 * 60 * 1000);
+});
+
+// ── health-latency budget: never block past `timeoutMs` on a hung n8n read ──
+//
+// The Scheduler's probeSequenceStop gives api/seq/health.mjs a hard 10s
+// timeout. ensureParaformSession({ timeoutMs }) must answer with the static
+// env value well within that budget on a cache miss against a store that
+// never responds, and the abandoned store read must keep running in the
+// background rather than being wasted.
+
+test("ensureParaformSession({ timeoutMs }) answers within budget when the n8n read hangs", async () => {
+  let released;
+  const hang = new Promise((resolve) => { released = resolve; });
+  const fetchImpl = async () => { await hang; return n8nListResponse([]); };
+  await withEnv({
+    N8N_BASE_URL: "https://n8n.example.test",
+    N8N_API_KEY: "k",
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+  }, async () => {
+    const startedAt = Date.now();
+    const result = await ensureParaformSession({ fetchImpl, timeoutMs: 50 });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.timedOut, true);
+    assert.equal(result.value, ENV_COOKIE);
+    assert.equal(result.slot, "env");
+    assert.ok(elapsedMs < 400, `expected to answer well under budget, took ${elapsedMs}ms`);
+    released(); // let the abandoned read finish so it doesn't leak into later tests
+    await sleep(5);
+  });
+});
+
+test("a timed-out read still populates the cache in the background once it completes", async () => {
+  let released;
+  const hang = new Promise((resolve) => { released = resolve; });
+  const rows = chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40);
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; await hang; return n8nListResponse(rows); };
+  await withEnv({
+    N8N_BASE_URL: "https://n8n.example.test",
+    N8N_API_KEY: "k",
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+  }, async () => {
+    const first = await ensureParaformSession({ fetchImpl, timeoutMs: 20 });
+    assert.equal(first.timedOut, true);
+    assert.equal(calls, 1);
+    released();
+    await sleep(30); // give the abandoned in-flight resolution time to land
+    assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "the background resolution populated the cache");
+  });
+});
+
+test("a fresh cache hit answers instantly even with a timeoutMs budget set", async () => {
+  const rows = chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40);
+  const store = fakeN8n(rows);
+  await withEnv({ N8N_BASE_URL: store.base, N8N_API_KEY: store.key }, async () => {
+    await ensureParaformSession({ fetchImpl: store.fetchImpl });
+    const second = await ensureParaformSession({ fetchImpl: store.fetchImpl, timeoutMs: 3000 });
+    assert.equal(second.cached, true);
+    assert.equal(second.value, SHARED_GEN_COOKIE);
+    assert.equal(store.calls(), 1, "a cache hit must never touch the store, budget or not");
+  });
+});
+
+test("api/seq/health.mjs answers within budget when n8n hangs, falling back to env for that response", async () => {
+  let released;
+  const hang = new Promise((resolve) => { released = resolve; });
+  const n8nBase = "https://n8n.example.test";
+  const kvBase = "https://control.example.test";
+  const kvStore = new Map();
+  const paraformCookiesSeen = [];
+  const fetchImpl = async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(n8nBase)) { await hang; return n8nListResponse([]); }
+    if (href.startsWith(kvBase)) {
+      const [op, key, value, ...opts] = JSON.parse(init.body);
+      if (op === "GET") return { ok: true, json: async () => ({ result: kvStore.has(key) ? kvStore.get(key) : null }) };
+      if (op === "SET") {
+        if (opts.includes("NX") && kvStore.has(key)) return { ok: true, json: async () => ({ result: null }) };
+        kvStore.set(key, value);
+        return { ok: true, json: async () => ({ result: "OK" }) };
+      }
+      return { ok: true, json: async () => ({ result: null }) };
+    }
+    if (href.startsWith("https://www.paraform.com/")) {
+      paraformCookiesSeen.push(init?.headers?.cookie);
+      return { status: 200, json: async () => ({ result: { data: { json: [{ id: "seq-1" }] } } }) };
+    }
+    throw new Error(`unexpected fetch to ${href}`);
+  };
+  await withEnv({
+    N8N_BASE_URL: n8nBase,
+    N8N_API_KEY: "k",
+    KV_REST_API_URL: kvBase,
+    KV_REST_API_TOKEN: "test-token",
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+  }, async () => {
+    const { default: handler } = await import("../api/seq/health.mjs");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    const req = { method: "GET", headers: {}, url: "/api/seq/health" };
+    let body = null;
+    const res = {
+      status() { return this; },
+      json(value) { body = value; return this; },
+      setHeader() {},
+    };
+    try {
+      const startedAt = Date.now();
+      await handler(req, res);
+      const elapsedMs = Date.now() - startedAt;
+      assert.ok(
+        elapsedMs < PARAFORM_SESSION_HEALTH_TIMEOUT_MS + 1000,
+        `expected the health endpoint to respect its ~3s store budget, took ${elapsedMs}ms`,
+      );
+      assert.equal(body.cookieSet, true);
+      assert.equal(paraformCookiesSeen.length, 1);
+      assert.equal(paraformCookiesSeen[0], `wos-session=${ENV_COOKIE}`, "falls back to the env value for this response");
+    } finally {
+      globalThis.fetch = originalFetch;
+      released();
+      await sleep(5);
+    }
+  });
 });

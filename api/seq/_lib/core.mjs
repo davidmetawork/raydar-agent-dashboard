@@ -14,6 +14,7 @@ import {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
 } from "../../_lib/paraform-session-store.mjs";
 import {
   AGENT_SCHEDULING_URL,
@@ -35,6 +36,7 @@ export {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
+  PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
 };
 
 export const CONFIG = {
@@ -165,10 +167,10 @@ const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 // So every trpc call now rides the ladder itself and only reports AUTH_EXPIRED
 // after a SERIAL probe confirms it. Callers cannot forget, because there is
 // nothing left to remember.
-// A 401 on a request that used a store-resolved session is grounds to
-// re-read the store on the NEXT invocation (the session may have rotated to
-// a newer generation since); an env-only 401 leaves the cache alone, since
-// re-reading an unconfigured/unrelated store would not help. See
+// A 401 on a request marks WHICHEVER candidate produced the cookie (shared
+// namespace, the 'david' account namespace, or the static env value)
+// rejected for 30 minutes, so the next resolution tries the next candidate
+// in order instead of re-deriving the same bad one. See
 // notifyParaformSessionRejected() in api/_lib/paraform-session-store.mjs.
 // This never retries inside the current request — only classifyThrottle's
 // existing ladder below does that.
