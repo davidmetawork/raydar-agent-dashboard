@@ -38,6 +38,10 @@ export {
   storeConfigured,
 };
 
+export function resolveInboxParaformSession() {
+  return ensureParaformSession({ timeoutMs: INBOX_SESSION_TIMEOUT_MS });
+}
+
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
 export const INBOX_SEQUENCE_SNAPSHOTS_KEY = "inbox:v3:sequences";
 export const INBOX_CATALOG_KEY = "inbox:v3:catalog";
@@ -48,6 +52,10 @@ export const INBOX_FANOUT_CONCURRENCY = 3;
 export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
 export const INBOX_SYNC_BATCH_SIZE = 18;
+// A hung n8n store must not eat the sync/manual-sync function budget (their
+// build budgets start after this). On timeout this one request falls back to
+// the env seal and the still-running store read warms the cache for the next.
+export const INBOX_SESSION_TIMEOUT_MS = 8_000;
 export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
 // HGETALL can exceed the KV response cap once every Inbox shard is seeded.
 // Keep each HSCAN page small and its complete read inside the broker's 38s KV

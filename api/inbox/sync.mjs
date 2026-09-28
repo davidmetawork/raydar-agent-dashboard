@@ -3,10 +3,10 @@ import {
   assembleInboxSnapshotFeed,
   buildInboxRefresh,
   cors,
-  ensureParaformSession,
   readInboxSnapshotState,
   releaseInboxSyncLock,
   requireInboxAuth,
+  resolveInboxParaformSession,
   writeInboxRefreshState,
 } from "./_lib/core.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
@@ -21,7 +21,7 @@ export function createInboxSyncHandler({
   releaseLock = releaseInboxSyncLock,
   assembleFeed = assembleInboxSnapshotFeed,
   pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
-  ensureSession = ensureParaformSession,
+  ensureSession = resolveInboxParaformSession,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;

@@ -3,12 +3,12 @@ import {
   assembleInboxSnapshotFeed,
   buildInboxRefresh,
   cors,
-  ensureParaformSession,
   INBOX_SYNC_BATCH_SIZE,
   inboxTrpcGet,
   readInboxSnapshotState,
   releaseInboxSyncLock,
   requireInboxAuth,
+  resolveInboxParaformSession,
   writeInboxRefreshState,
 } from "./_lib/core.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
@@ -138,7 +138,7 @@ export function createManualInboxSyncHandler({
   assembleFeed = assembleInboxSnapshotFeed,
   pacedGetFactory = createPacedManualInboxGet,
   now = () => new Date(),
-  ensureSession = ensureParaformSession,
+  ensureSession = resolveInboxParaformSession,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -206,7 +206,9 @@ export function createManualInboxSyncHandler({
         get: pacedGet,
         concurrency: 1,
         batchSize: INBOX_SYNC_BATCH_SIZE,
-        budgetMs: 110_000,
+        // 110s from handler start, so time spent resolving the session and
+        // proving the pause cannot push the run past maxDuration (120s).
+        budgetMs: Math.max(1_000, 110_000 - (now().getTime() - nowMs)),
         forceRefreshAfterMs: runStartedAtMs,
       });
       const pauseAfterReads = await pauseState()
