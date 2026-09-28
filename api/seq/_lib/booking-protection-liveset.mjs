@@ -82,6 +82,14 @@ export function liveSetUsable(liveSet, now = Date.now(), maxAgeMs = LIVESET_MAX_
  * cron, tests) control exactly how — and how slowly — Paraform gets called;
  * this function itself makes no assumption about pacing beyond calling
  * `sleepBetweenSequences` once per sequence walked.
+ *
+ * `deadlineAt` (epoch ms, optional): past it, no further sequence is started
+ * and the build throws BOOKING_LIVESET_DEADLINE. A partial index is never
+ * returned for publishing: a booking checked against one would be dropped
+ * from the queue as "no match" for any sequence the walk never reached,
+ * while an unusable index leaves it queued. The point is a loud failure the
+ * route can record and alert on, before the platform kills the function
+ * silently at its maxDuration.
  */
 export async function buildLiveSet({
   now = Date.now(),
@@ -90,6 +98,8 @@ export async function buildLiveSet({
   keys = seqKeys(),
   coldExclusionPolicy = parseBookingStopColdExclusions(),
   sleepBetweenSequences = async () => {},
+  deadlineAt = null,
+  clock = () => Date.now(),
 } = {}) {
   if (typeof listSequences !== "function") {
     const error = new Error("BOOKING_STOP_LITE_LISTER_REQUIRED");
@@ -118,9 +128,16 @@ export async function buildLiveSet({
   const errors = [];
   let leadsIndexed = 0;
   let first = true;
+  let walked = 0;
   for (const seq of candidates) {
+    if (Number.isFinite(deadlineAt) && clock() >= deadlineAt) {
+      const error = new Error(`BOOKING_LIVESET_DEADLINE: walked ${walked} of ${candidates.length} sequences`);
+      error.code = "BOOKING_LIVESET_DEADLINE";
+      throw error;
+    }
     if (!first) await sleepBetweenSequences();
     first = false;
+    walked++;
     let membership;
     try {
       membership = await membershipLoader(seq.id);

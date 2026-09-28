@@ -16,6 +16,8 @@ import {
   pacedTrpcClient,
   PACE_DEFAULT_BACKOFF_MS,
   PACE_MIN_INTERVAL_MS,
+  sessionFingerprint,
+  __resetPacerSessionMemoryForTests,
 } from "../api/seq/_lib/booking-protection-pace.mjs";
 import {
   ensureParaformSession,
@@ -45,9 +47,13 @@ const unauthorized = (retryAfterSeconds) => new Response(null, {
 });
 
 // A process whose resolver settled on the shared store session, with a stub
-// Paraform behind `answer(cookie, url, sent)`. Every Paraform request is
+// Paraform behind `answer(cookie, row, harness)`. Every Paraform request is
 // recorded with the pacer's clock time. n8n reads answer from `rows`.
-async function withStoreSession({ rows, answer }, run) {
+// `freshProcess()` drops everything a new serverless instance would not
+// have (the store cache and parks, the pacer's in-process memory) while the
+// KV state survives, and re-resolves the store.
+async function withStoreSession(options, run) {
+  const { answer, saveState = null } = options;
   const env = {
     N8N_BASE_URL: N8N,
     N8N_API_KEY: "test-n8n-key",
@@ -66,7 +72,9 @@ async function withStoreSession({ rows, answer }, run) {
   const sent = [];
   const makePacer = () => createPacer({
     loadState: async () => state,
-    saveState: async (value) => { state = value; },
+    saveState: saveState
+      ? async (value) => { state = await saveState(value, state); }
+      : async (value) => { state = value; },
     incrementCount: async (day) => { counted.push(day); },
     now: () => clockMs,
     sleep: async (ms) => { clockMs += ms; },
@@ -78,12 +86,19 @@ async function withStoreSession({ rows, answer }, run) {
     sent,
     counted,
     now: () => clockMs,
+    advance: (ms) => { clockMs += ms; },
     state: () => state,
+    freshProcess: async () => {
+      __resetParaformSessionStateForTests();
+      __resetSessionExpiryChecksForTests();
+      __resetPacerSessionMemoryForTests();
+      return ensureParaformSession();
+    },
   };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     if (String(url).startsWith(N8N)) {
-      return Response.json({ data: rows });
+      return Response.json({ data: options.rows }); // read per call: a test may reseed
     }
     const cookie = sentCookie(init);
     const row = { url: String(url), cookie, at: clockMs, body: init?.body ? JSON.parse(init.body) : null };
@@ -92,6 +107,7 @@ async function withStoreSession({ rows, answer }, run) {
   };
   __resetParaformSessionStateForTests();
   __resetSessionExpiryChecksForTests();
+  __resetPacerSessionMemoryForTests();
   try {
     assert.equal((await ensureParaformSession()).slot, "shared");
     return await run(harness);
@@ -103,6 +119,7 @@ async function withStoreSession({ rows, answer }, run) {
     }
     __resetParaformSessionStateForTests();
     __resetSessionExpiryChecksForTests();
+    __resetPacerSessionMemoryForTests();
   }
 }
 
@@ -146,6 +163,12 @@ test("a confirmed-dead store session moves the paced read to the next store sess
     assert.equal(heldDuringProbes, true);
     assert.equal(otherInvocation, "PARAFORM_PACED_BACKOFF", "another invocation waits while the probes run");
     assert.equal(harness.state().backoffUntil, null, "a moved success clears the hold");
+    assert.deepEqual(
+      harness.state().deadSessions.map((entry) => entry.fp),
+      [sessionFingerprint(SHARED)],
+      "only a fingerprint of the dead session is kept",
+    );
+    assert.ok(!JSON.stringify(harness.state()).includes(SHARED), "never the session value");
 
     const next = await ensureParaformSession();
     assert.equal(next.slot, "account", "the process now holds the account session");
@@ -158,7 +181,7 @@ test("a throttle 401 on a live session parks nothing, sends nothing elsewhere, a
   await withStoreSession({
     rows: [...SHARED_ROWS, ...ACCOUNT_ROWS],
     answer: async (cookie, row, harness) =>
-      (harness.sent.length === 1 ? unauthorized(5) : ok([{ id: "seq_1" }])),
+      (harness.sent.length === 1 ? unauthorized() : ok([{ id: "seq_1" }])),
   }, async (harness) => {
     await assert.rejects(
       () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
@@ -232,6 +255,128 @@ test("a refusal that is not a 401 gets no probes", async () => {
       (error) => error.code === "PARAFORM_REFUSED",
     );
     assert.equal(harness.sent.length, 1);
+    assert.equal((await ensureParaformSession()).slot, "shared");
+  });
+});
+
+test("a 401 that carries Retry-After is a throttle: no probes, nothing parked", async () => {
+  await withStoreSession({
+    rows: [...SHARED_ROWS, ...ACCOUNT_ROWS],
+    answer: async () => unauthorized(120),
+  }, async (harness) => {
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_REFUSED_AUTH" && error.retryAfterMs === 120_000,
+    );
+    assert.equal(harness.sent.length, 1);
+    assert.equal(harness.state().backoffUntil, harness.now() + 120_000);
+    assert.equal((await ensureParaformSession()).slot, "shared");
+  });
+});
+
+test("a fresh invocation skips a session another invocation confirmed dead, without sending on it", async () => {
+  await withStoreSession({
+    rows: [...SHARED_ROWS, ...ACCOUNT_ROWS],
+    answer: async (cookie) => (cookie === ACCOUNT ? ok([{ id: "seq_1" }]) : unauthorized()),
+  }, async (harness) => {
+    await pacedTrpcClient(harness.pace).get(CATALOG, {});
+    const before = harness.sent.length;
+
+    // A new serverless instance: it resolves the shared slot again, and only
+    // the KV state remembers that this exact session is dead.
+    harness.advance(10 * 60 * 1000);
+    assert.equal((await harness.freshProcess()).slot, "shared");
+    const catalog = await pacedTrpcClient(harness.makePacer()).get(CATALOG, {});
+    assert.deepEqual(catalog, [{ id: "seq_1" }]);
+    assert.deepEqual(
+      harness.sent.slice(before).map((row) => row.cookie),
+      [ACCOUNT],
+      "no request and no probes on the remembered-dead session",
+    );
+  });
+});
+
+test("the memory expires with the store's 30-minute window, and a reseeded value is never skipped", async () => {
+  let rows = [...SHARED_ROWS, ...ACCOUNT_ROWS];
+  const RESEEDED = `Fe26.2${"r".repeat(70)}`;
+  await withStoreSession({
+    get rows() { return rows; },
+    answer: async (cookie) => (cookie === SHARED ? unauthorized() : ok([{ id: "seq_1" }])),
+  }, async (harness) => {
+    await pacedTrpcClient(harness.pace).get(CATALOG, {});
+
+    // Reseeded ten minutes later: a new value in the shared slot.
+    rows = [
+      { key: "PARAFORM_SESSION_COOKIE_G2_1", value: RESEEDED },
+      { key: "PARAFORM_SESSION_COOKIE_G2_PARTS", value: "1" },
+      ...ACCOUNT_ROWS,
+    ];
+    harness.advance(10 * 60 * 1000);
+    await harness.freshProcess();
+    let before = harness.sent.length;
+    await pacedTrpcClient(harness.makePacer()).get(CATALOG, {});
+    assert.deepEqual(harness.sent.slice(before).map((row) => row.cookie), [RESEEDED]);
+
+    // The old value again after 31 minutes: tested afresh, not skipped.
+    rows = [...SHARED_ROWS, ...ACCOUNT_ROWS];
+    harness.advance(31 * 60 * 1000);
+    await harness.freshProcess();
+    before = harness.sent.length;
+    await pacedTrpcClient(harness.makePacer()).get(CATALOG, {});
+    assert.equal(harness.sent[before].cookie, SHARED, "the expired memory no longer skips it");
+  });
+});
+
+test("a call never moves onto a session already confirmed dead, even when the resolver falls back to it", async () => {
+  // Only the shared slot is in the store and the env seal is dead too. After
+  // the shared session is confirmed dead the process falls back to the env
+  // seal; when that is confirmed dead as well, the resolver's all-parked
+  // fallback hands back the shared session. The pacer must not send it.
+  await withStoreSession({
+    rows: SHARED_ROWS,
+    answer: async () => unauthorized(),
+  }, async (harness) => {
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_SESSION_DEAD",
+    );
+    harness.advance(PACE_DEFAULT_BACKOFF_MS + 1);
+    const before = harness.sent.length;
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_SESSION_DEAD",
+    );
+    const second = harness.sent.slice(before).map((row) => row.cookie);
+    assert.ok(second.length > 0 && second.every((cookie) => cookie === ENV_SEAL),
+      "the process's own env fallback is tested, and the dead shared session is not re-sent");
+
+    harness.advance(PACE_DEFAULT_BACKOFF_MS + 1);
+    const third = harness.sent.length;
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_SESSION_DEAD",
+    );
+    assert.equal(harness.sent.length, third, "with every session known dead, nothing is sent");
+  });
+});
+
+test("if the hold cannot be written, no probes run and the call backs off as before", async () => {
+  let writes = 0;
+  await withStoreSession({
+    rows: [...SHARED_ROWS, ...ACCOUNT_ROWS],
+    answer: async () => unauthorized(),
+    saveState: async (value) => {
+      writes += 1;
+      if (writes === 1) throw new Error("kv down");
+      return value;
+    },
+  }, async (harness) => {
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_REFUSED_AUTH",
+    );
+    assert.equal(harness.sent.length, 1, "no probes without the hold");
+    assert.equal(harness.state().backoffUntil, harness.now() + PACE_DEFAULT_BACKOFF_MS);
     assert.equal((await ensureParaformSession()).slot, "shared");
   });
 });

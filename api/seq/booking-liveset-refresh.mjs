@@ -29,6 +29,13 @@ import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.
 
 export const config = { maxDuration: 280 };
 
+// Stop starting new sequence walks well before maxDuration, so an overrun is
+// recorded and alerted instead of being killed silently. A dead first
+// session costs about 70 s of paced probes before the pacer moves on
+// (ESTIMATED from the configured delays), which is what made this worth
+// guarding.
+export const LIVESET_REFRESH_BUDGET_MS = 240_000;
+
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;
 
 function operatorAuthorized(header, key) {
@@ -47,7 +54,7 @@ async function recordAttempt(status, extra = {}) {
   }, 3 * 24 * 3600).catch(() => {});
 }
 
-async function runRefresh({ triggeredBy }) {
+async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
   await ensureParaformSession();
   if (!hasCookie()) {
     await recordAttempt("failure", { error: "no_cookie" });
@@ -73,10 +80,12 @@ async function runRefresh({ triggeredBy }) {
     listSequences,
     membershipLoader,
     sleepBetweenSequences,
+    deadlineAt: startedAt + LIVESET_REFRESH_BUDGET_MS,
   });
   await publishLiveSet(liveSet);
   await recordAttempt("success", {
     triggeredBy,
+    durationMs: Date.now() - startedAt,
     catalogSequences: liveSet.catalogSequences,
     candidateSequences: liveSet.candidateSequences,
     sequencesWithActiveLeads: liveSet.sequencesWithActiveLeads,
@@ -111,8 +120,9 @@ async function handleBookingLivesetRefresh(req, res) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
 
+  const startedAt = Date.now();
   try {
-    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator" });
+    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator", startedAt });
     if (!result.ok && (await shouldAlert(`liveset-refresh-${result.error}`, 6 * 3600))) {
       await notifySlack(`:rotating_light: Booking live-set refresh could not run (${result.error}). The worker will keep serving the last published index until it ages past ${Math.round((36 * 3600))}s.`).catch(() => {});
     }
@@ -122,7 +132,11 @@ async function handleBookingLivesetRefresh(req, res) {
     return res.status(200).json({ ...result, ranAt: new Date().toISOString() });
   } catch (error) {
     const code = error?.code === "PARAFORM_PACED_BACKOFF" ? "paced_backoff" : "error";
-    await recordAttempt("failure", { error: code });
+    await recordAttempt("failure", {
+      error: code,
+      reason: String(error?.code || "").slice(0, 60) || null,
+      durationMs: Date.now() - startedAt,
+    });
     if (await shouldAlert(`liveset-refresh-${code}`, 6 * 3600)) {
       await notifySlack(`:rotating_light: Booking live-set refresh failed: ${String(error?.message || error).slice(0, 160)}`).catch(() => {});
     }

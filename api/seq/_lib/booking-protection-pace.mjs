@@ -25,16 +25,32 @@
 // throttle verdict keeps the old behaviour exactly: nothing is parked and
 // the pacer backs off. Only a confirmed-dead session is parked (by
 // unauthorizedRead itself), and then the request gets ONE attempt on the
-// next store session, never on the static env seal. One attempt per
-// session, at most two sessions per call, never more than one in flight.
+// next store session; a call never moves onto the static env seal. One
+// attempt per session, at most two sessions per call, never more than one
+// in flight. A 401 that carries Retry-After is Paraform saying "throttled",
+// so it gets no probes.
+//
+// Each serverless instance would otherwise re-learn a dead session on its
+// own (the store's park is in-process), paying about a minute of probes per
+// cold worker or catch-up tick. So a confirmed-dead session is remembered for
+// the store's own 30-minute rejection window, in this process and in the
+// pacer's KV state, as a short SHA-256 fingerprint (never the value). A call
+// that holds a remembered-dead session skips it without sending anything.
+// The fingerprint is of the exact value, so a reseeded or renewed session is
+// never skipped.
+import { createHash } from "node:crypto";
 import {
   BASE,
   ensureParaformSession,
+  notifyParaformSessionRejected,
   paraformCookieValue,
   sessionHeaders,
   unauthorizedRead,
 } from "./core.mjs";
-import { resolvedParaformSession } from "../../_lib/paraform-session-store.mjs";
+import {
+  PARAFORM_SESSION_REJECTION_TTL_MS,
+  resolvedParaformSession,
+} from "../../_lib/paraform-session-store.mjs";
 import {
   LITE_KEYS,
   kvGet,
@@ -67,6 +83,32 @@ function heldParaformSession() {
 async function nextParaformSession() {
   await ensureParaformSession();
   return resolvedParaformSession();
+}
+
+export function sessionFingerprint(cookie) {
+  return createHash("sha256").update(String(cookie ?? "")).digest("hex").slice(0, 16);
+}
+
+// fingerprint -> epoch ms until which that exact session is known dead.
+let confirmedDead = new Map();
+
+export function __resetPacerSessionMemoryForTests() {
+  confirmedDead = new Map();
+}
+
+// The union of this process's memory and the KV state's, minus expired ones.
+function liveDeadSessions(state, nowMs) {
+  const merged = new Map();
+  const entries = [
+    ...(Array.isArray(state?.deadSessions) ? state.deadSessions : []),
+    ...[...confirmedDead].map(([fp, until]) => ({ fp, until })),
+  ];
+  for (const entry of entries) {
+    if (typeof entry?.fp !== "string" || !Number.isFinite(entry?.until)) continue;
+    if (entry.until <= nowMs) continue;
+    merged.set(entry.fp, Math.max(entry.until, merged.get(entry.fp) || 0));
+  }
+  return merged;
 }
 
 /**
@@ -102,6 +144,25 @@ export function createPacer({
       error.retryAt = state.backoffUntil;
       throw error;
     }
+    const dead = liveDeadSessions(state, nowMs);
+    const isDead = (cookie) => dead.has(sessionFingerprint(cookie));
+    const markDead = (cookie) => {
+      const until = now() + PARAFORM_SESSION_REJECTION_TTL_MS;
+      const fp = sessionFingerprint(cookie);
+      dead.set(fp, until);
+      confirmedDead.set(fp, until);
+    };
+    // Every write carries the remembered-dead fingerprints forward. A KV
+    // failure here only loses the memory; the next call re-confirms.
+    const persist = (value) => saveState({
+      ...value,
+      deadSessions: [...dead].map(([fp, until]) => ({ fp, until })),
+    });
+    const sessionDead = () => Object.assign(new Error("PARAFORM_SESSION_DEAD"), {
+      code: "PARAFORM_SESSION_DEAD",
+      status: 401,
+    });
+
     // Every Paraform request this call makes, the confirming probes
     // included, goes through send(): at least minIntervalMs after the last
     // one ended, and counted.
@@ -119,41 +180,61 @@ export function createPacer({
       }
     }
 
-    const held = heldSession();
+    // A store session other than `from` that is not known dead, or null.
+    // Never the env seal.
+    async function moveFrom(from) {
+      const next = await nextSession();
+      if (next && next.slot !== "env" && next.value && next.value !== from && !isDead(next.value)) {
+        return next;
+      }
+      return null;
+    }
+
+    let held = heldSession();
+    if (isDead(held.value)) {
+      // Confirmed dead within the last 30 minutes, by this process or
+      // another invocation: park it here too and skip it without a request.
+      notifyParaformSessionRejected({ cookie: held.value });
+      const next = await moveFrom(held.value);
+      if (!next) {
+        log(`booking-protection pacer: the ${held.slot} Paraform session was confirmed dead recently and no other store session is available`);
+        throw sessionDead();
+      }
+      log(`booking-protection pacer: skipping the ${held.slot} Paraform session (confirmed dead recently); using the ${next.slot} session`);
+      held = next;
+    }
+
     let failure;
     try {
       const result = await send(() => fn(held.value));
-      await saveState({ lastRequestAt, backoffUntil: null });
+      await persist({ lastRequestAt, backoffUntil: null });
       return result;
     } catch (error) {
       failure = error;
     }
 
-    if (failure?.code === "PARAFORM_REFUSED_AUTH") {
+    if (failure?.code === "PARAFORM_REFUSED_AUTH" && !(failure.retryAfterMs > 0)) {
       let moved = null;
       try {
-        // Hold other invocations off while the probes run.
-        await saveState({ lastRequestAt, backoffUntil: now() + confirmHoldMs });
+        // Hold other invocations off while the probes run. If this write
+        // fails, no probes run and the call backs off exactly as before.
+        await persist({ lastRequestAt, backoffUntil: now() + confirmHoldMs });
         const verdict = await confirmRefusal(
           held.value,
           (url, init) => send(() => probeFetch(url, init)),
         );
         if (verdict?.code === "AUTH_EXPIRED") {
           // unauthorizedRead has already parked the slot, if the process still
-          // held this cookie. Move only onto a different STORE session.
-          const next = await nextSession();
-          if (next && next.slot !== "env" && next.value && next.value !== held.value) {
-            moved = next;
-          } else {
+          // held this cookie.
+          markDead(held.value);
+          moved = await moveFrom(held.value);
+          if (!moved) {
             log(`booking-protection pacer: the ${held.slot} Paraform session is confirmed dead and no other store session is available`);
             // Not AUTH_EXPIRED: applyDecisions answers that code with its own
             // unpaced probes and aborts the whole batch. This is recorded as
             // one pause error, the job stays queued, and the refresh alert
             // names it.
-            failure = Object.assign(new Error("PARAFORM_SESSION_DEAD"), {
-              code: "PARAFORM_SESSION_DEAD",
-              status: 401,
-            });
+            failure = sessionDead();
           }
         }
       } catch {
@@ -164,7 +245,7 @@ export function createPacer({
         log(`booking-protection pacer: the ${held.slot} Paraform session is confirmed dead; one attempt on the ${moved.slot} session`);
         try {
           const result = await send(() => fn(moved.value));
-          await saveState({ lastRequestAt, backoffUntil: null });
+          await persist({ lastRequestAt, backoffUntil: null });
           return result;
         } catch (error) {
           failure = error; // no second confirmation in the same call
@@ -176,7 +257,7 @@ export function createPacer({
       ? failure.retryAfterMs
       : 0;
     const backoffUntil = now() + Math.max(retryAfterMs, defaultBackoffMs);
-    await saveState({ lastRequestAt: now(), backoffUntil });
+    await persist({ lastRequestAt: now(), backoffUntil });
     throw failure;
   }
 

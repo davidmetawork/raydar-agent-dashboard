@@ -91,6 +91,29 @@ test("buildLiveSet paces between sequences but not before the first one", async 
   assert.equal(sleeps, 1, "two candidate sequences -> one gap between them");
 });
 
+test("buildLiveSet stops starting sequences past its deadline and fails loudly instead of returning a partial index", async () => {
+  let clockMs = 1_000;
+  const walked = [];
+  await assert.rejects(
+    () => buildLiveSet({
+      listSequences: async () => CATALOG,
+      membershipLoader: async (id) => { walked.push(id); clockMs += 5_000; return { leads: [lead()] }; },
+      deadlineAt: 4_000,
+      clock: () => clockMs,
+    }),
+    (error) => error.code === "BOOKING_LIVESET_DEADLINE" && /walked 1 of 2 sequences/.test(error.message),
+  );
+  assert.equal(walked.length, 1, "the second walk was never started");
+
+  const liveSet = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async () => ({ leads: [lead()] }),
+    deadlineAt: 10_000,
+    clock: () => 1_000,
+  });
+  assert.equal(liveSet.candidateSequences, 2, "inside the deadline nothing changes");
+});
+
 test("liveSetUsable enforces schema, shape, and the max-age ceiling", () => {
   const now = Date.parse("2026-09-26T12:00:00.000Z");
   const fresh = { schema: LIVESET_SCHEMA, byEmail: {}, builtAt: new Date(now - 1000).toISOString() };

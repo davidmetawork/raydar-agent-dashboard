@@ -20,7 +20,10 @@ import {
   createPacer,
   pacedApplyDecisionsOverrides,
   PACE_MIN_INTERVAL_MS,
+  __resetPacerSessionMemoryForTests,
 } from "../api/seq/_lib/booking-protection-pace.mjs";
+import { __resetSessionExpiryChecksForTests } from "../api/seq/_lib/core.mjs";
+import { __resetParaformSessionStateForTests } from "../api/_lib/paraform-session-store.mjs";
 
 const SECRET = "raydar-booking-test-secret-that-is-long-enough";
 const NOW_MS = Date.parse("2026-07-29T18:00:00.000Z");
@@ -314,13 +317,7 @@ test("the real applyDecisions default path, driven through pacedApplyDecisionsOv
 
 test("the real applyDecisions default path never retries hard on a refusal — it costs one request and leaves the job queued", async () => {
   const originalFetch = global.fetch;
-  const delays = {
-    PARAFORM_THROTTLE_DELAYS_MS: process.env.PARAFORM_THROTTLE_DELAYS_MS,
-    PARAFORM_PROBE_DELAY_MS: process.env.PARAFORM_PROBE_DELAY_MS,
-  };
-  process.env.PARAFORM_THROTTLE_DELAYS_MS = "0,0,0";
-  process.env.PARAFORM_PROBE_DELAY_MS = "0";
-  const requests = [];
+  let fetchCalls = 0;
   const pace = createPacer({
     loadState: async () => null,
     saveState: async () => {},
@@ -328,8 +325,9 @@ test("the real applyDecisions default path never retries hard on a refusal — i
     now: () => 3_000_000,
     sleep: async () => {},
   });
-  global.fetch = async (url) => {
-    requests.push(String(url));
+  // Retry-After says "throttled", so the pacer runs no session probes.
+  global.fetch = async () => {
+    fetchCalls++;
     return new Response(null, { status: 401, headers: { "retry-after": "30" } });
   };
   try {
@@ -340,21 +338,70 @@ test("the real applyDecisions default path never retries hard on a refusal — i
     const result = await drainPendingBookings(deps);
     assert.equal(result.paused, 0);
     assert.equal(result.pauseErrors.length, 1);
+    assert.equal(fetchCalls, 1, "single-shot: a refusal is not retried in-process");
+    assert.deepEqual(deps._removed, [], "an unresolved pause stays queued for the next, paced tick");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("a pause on a confirmed-dead session with nowhere to move is one pause error, not an aborted drain", async () => {
+  // applyDecisions answers AUTH_EXPIRED with its own unpaced probes and
+  // throws out of the whole batch. The pacer must report a dead session with
+  // no other store session as PARAFORM_SESSION_DEAD instead.
+  const originalFetch = global.fetch;
+  const delays = {
+    PARAFORM_THROTTLE_DELAYS_MS: process.env.PARAFORM_THROTTLE_DELAYS_MS,
+    PARAFORM_PROBE_DELAY_MS: process.env.PARAFORM_PROBE_DELAY_MS,
+  };
+  process.env.PARAFORM_THROTTLE_DELAYS_MS = "0,0,0";
+  process.env.PARAFORM_PROBE_DELAY_MS = "0";
+  __resetParaformSessionStateForTests();
+  __resetSessionExpiryChecksForTests();
+  __resetPacerSessionMemoryForTests();
+  const requests = [];
+  const pace = createPacer({
+    loadState: async () => null,
+    saveState: async () => {},
+    incrementCount: async () => {},
+    now: () => 3_000_000,
+    sleep: async () => {},
+    log: () => {},
+  });
+  global.fetch = async (url) => {
+    requests.push(String(url));
+    return new Response(null, { status: 401 });
+  };
+  try {
+    const deps = baseDeps({
+      applyDecisionsImpl: applyDecisions,
+      applyDecisionsOverrides: pacedApplyDecisionsOverrides(pace),
+    });
+    const result = await drainPendingBookings(deps);
+    assert.equal(result.paused, 0);
+    assert.deepEqual(
+      result.pauseErrors.map((error) => error.reason),
+      ["PARAFORM_SESSION_DEAD"],
+    );
     assert.equal(
       requests.filter((url) => url.includes("updateCandidatePauseStatus")).length,
       1,
-      "single-shot: the refused pause is not retried in-process",
+      "the pause itself is sent once",
     );
     assert.ok(
-      requests.slice(1).every((url) => url.includes("getListOfCampaignsOptimized")),
-      "the only other requests are the serial probes that tell a throttle from a dead session",
+      requests.filter((url) => !url.includes("updateCandidatePauseStatus"))
+        .every((url) => url.includes("getListOfCampaignsOptimized")),
+      "everything else is the pacer's serial probes, none from applyDecisions",
     );
-    assert.deepEqual(deps._removed, [], "an unresolved pause stays queued for the next, paced tick");
+    assert.deepEqual(deps._removed, [], "the job stays queued");
   } finally {
     global.fetch = originalFetch;
     for (const [key, value] of Object.entries(delays)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    __resetParaformSessionStateForTests();
+    __resetSessionExpiryChecksForTests();
+    __resetPacerSessionMemoryForTests();
   }
 });
