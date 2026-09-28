@@ -132,7 +132,9 @@ export function pendingOutreachReplies(states = []) {
     pending.push({
       candidateUserId,
       eventId,
-      threadId: str(state?.threadId) || null,
+      // A reply to a Mailroom (SendGrid) email lives in a Gmail thread the
+      // outreach worker records as mailroomConversation.replyThreadId.
+      threadId: str(state?.threadId) || str(state?.mailroomConversation?.replyThreadId) || null,
       verdict: str(state?.intentVerdict) || null,
       candidateName: str(state?.candidateName),
       candidateEmail: str(state?.candidateEmail),
