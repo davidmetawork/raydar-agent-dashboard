@@ -717,7 +717,7 @@ async function syncFeed(){
       const response=await fetch("/api/inbox/sync",{
         method:"POST",
         headers:{...authHeaders(),"content-type":"application/json"},
-        body:"{}",
+        body:JSON.stringify({trigger:"refresh_now"}),
         cache:"no-store",
       });
       const data=await response.json().catch(()=>({}));
