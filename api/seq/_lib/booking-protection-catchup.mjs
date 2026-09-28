@@ -106,7 +106,13 @@ async function reconcileIndex(index, {
     // Same rule as the worker: a "no match" against an index that could not
     // read a sequence is not final, so the booking is held, not marked
     // processed (which would skip it for 60 days).
-    const step = holdAfterMatch({ liveSet, hold: priorHold, decisions: matched, now });
+    const step = holdAfterMatch({
+      liveSet,
+      hold: priorHold,
+      decisions: matched,
+      now,
+      recordApplied: Boolean(apply),
+    });
     // A lead the worker already paused for this booking (after this index
     // was built) is still "active" in the index; do not pause it twice.
     const decisions = await dropAlreadyPaused(step.apply, {

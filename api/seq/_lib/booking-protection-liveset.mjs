@@ -270,7 +270,15 @@ export function liveSetUnverifiedSequences(liveSet) {
  * Returns { apply: decisions[], hold: {checkedAgainst, unverifiedSequenceIds,
  * heldSince, appliedCcuIds} | null }. `hold: null` means resolved.
  */
-export function holdAfterMatch({ liveSet, hold = null, decisions = [], now = Date.now() } = {}) {
+export function holdAfterMatch({
+  liveSet,
+  hold = null,
+  decisions = [],
+  now = Date.now(),
+  // False on a dry run (BOOKING_STOP_APPLY=0): nothing is sent, so nothing
+  // may be recorded as handled, or switching apply on would skip those leads.
+  recordApplied = true,
+} = {}) {
   const current = liveSetUnverifiedSequences(liveSet).map((s) => s.id);
   const prior = Array.isArray(hold?.unverifiedSequenceIds) ? hold.unverifiedSequenceIds : null;
   const handled = new Set(Array.isArray(hold?.appliedCcuIds) ? hold.appliedCcuIds : []);
@@ -289,7 +297,10 @@ export function holdAfterMatch({ liveSet, hold = null, decisions = [], now = Dat
         checkedAgainst: liveSet?.builtAt ?? null,
         unverifiedSequenceIds: pending,
         heldSince: hold?.heldSince || new Date(now).toISOString(),
-        appliedCcuIds: [...new Set([...handled, ...apply.map((d) => d.ccuId).filter(Boolean)])],
+        appliedCcuIds: [...new Set([
+          ...handled,
+          ...(recordApplied ? apply.map((d) => d.ccuId).filter(Boolean) : []),
+        ])],
       }
       : null,
   };

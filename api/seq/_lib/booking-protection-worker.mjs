@@ -49,6 +49,10 @@ export async function drainPendingBookings({
   apply = process.env.BOOKING_STOP_APPLY !== "0",
   maxJobsPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_BUDGET || 25),
   maxScanPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_SCAN_BUDGET || 500),
+  // Stop starting jobs well inside the route's 120 s maxDuration, so the
+  // alert pass after the drain always runs.
+  stopAfterMs = 80_000,
+  clock = () => Date.now(),
   applyDecisionsOverrides = {},
 } = {}) {
   const out = {
@@ -85,11 +89,15 @@ export async function drainPendingBookings({
   // costs only KV reads and does not spend it, so a backlog of held jobs,
   // skipped or re-checked, can never starve new bookings queued behind them.
   // maxScanPerRun bounds the KV reads.
+  // A garbage cap must not lift the limit: a non-number job cap processes
+  // nothing (as slice(0, NaN) did before), and the scan cap falls back.
+  const jobCap = Number.isFinite(maxJobsPerRun) ? maxJobsPerRun : 0;
+  const scanCap = Number.isFinite(maxScanPerRun) && maxScanPerRun > 0 ? maxScanPerRun : 500;
+  const startedAt = clock();
   let budget = 0;
   let scanned = 0;
   for (const eventId of eventIds) {
-    if (budget >= maxJobsPerRun || scanned >= maxScanPerRun) break;
-    scanned++;
+    if (budget >= jobCap || scanned >= scanCap || clock() - startedAt >= stopAfterMs) break;
     let job;
     try {
       job = await readJob(eventId);
@@ -101,9 +109,13 @@ export async function drainPendingBookings({
     if (!job) { out.missing++; await removeJob(eventId); continue; }
 
     if (out.liveSetReady && job.hold && job.hold.checkedAgainst === liveSet.builtAt) {
+      // Not counted against the scan cap either (only the clock bounds these
+      // one-read skips), so a held backlog larger than the cap cannot hide a
+      // new booking behind it.
       out.held++;
       continue;
     }
+    scanned++;
 
     // The hook durably records a booking.cancelled/rescheduled event under
     // K.raydarCancel(bookingId) (raydar-booking-hook.mjs) but a job for the
@@ -144,7 +156,13 @@ export async function drainPendingBookings({
     // Against an index that could not read every protected sequence, "no
     // match" is not final: the booking is held for those sequences instead of
     // being removed. Decisions from the sequences it did read apply now.
-    const step = holdAfterMatch({ liveSet, hold: job.hold || null, decisions: matchedDecisions, now });
+    const step = holdAfterMatch({
+      liveSet,
+      hold: job.hold || null,
+      decisions: matchedDecisions,
+      now,
+      recordApplied: Boolean(apply),
+    });
     const decisions = await dropAlreadyPaused(step.apply, { liveSet, bookedAtMs, read: readPausedRecord });
 
     let applied = { paused: 0, pauseErrors: [] };

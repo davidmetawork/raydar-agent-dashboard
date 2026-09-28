@@ -71,6 +71,10 @@ function baseDeps(overrides = {}) {
     loadLive: async () => usableLiveSet(),
     applyDecisionsImpl: async () => ({ paused: 1, pauseErrors: [] }),
     writeProof: async (key, value) => { writes.push({ key, value }); return "OK"; },
+    // Never the real KV readers: a dev shell with KV_REST_API_* exported
+    // would otherwise read production.
+    readCancelRecord: async () => null,
+    readPausedRecord: async () => null,
     pauseCanaryFingerprint: CANARY_FINGERPRINT,
     webhookSecret: SECRET,
     apply: true,
@@ -649,4 +653,75 @@ test("alert texts name sequences, never candidates, and the held threshold defau
   ]);
   assert.match(refresh, /could not fully read 2 sequence\(s\): No Show - Agent Call \(PARAFORM_HTTP_401\), b \(short_read:3\/5\)/);
   assert.match(refresh, /held in the queue, not dropped/);
+});
+
+test("the scan cap bounds work per tick, but held skips against the same index do not use it up", async () => {
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2"], heldSince: L1_BUILT, appliedCcuIds: [] };
+  const ids = ["h1", "h2", "h3", "n1", "n2", "n3"];
+  const deps = holdingDeps({
+    listPending: async () => ids,
+    readJob: async (id) => (id.startsWith("h") ? job({ eventId: id, hold }) : job({ eventId: id, email: `${id}@example.com` })),
+    loadLive: async () => incompleteLiveSet({}, ["seq_2"]),
+    maxScanPerRun: 2,
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.processed, 2, "two new bookings checked, the cap reached");
+  assert.deepEqual(deps._holds.map((h) => h.eventId), ["n1", "n2"], "the three held skips did not spend it");
+});
+
+test("the drain stops starting jobs once its time budget is spent", async () => {
+  let clockMs = 0;
+  const deps = baseDeps({
+    listPending: async () => ["a", "b", "c"],
+    readJob: async (id) => { clockMs += 50_000; return job({ eventId: id }); },
+    stopAfterMs: 80_000,
+    clock: () => clockMs,
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.processed, 2, "the third job is left for the next tick");
+  assert.deepEqual(deps._removed, ["a", "b"]);
+});
+
+test("a garbage cap never lifts the limit", async () => {
+  const noJobs = baseDeps({ maxJobsPerRun: Number("nonsense") });
+  const none = await drainPendingBookings(noJobs);
+  assert.equal(none.processed, 0, "a non-number job cap processes nothing, as before");
+
+  const scanFallback = baseDeps({
+    listPending: async () => ["a", "b"],
+    readJob: async (id) => job({ eventId: id }),
+    maxScanPerRun: Number("nonsense"),
+  });
+  const both = await drainPendingBookings(scanFallback);
+  assert.equal(both.processed, 2, "a non-number scan cap falls back to the default");
+});
+
+test("a dry run holds the booking but records nothing as handled", async () => {
+  const deps = holdingDeps({
+    apply: false,
+    loadLive: async () => incompleteLiveSet({ "candidate@example.com": [entry()] }, ["seq_2"]),
+  });
+  const result = await drainPendingBookings(deps);
+  assert.deepEqual(deps._applied, [], "nothing sent");
+  assert.equal(result.matched, 1);
+  assert.deepEqual(deps._holds[0].hold.appliedCcuIds, [], "switching apply on later still pauses ccu_1");
+});
+
+test("worker alerts: held jobs never trip the stuck alert, and each alert has its own gate", async () => {
+  const { workerAlerts } = await import("../api/seq/booking-worker.mjs");
+  const quiet = { pending: 0, processed: 0, matched: 0, paused: 0, missing: 0, unreadable: 0, pauseErrors: [], liveSetReady: true, unverifiedSequences: [] };
+  const H = 3600 * 1000;
+  const keys = (result, queue, env = {}) => workerAlerts({ result: { ...quiet, ...result }, queue, env }).map((a) => a.key);
+
+  assert.deepEqual(keys({}, { oldestUnheldAgeMs: null, oldestHeldAgeMs: 25 * H, held: 4, heldSequenceIds: ["seq_2"] }), [],
+    "a day-old hold is waiting for the next refresh, not stuck");
+  assert.deepEqual(keys({}, { oldestUnheldAgeMs: 7 * H, oldestHeldAgeMs: 27 * H, held: 4, heldSequenceIds: ["seq_2"] }),
+    ["booking-worker-stuck-pending", "booking-worker-held"]);
+  assert.deepEqual(keys({}, { oldestHeldAgeMs: 27 * H, held: 1 }, { BOOKING_STOP_LITE_HOLD_ALERT_HOURS: "30" }), []);
+  assert.deepEqual(keys({ missing: 2 }, null), ["booking-worker-missing"]);
+  assert.deepEqual(keys({ unreadable: 3 }, { unreadable: 3 }), ["booking-worker-unreadable"], "a store that will not return records is not silent");
+  assert.deepEqual(keys({ unreadable: 1 }, { unreadable: 0 }), [], "a one-off blip in one pass stays quiet");
+  assert.deepEqual(keys({ pending: 5, liveSetReady: false }, null), ["booking-worker-liveset-stale"]);
+  const paused = workerAlerts({ result: { ...quiet, paused: 1, matched: 1, processed: 1 }, queue: null, env: {} });
+  assert.deepEqual(paused.map((a) => [a.key, a.dedupeSeconds]), [["booking-worker-paused", null]], "a pause is always reported");
 });
