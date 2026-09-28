@@ -157,6 +157,10 @@
   },
   "crons": [
     {
+      "path": "/api/inbox/sync",
+      "schedule": "0 0,14,19 * * *"
+    },
+    {
       "path": "/api/seq/release",
       "schedule": "0 16 * * *"
     },

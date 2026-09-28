@@ -153,6 +153,38 @@ export const INBOX_SYNC_BATCH_SIZE = 18;
 // the env seal and the still-running store read warms the cache for the next.
 export const INBOX_SESSION_TIMEOUT_MS = 8_000;
 export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
+// campaigns.getRecentReplies measured 6.7s on 2026-09-28, over the 6s vendor
+// timeout, so the recent window failed on every sync. It gets its own cap.
+export const INBOX_RECENT_TIMEOUT_MS = 15_000;
+
+// ---- Scheduled, change-driven refresh (mode "changed") ----
+// The Inbox refreshes on a schedule (vercel.json, three times a day) instead of
+// re-reading every sequence older than 15 minutes whenever a page is open.
+// campaigns.getListOfCampaignsOptimized carries no reply counts, so each run
+// asks campaigns.getMetricsForSequences (the call Paraform's own Sequences
+// page makes; zod caps it at 10 ids) for every target's replies_count and
+// interested_replies. Measured 2026-09-28, both count PEOPLE, not emails, so
+// a second email from someone who already replied is found through the recent
+// window instead. Only sequences with evidence of change are re-read.
+export const INBOX_METRICS_BATCH_SIZE = 10;
+export const INBOX_CHANGED_BATCH_SIZE = 150; // bounded in practice by the build budget
+// A snapshot taken within this long of its newest reply is read once more
+// later, so a classification Paraform finishes after our read is picked up.
+export const INBOX_SETTLE_MS = 2 * 60 * 60 * 1_000;
+// When more than one recent window of emails arrived since the last verified
+// run, follow-ups may have scrolled out of it: re-read sequences with replies
+// this recent.
+export const INBOX_HOT_REPLY_MS = 7 * 24 * 60 * 60 * 1_000;
+// A target whose counts could not be read is re-read once its snapshot is this old.
+export const INBOX_UNMETERED_READ_AFTER_MS = 8 * 60 * 60 * 1_000;
+// A few of the longest-unread snapshots are re-read every run as a drift check.
+export const INBOX_ROTATION_PER_RUN = 3;
+// The UI calls a sequence stale only when neither a read nor a verified run
+// has confirmed it for longer than the longest gap between scheduled runs
+// (overnight, about 14 hours) plus slack.
+export const INBOX_SCHEDULED_STALE_MS = 16 * 60 * 60 * 1_000;
+const RECENT_WINDOW_SIZE = 20;
+const RECENT_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 // HGETALL can exceed the KV response cap once every Inbox shard is seeded.
 // Keep each HSCAN page small and its complete read inside the broker's 38s KV
 // allowance beneath the fixed 120s shared lock.
@@ -738,7 +770,23 @@ function leadCategories(inboxData, relevantLeadIds = new Set()) {
   return categories;
 }
 
-function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt) {
+function normalizeReplyMetrics(value) {
+  if (!value || typeof value !== "object") return null;
+  const replies = Number(value.replies_count);
+  const interested = Number(value.interested_replies);
+  if (!Number.isFinite(replies) || !Number.isFinite(interested)) return null;
+  return { replies_count: replies, interested_replies: interested };
+}
+
+function sameReplyMetrics(a, b) {
+  const left = normalizeReplyMetrics(a);
+  const right = normalizeReplyMetrics(b);
+  return Boolean(left && right
+    && left.replies_count === right.replies_count
+    && left.interested_replies === right.interested_replies);
+}
+
+function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt, replyMetrics = null) {
   const campaignId = stringValue(campaign?.id);
   const exactRoleId = exactCampaignRoleId(campaign);
   const exactProjectId = stringValue(campaign?.project_id);
@@ -761,6 +809,9 @@ function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt)
     exact_project_id: exactProjectId || null,
     exact_project_source: exactProjectId ? "campaign.project_id" : null,
     refreshed_at: refreshedAt,
+    // Paraform's per-sequence counts at read time: the baseline the next
+    // scheduled run compares against. Null when this read had no counts.
+    reply_metrics: normalizeReplyMetrics(replyMetrics),
     replies: isAdmittedInboxCampaign(campaign)
       ? flattenCampaignInbox(campaign, inboxData, recentByGmail)
       : [],
@@ -854,6 +905,178 @@ export function selectInboxCampaigns(
   return eligible.slice(0, limit).map(({ campaign }) => campaign);
 }
 
+function newestReplyTime(snapshot) {
+  let newest = 0;
+  for (const row of [...arrayValue(snapshot?.replies), ...arrayValue(snapshot?.submissions_replies)]) {
+    newest = Math.max(newest, rowDate(row));
+  }
+  return newest;
+}
+
+function snapshotGmailIds(snapshot) {
+  return new Set(
+    [...arrayValue(snapshot?.replies), ...arrayValue(snapshot?.submissions_replies)]
+      .map((row) => stringValue(row?.gmail_id))
+      .filter(Boolean),
+  );
+}
+
+function recentReplyTime(reply) {
+  const parsed = Date.parse(reply?.email_date || reply?.date || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Per-sequence reply counts for every target, ten ids per call (Paraform's
+ * limit). A failed batch leaves its ids out of the map; they are handled as
+ * "unmetered" by the selection below rather than failing the run.
+ */
+export async function readInboxReplyMetrics(
+  targets,
+  call,
+  { concurrency = INBOX_FANOUT_CONCURRENCY, batchSize = INBOX_METRICS_BATCH_SIZE } = {},
+) {
+  const byAudience = new Map();
+  for (const campaign of arrayValue(targets)) {
+    const id = stringValue(campaign?.id);
+    if (!id) continue;
+    const audience = campaignInboxInput(campaign).audience || "";
+    if (!byAudience.has(audience)) byAudience.set(audience, []);
+    byAudience.get(audience).push(id);
+  }
+  const batches = [];
+  for (const [audience, ids] of byAudience) {
+    for (let index = 0; index < ids.length; index += batchSize) {
+      batches.push({ audience, ids: ids.slice(index, index + batchSize) });
+    }
+  }
+  const metrics = new Map();
+  let failedBatches = 0;
+  await mapWithConcurrency(batches, concurrency, async ({ audience, ids }) => {
+    try {
+      const data = await call(
+        "campaigns.getMetricsForSequences",
+        audience ? { campaign_ids: ids, audience } : { campaign_ids: ids },
+      );
+      for (const id of ids) {
+        const value = normalizeReplyMetrics(data?.[id]);
+        if (value) metrics.set(id, value);
+      }
+    } catch {
+      failedBatches += 1;
+    }
+  });
+  return { metrics, batches: batches.length, failed_batches: failedBatches };
+}
+
+/**
+ * Change-driven selection for scheduled runs. Returns the sequences to read
+ * (most urgent first) and why, plus the targets that could not be confirmed.
+ * Reasons, in order: missing snapshot, legacy projection, counts changed or
+ * no baseline yet, a recent-window email the snapshot does not have, a
+ * post-read settle check, the saturated-window fallback, unmetered and old,
+ * then a small rotation of the longest-unread snapshots.
+ */
+export function selectChangedInboxCampaigns(
+  campaigns,
+  previousState,
+  recentRepliesRaw,
+  metricsById,
+  {
+    nowMs = Date.now(),
+    batchSize = INBOX_CHANGED_BATCH_SIZE,
+    rotation = INBOX_ROTATION_PER_RUN,
+    recentAvailable = true,
+  } = {},
+) {
+  const snapshots = previousState?.snapshots instanceof Map
+    ? previousState.snapshots
+    : new Map();
+  const metrics = metricsById instanceof Map ? metricsById : new Map();
+  const recentRaw = arrayValue(recentRepliesRaw);
+  const lastVerifiedMs = Date.parse(previousState?.meta?.verified_at || "");
+  const oldestRecentMs = recentRaw.length
+    ? Math.min(...recentRaw.map(recentReplyTime).filter((value) => value > 0))
+    : Infinity;
+  // Every email since the last verified run fits in the window unless the
+  // window is full and even its oldest item is newer than that run.
+  const windowSaturated = !recentAvailable
+    || !Number.isFinite(lastVerifiedMs)
+    || (recentRaw.length >= RECENT_WINDOW_SIZE && oldestRecentMs > lastVerifiedMs);
+  const recentBySequence = new Map();
+  for (const reply of recentRaw) {
+    const id = stringValue(reply?.sequence_id);
+    if (!id) continue;
+    if (!recentBySequence.has(id)) recentBySequence.set(id, []);
+    recentBySequence.get(id).push(reply);
+  }
+
+  const chosen = [];
+  const rotationPool = [];
+  for (const campaign of arrayValue(campaigns)) {
+    const id = stringValue(campaign?.id);
+    if (!id) continue;
+    const snapshot = snapshots.get(id);
+    const refreshedMs = snapshotTime(snapshot);
+    const current = metrics.get(id) || null;
+    let reason = null;
+    if (!snapshot) reason = "missing";
+    else if (snapshot.submissions_projection_version !== INBOX_SUBMISSIONS_PROJECTION_VERSION) {
+      reason = "projection";
+    } else if (current && !sameReplyMetrics(current, snapshot.reply_metrics)) {
+      reason = snapshot.reply_metrics ? "counts_changed" : "no_baseline";
+    } else if ((recentBySequence.get(id) || []).some((reply) => {
+      const gmailId = stringValue(reply?.gmail_id);
+      return gmailId
+        && !snapshotGmailIds(snapshot).has(gmailId)
+        && recentReplyTime(reply) > refreshedMs - RECENT_CLOCK_SKEW_MS;
+    })) {
+      reason = "recent_email";
+    } else {
+      const newest = newestReplyTime(snapshot);
+      if (newest > 0 && refreshedMs - newest < INBOX_SETTLE_MS && nowMs - refreshedMs >= INBOX_SETTLE_MS) {
+        reason = "settle";
+      } else if (windowSaturated && newest > 0 && nowMs - newest < INBOX_HOT_REPLY_MS) {
+        reason = "window_saturated";
+      } else if (!current && nowMs - refreshedMs >= INBOX_UNMETERED_READ_AFTER_MS) {
+        reason = "unmetered";
+      }
+    }
+    if (reason) chosen.push({ campaign, reason, refreshedMs });
+    else if (snapshot) rotationPool.push({ campaign, reason: "rotation", refreshedMs });
+  }
+  const order = [
+    "missing", "projection", "counts_changed", "no_baseline", "recent_email",
+    "settle", "window_saturated", "unmetered",
+  ];
+  chosen.sort((a, b) => (
+    order.indexOf(a.reason) - order.indexOf(b.reason)
+    || a.refreshedMs - b.refreshedMs
+    || stringValue(a.campaign?.id).localeCompare(stringValue(b.campaign?.id))
+  ));
+  rotationPool.sort((a, b) => (
+    a.refreshedMs - b.refreshedMs
+    || stringValue(a.campaign?.id).localeCompare(stringValue(b.campaign?.id))
+  ));
+  const limit = Math.max(0, Math.floor(Number(batchSize) || 0));
+  const needed = chosen.slice(0, limit);
+  const deferred = chosen.slice(limit);
+  const extra = rotationPool.slice(0, Math.max(0, Math.min(rotation, limit - needed.length)));
+  const selected = [...needed, ...extra];
+  const reasons = {};
+  for (const item of selected) reasons[item.reason] = (reasons[item.reason] || 0) + 1;
+  const unmetered = arrayValue(campaigns)
+    .map((campaign) => stringValue(campaign?.id))
+    .filter((id) => id && !metrics.has(id));
+  return {
+    selected: selected.map((item) => item.campaign),
+    reasons,
+    window_saturated: windowSaturated,
+    deferred_sequence_ids: deferred.map((item) => stringValue(item.campaign?.id)),
+    unmetered_sequence_ids: unmetered,
+  };
+}
+
 export async function buildInboxRefresh({
   get = inboxTrpcGet,
   concurrency = INBOX_FANOUT_CONCURRENCY,
@@ -862,9 +1085,21 @@ export async function buildInboxRefresh({
   batchSize = INBOX_SYNC_BATCH_SIZE,
   forceRefreshAfterMs = 0,
   previousState = emptyInboxSnapshotState(),
+  // "stale" (default): re-read by age, used by manual sweeps and the
+  // Submissions broker. "changed": the scheduled, change-driven run.
+  mode = "stale",
 } = {}) {
   const deadline = Date.now() + Math.max(1_000, budgetMs);
-  const call = (procedure, input, tries = 2) => {
+  const startedAt = now().toISOString();
+  let providerRequests = 0;
+  // Counts HTTP requests to Paraform (retries and session probes included)
+  // when `get` is inboxTrpcGet; a custom getter that ignores fetchImpl
+  // simply leaves the count at zero.
+  const countingFetch = (...args) => {
+    providerRequests += 1;
+    return fetch(...args);
+  };
+  const call = (procedure, input, tries = 2, timeoutCapMs = INBOX_VENDOR_TIMEOUT_MS) => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       const error = new Error("INBOX_BUILD_DEADLINE");
@@ -875,12 +1110,13 @@ export async function buildInboxRefresh({
       procedure,
       input,
       tries,
-      Math.min(INBOX_VENDOR_TIMEOUT_MS, Math.max(250, remaining)),
+      Math.min(timeoutCapMs, Math.max(250, remaining)),
+      countingFetch,
     );
   };
   const [campaignResult, recentResult] = await Promise.allSettled([
     call("campaigns.getListOfCampaignsOptimized", {}),
-    call("campaigns.getRecentReplies", undefined),
+    call("campaigns.getRecentReplies", undefined, 2, INBOX_RECENT_TIMEOUT_MS),
   ]);
   if (campaignResult.status === "rejected") throw campaignResult.reason;
   const campaignsRaw = campaignResult.value;
@@ -913,11 +1149,24 @@ export async function buildInboxRefresh({
       .filter((item) => stringValue(item?.gmail_id))
       .map((item) => [String(item.gmail_id), item]),
   );
-  const selected = selectInboxCampaigns(targets, previousState, recentReplies, {
-    nowMs: Date.now(),
-    batchSize,
-    forceRefreshAfterMs,
-  });
+  let selected;
+  let changed = null;
+  let metricsRead = null;
+  if (mode === "changed") {
+    metricsRead = await readInboxReplyMetrics(targets, call);
+    changed = selectChangedInboxCampaigns(targets, previousState, recentRepliesRaw, metricsRead.metrics, {
+      nowMs: Date.now(),
+      batchSize,
+      recentAvailable: !recentError,
+    });
+    selected = changed.selected;
+  } else {
+    selected = selectInboxCampaigns(targets, previousState, recentReplies, {
+      nowMs: Date.now(),
+      batchSize,
+      forceRefreshAfterMs,
+    });
+  }
 
   const results = await mapWithConcurrency(selected, concurrency, async (campaign) => {
     try {
@@ -961,6 +1210,7 @@ export async function buildInboxRefresh({
         result.data,
         recentByGmail,
         generatedAt,
+        metricsRead?.metrics.get(stringValue(result.campaign?.id)) || null,
       )),
     recent: recentError
       ? null
@@ -969,7 +1219,27 @@ export async function buildInboxRefresh({
           refreshed_at: generatedAt,
           replies: recentReplies,
         },
+    // Only a change-driven run can vouch for sequences it did not read: their
+    // counts matched the stored baseline at `at`.
+    verification: changed
+      ? {
+          at: startedAt,
+          unverified_sequence_ids: [...new Set([
+            ...failures.map((item) => stringValue(item.campaign?.id)),
+            ...changed.deferred_sequence_ids,
+            ...changed.unmetered_sequence_ids.filter((id) => (
+              !results.some((result) => result.ok && stringValue(result.campaign?.id) === id)
+            )),
+          ])].filter(Boolean),
+        }
+      : null,
     scan: {
+      mode: mode === "changed" ? "changed" : "stale",
+      provider_requests: providerRequests,
+      selection_reasons: changed ? changed.reasons : null,
+      window_saturated: changed ? changed.window_saturated : null,
+      metrics_batches: metricsRead ? metricsRead.batches : null,
+      metrics_failed_batches: metricsRead ? metricsRead.failed_batches : null,
       campaigns_total: campaigns.length,
       campaigns_excluded: Math.max(0, campaigns.length - targets.length),
       campaigns_targeted: targets.length,
@@ -1099,6 +1369,7 @@ function normalizeSequenceSnapshot(value, fieldId) {
       ? "campaign.project_id"
       : null,
     refreshed_at: stringValue(snapshot.refreshed_at),
+    reply_metrics: normalizeReplyMetrics(snapshot.reply_metrics),
     replies: snapshot.replies.filter((reply) => reply && typeof reply === "object"),
     submissions_replies: arrayValue(snapshot.submissions_replies)
       .filter((reply) => reply && typeof reply === "object"),
@@ -1373,6 +1644,22 @@ export function mergeInboxRefreshState(previousState, refresh) {
     currentMs - snapshotTime(snapshots.get(sequenceId)) >= INBOX_SEQUENCE_STALE_MS
   )).length;
   const uiScan = refresh?.scan?.ui || null;
+  // Verification: a change-driven run vouches for every target it did not
+  // list as unverified. Any other refresh keeps the previous verdict, minus
+  // the sequences it has just read successfully.
+  const readOk = new Set(arrayValue(refresh?.snapshots)
+    .map((snapshot) => stringValue(snapshot?.sequence_id)).filter(Boolean));
+  const verification = refresh?.verification && typeof refresh.verification === "object"
+    ? refresh.verification
+    : null;
+  const verifiedAt = verification
+    ? stringValue(verification.at)
+    : stringValue(previous.meta?.verified_at);
+  const unverifiedIds = (verification
+    ? arrayValue(verification.unverified_sequence_ids)
+    : arrayValue(previous.meta?.unverified_sequence_ids).filter((id) => !readOk.has(id)))
+    .map(stringValue)
+    .filter((id) => id && targetIds.has(id));
   const uiFailures = uiScan ? arrayValue(uiScan.failures) : failures
     .filter((failure) => uiTargets.has(stringValue(failure?.sequence_id)));
   const uiCoverageComplete = Boolean(catalog.refreshed_at)
@@ -1414,6 +1701,18 @@ export function mergeInboxRefreshState(previousState, refresh) {
     ui_recent_excluded: Number(uiScan?.recent_excluded) || 0,
     ui_failure_error_counts: failureErrorCounts(uiFailures),
     sequence_attempts: sequenceAttempts,
+    verified_at: verifiedAt,
+    unverified_sequence_ids: unverifiedIds,
+    last_run: {
+      at: stringValue(refresh?.generated_at),
+      mode: stringValue(refresh?.scan?.mode) || "stale",
+      provider_requests: Number(refresh?.scan?.provider_requests) || 0,
+      sequences_read: arrayValue(refresh?.selected_sequence_ids).length,
+      selection_reasons: refresh?.scan?.selection_reasons || null,
+      window_saturated: refresh?.scan?.window_saturated ?? null,
+      metrics_failed_batches: refresh?.scan?.metrics_failed_batches ?? null,
+      recent_failed: Boolean(refresh?.scan?.recent_failed),
+    },
   };
   return { snapshots, catalog, recent, meta };
 }
@@ -1490,10 +1789,20 @@ export function assembleInboxSnapshotFeed(
   const currentMs = now().getTime();
   const seededCount = [...targetIds]
     .filter((sequenceId) => snapshotState.snapshots?.has(sequenceId)).length;
+  // The Inbox refreshes on a schedule, so a sequence is stale only when
+  // neither its last read nor the last verified run (whose counts matched it)
+  // is within the scheduled window. Submissions keeps its own 15-minute rule
+  // in inboxSubmissionsProjectionCoverage.
+  const verifiedMs = Date.parse(snapshotState.meta?.verified_at || "");
+  const unverified = new Set(arrayValue(snapshotState.meta?.unverified_sequence_ids));
   const staleCount = [...targetIds].filter((sequenceId) => {
     const snapshot = snapshotState.snapshots?.get(sequenceId);
-    return snapshot
-      && currentMs - snapshotTime(snapshot) >= INBOX_SEQUENCE_STALE_MS;
+    if (!snapshot) return false;
+    const confirmedMs = Math.max(
+      snapshotTime(snapshot),
+      !unverified.has(sequenceId) && Number.isFinite(verifiedMs) ? verifiedMs : 0,
+    );
+    return currentMs - confirmedMs >= INBOX_SCHEDULED_STALE_MS;
   }).length;
   const catalogReady = Boolean(snapshotState.catalog?.refreshed_at);
   const missingCount = Math.max(0, targetIds.size - seededCount);
@@ -1531,6 +1840,8 @@ export function assembleInboxSnapshotFeed(
       campaigns_missing: missingCount,
       campaigns_stale: staleCount,
       latest_failures: latestFailures,
+      verified_at: stringValue(snapshotState.meta?.verified_at),
+      campaigns_unverified: [...targetIds].filter((id) => unverified.has(id)).length,
     },
     scan: {
       campaigns_total: Number(snapshotState.catalog?.campaigns_total) || 0,

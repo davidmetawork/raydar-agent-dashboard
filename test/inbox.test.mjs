@@ -1821,7 +1821,18 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /showTriageBanner\("good","Moved to Complete\."\)/);
   assert.match(inboxHtml, /State unavailable/);
   assert.match(inboxHtml, /last-known-good replies/);
-  assert.match(inboxHtml, /STATE\.seedPasses<6/);
+  // Opening the page never calls Paraform: no automatic sync or seeding
+  // passes, only a KV snapshot re-read. Paraform is read by the schedule and
+  // by Refresh now (which falls back to the paused-mode sweep).
+  assert.doesNotMatch(inboxHtml, /queueInboxSync|seedPasses|setInterval\(\(\)=>syncFeed/);
+  assert.match(inboxHtml, /setInterval\(\(\)=>loadFeed\(\),600000\)/);
+  assert.match(inboxHtml, /\$\("manualRefresh"\)\.addEventListener\("click",refreshNow\)/);
+  assert.match(inboxHtml, /if\(STATE\.backgroundPaused\)return manualRefreshFeed\(\)/);
+  assert.match(inboxHtml, /updates automatically at 7 AM, 12 PM and 5 PM PT/);
+  assert.deepEqual(
+    vercel.crons.filter((cron) => cron.path === "/api/inbox/sync"),
+    [{ path: "/api/inbox/sync", schedule: "0 0,14,19 * * *" }],
+  );
   assert.doesNotMatch(inboxHtml, /Partial feed|refresh is already in progress/);
   assert.doesNotMatch(
     inboxHtml,
