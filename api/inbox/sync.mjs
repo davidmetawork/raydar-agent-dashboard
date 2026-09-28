@@ -19,6 +19,10 @@ import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.
 // window, reply counts in batches of ten, and reads only for sequences with
 // evidence of change. Opening the page no longer calls Paraform.
 export const INBOX_SCHEDULED_ALERT_AFTER_MS = 20 * 60 * 60 * 1_000;
+// Refresh budget measured from the start of the request, so lock waits, the
+// session read and the state scan cannot push a run past maxDuration 120s
+// (vercel.json), which would lose the run silently.
+export const INBOX_SYNC_TOTAL_BUDGET_MS = 90_000;
 const SCHEDULED_LOCK_WAIT_MS = 15_000;
 const SCHEDULED_LOCK_ATTEMPTS = 3;
 
@@ -44,6 +48,10 @@ export async function alertInboxRefreshNeedsAttention(detail, {
   return true;
 }
 
+function stringCode(error) {
+  return String(error?.code || error?.message || error || "unknown").slice(0, 60);
+}
+
 function longUnverified(meta, nowMs) {
   const verifiedMs = Date.parse(meta?.verified_at || meta?.last_complete_at || "");
   return !Number.isFinite(verifiedMs) || nowMs - verifiedMs >= INBOX_SCHEDULED_ALERT_AFTER_MS;
@@ -66,6 +74,7 @@ export function createInboxSyncHandler({
   now = () => Date.now(),
 } = {}) {
   return async function handler(req, res) {
+    const handlerStartedMs = now();
     if (corsHandler(req, res)) return;
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     const scheduled = req.method === "GET";
@@ -134,57 +143,68 @@ export function createInboxSyncHandler({
     }
 
     let previousMeta = null;
-    let outcome;
+    let status;
+    let body;
+    let staleAfterRun = 0;
+    let failureCode = null;
     try {
       const state = await readState();
       if (state.status === "unavailable") {
-        outcome = { status: 503, body: { ok: false, error: "inbox_store_not_configured" } };
-        return res.status(outcome.status).json(outcome.body);
+        status = 503;
+        body = { ok: false, error: "inbox_store_not_configured" };
+      } else if (state.status !== "ready") {
+        status = 502;
+        body = { ok: false, error: "inbox_snapshot_unavailable" };
+      } else {
+        previousMeta = state.value?.meta || null;
+        const refresh = await buildRefresh({
+          previousState: state.value,
+          mode: "changed",
+          batchSize: INBOX_CHANGED_BATCH_SIZE,
+          budgetMs: Math.max(1_000, INBOX_SYNC_TOTAL_BUDGET_MS - (now() - handlerStartedMs)),
+        });
+        const nextState = await writeState(state.value, refresh);
+        const feed = assembleFeed(nextState);
+        staleAfterRun = Number(feed.freshness?.campaigns_stale) || 0;
+        status = 200;
+        body = {
+          ok: true,
+          status: "updated",
+          trigger: scheduled ? "schedule" : "manual",
+          generated_at: refresh.generated_at,
+          freshness: feed.freshness,
+          scan: refresh.scan,
+        };
       }
-      if (state.status !== "ready") {
-        outcome = { status: 502, body: { ok: false, error: "inbox_snapshot_unavailable" } };
-        return res.status(outcome.status).json(outcome.body);
-      }
-      previousMeta = state.value?.meta || null;
-      const refresh = await buildRefresh({
-        previousState: state.value,
-        mode: "changed",
-        batchSize: INBOX_CHANGED_BATCH_SIZE,
-      });
-      const nextState = await writeState(state.value, refresh);
-      const feed = assembleFeed(nextState);
-      outcome = { ok: true, stale: Number(feed.freshness?.campaigns_stale) || 0 };
-      return res.status(200).json({
-        ok: true,
-        status: "updated",
-        trigger: scheduled ? "schedule" : "manual",
-        generated_at: refresh.generated_at,
-        freshness: feed.freshness,
-        scan: refresh.scan,
-      });
     } catch (error) {
-      outcome = { error: error?.code || String(error?.message || error).slice(0, 80) };
-      return res.status(error?.code === "AUTH_EXPIRED" ? 503 : 502).json({
+      failureCode = stringCode(error);
+      status = error?.code === "AUTH_EXPIRED" ? 503 : 502;
+      body = {
         ok: false,
         error: error?.code === "AUTH_EXPIRED"
           ? "paraform_auth_expired"
           : "sync_unavailable",
         detail: String(error?.message || error).slice(0, 180),
-      });
+      };
     } finally {
       await releaseLock(lock.token);
-      if (scheduled) {
-        try {
-          if (outcome?.ok && outcome.stale > 0) {
-            await alert(`${outcome.stale} sequence(s) have not been confirmed for over 16 hours.`);
-          } else if (!outcome?.ok && longUnverified(previousMeta, now())) {
-            await alert(`the scheduled refresh failed (${outcome?.error || outcome?.body?.error || "unknown"}) and the Inbox has not been verified for 20+ hours.`);
-          }
-        } catch {
-          // Alerting must never turn a finished refresh into a failure.
+    }
+
+    // Decide and send any alert before responding: work after the response
+    // may be frozen by the platform.
+    if (scheduled) {
+      try {
+        if (body.ok && staleAfterRun > 0) {
+          await alert(`${staleAfterRun} sequence(s) have not been confirmed for over 16 hours.`);
+        } else if (!body.ok && longUnverified(previousMeta, now())) {
+          const reason = failureCode || body.error;
+          await alert(`the scheduled refresh failed (${reason}) and the Inbox has not been verified for 20+ hours.`);
         }
+      } catch {
+        // Alerting must never turn a finished refresh into a failure.
       }
     }
+    return res.status(status).json(body);
   };
 }
 

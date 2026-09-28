@@ -1828,7 +1828,9 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /setInterval\(\(\)=>loadFeed\(\),600000\)/);
   assert.match(inboxHtml, /\$\("manualRefresh"\)\.addEventListener\("click",refreshNow\)/);
   assert.match(inboxHtml, /if\(STATE\.backgroundPaused\)return manualRefreshFeed\(\)/);
-  assert.match(inboxHtml, /updates automatically at 7 AM, 12 PM and 5 PM PT/);
+  assert.match(inboxHtml, /updates automatically at 7 AM, 12 PM and 5 PM Pacific/);
+  // A page loaded while paused falls back to the normal refresh once unpaused.
+  assert.match(inboxHtml, /manual_refresh_requires_background_pause[\s\S]*?return await syncFeed\(\)/);
   assert.deepEqual(
     vercel.crons.filter((cron) => cron.path === "/api/inbox/sync"),
     [{ path: "/api/inbox/sync", schedule: "0 0,14,19 * * *" }],

@@ -685,7 +685,7 @@ async function loadFeed(){
     const targeted=Number(freshness.campaigns_targeted)||0;
     const updated=formatDate(data.generated_at,true);
     $("feedMeta").textContent=updated
-      ?"Updated "+updated+" · "+seeded+"/"+targeted+" sequences represented · updates automatically at 7 AM, 12 PM and 5 PM PT"
+      ?"Updated "+updated+" · "+seeded+"/"+targeted+" sequences represented · updates automatically at 7 AM, 12 PM and 5 PM Pacific (an hour earlier in winter)"
       :"Reliable snapshot is not seeded yet";
     if(STATE.snapshotState==="unseeded"){
       $("replyCount").textContent="— replies";
@@ -797,6 +797,13 @@ async function manualRefreshFeed(){
     }
     throw new Error("Manual refresh exceeded its bounded pass limit");
   }catch(error){
+    if(error.code==="manual_refresh_requires_background_pause"){
+      // Background reads were turned back on since this page loaded.
+      STATE.backgroundPaused=false;STATE.manualRunStartedAt="";
+      STATE.manualRefreshing=false;
+      button.disabled=false;button.textContent="Refresh now";
+      return await syncFeed();
+    }
     if(error.code!=="paraform_provider_refusal")STATE.manualRunStartedAt="";
     await loadFeed();
     const progress=error.data?.progress||{};

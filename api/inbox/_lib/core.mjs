@@ -171,10 +171,12 @@ export const INBOX_CHANGED_BATCH_SIZE = 150; // bounded in practice by the build
 // A snapshot taken within this long of its newest reply is read once more
 // later, so a classification Paraform finishes after our read is picked up.
 export const INBOX_SETTLE_MS = 2 * 60 * 60 * 1_000;
-// When more than one recent window of emails arrived since the last verified
-// run, follow-ups may have scrolled out of it: re-read sequences with replies
-// this recent.
-export const INBOX_HOT_REPLY_MS = 7 * 24 * 60 * 60 * 1_000;
+// Only follow-ups from people who already replied can arrive without moving
+// the counts, and the recent window is how they are found. When the window no
+// longer reaches back to the last run that read it (meta.recent_watermark),
+// every sequence with any stored reply is re-read. Measured 2026-09-28 the
+// 20-item window spanned about 45 hours, so this is rare.
+export const INBOX_SEEN_GMAIL_IDS_MAX = 5_000;
 // A target whose counts could not be read is re-read once its snapshot is this old.
 export const INBOX_UNMETERED_READ_AFTER_MS = 8 * 60 * 60 * 1_000;
 // A few of the longest-unread snapshots are re-read every run as a drift check.
@@ -183,8 +185,12 @@ export const INBOX_ROTATION_PER_RUN = 3;
 // has confirmed it for longer than the longest gap between scheduled runs
 // (overnight, about 14 hours) plus slack.
 export const INBOX_SCHEDULED_STALE_MS = 16 * 60 * 60 * 1_000;
-const RECENT_WINDOW_SIZE = 20;
 const RECENT_CLOCK_SKEW_MS = 5 * 60 * 1_000;
+// getRecentReplies returns 20 items today. A shorter answer is the whole
+// history (nothing was cut off); at 10 or more items it may be truncated, so
+// it only proves coverage if it reaches back to the watermark. Each run
+// records the window size in last_run in case Paraform changes it.
+const RECENT_WINDOW_TRUNCATED_AT = 10;
 // HGETALL can exceed the KV response cap once every Inbox shard is seeded.
 // Keep each HSCAN page small and its complete read inside the broker's 38s KV
 // allowance beneath the fixed 120s shared lock.
@@ -786,6 +792,25 @@ function sameReplyMetrics(a, b) {
     && left.interested_replies === right.interested_replies);
 }
 
+// Every inbound email id a read saw, including bounces and David's mailbox
+// rows that the display excludes, so the recent-window check never depends on
+// a sender-set date and never loops on an excluded row.
+function inboundGmailIds(inboxData) {
+  const ids = new Set();
+  for (const campaignEmail of arrayValue(inboxData?.campaign_emails)) {
+    const email = campaignEmail?.email;
+    if (!email || email.sent_from_paraform !== false) continue;
+    const gmailId = stringValue(email.gmail_id);
+    if (gmailId) ids.add(gmailId);
+  }
+  return [...ids].sort().slice(0, INBOX_SEEN_GMAIL_IDS_MAX);
+}
+
+function normalizeSeenGmailIds(value) {
+  if (!Array.isArray(value)) return null;
+  return value.map(stringValue).filter(Boolean).slice(0, INBOX_SEEN_GMAIL_IDS_MAX);
+}
+
 function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt, replyMetrics = null) {
   const campaignId = stringValue(campaign?.id);
   const exactRoleId = exactCampaignRoleId(campaign);
@@ -812,6 +837,7 @@ function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt,
     // Paraform's per-sequence counts at read time: the baseline the next
     // scheduled run compares against. Null when this read had no counts.
     reply_metrics: normalizeReplyMetrics(replyMetrics),
+    seen_gmail_ids: inboundGmailIds(inboxData),
     replies: isAdmittedInboxCampaign(campaign)
       ? flattenCampaignInbox(campaign, inboxData, recentByGmail)
       : [],
@@ -905,20 +931,43 @@ export function selectInboxCampaigns(
   return eligible.slice(0, limit).map(({ campaign }) => campaign);
 }
 
-function newestReplyTime(snapshot) {
+// Newest reply received no later than `notAfterMs`. A row dated after the
+// read (a skewed sender clock) is ignored so it cannot hold a sequence in the
+// settle rule on every run until that date passes.
+function newestReplyTime(snapshot, notAfterMs = Infinity) {
   let newest = 0;
   for (const row of [...arrayValue(snapshot?.replies), ...arrayValue(snapshot?.submissions_replies)]) {
-    newest = Math.max(newest, rowDate(row));
+    const at = rowDate(row);
+    if (at <= notAfterMs) newest = Math.max(newest, at);
   }
   return newest;
 }
 
-function snapshotGmailIds(snapshot) {
+function displayedGmailIds(snapshot) {
   return new Set(
     [...arrayValue(snapshot?.replies), ...arrayValue(snapshot?.submissions_replies)]
       .map((row) => stringValue(row?.gmail_id))
       .filter(Boolean),
   );
+}
+
+// A recent-window email the snapshot's read did not see. Snapshots written
+// before seen_gmail_ids existed fall back to their displayed rows plus a
+// date check, so an excluded row cannot trigger a read on every run.
+function snapshotMissesRecentEmail(snapshot, reply) {
+  const gmailId = stringValue(reply?.gmail_id);
+  if (!gmailId) return false;
+  if (Array.isArray(snapshot?.seen_gmail_ids)) {
+    return !snapshot.seen_gmail_ids.includes(gmailId);
+  }
+  return !displayedGmailIds(snapshot).has(gmailId)
+    && recentReplyTime(reply) > snapshotTime(snapshot) - RECENT_CLOCK_SKEW_MS;
+}
+
+function hasStoredReplies(snapshot) {
+  return arrayValue(snapshot?.seen_gmail_ids).length > 0
+    || arrayValue(snapshot?.replies).length > 0
+    || arrayValue(snapshot?.submissions_replies).length > 0;
 }
 
 function recentReplyTime(reply) {
@@ -994,15 +1043,16 @@ export function selectChangedInboxCampaigns(
     : new Map();
   const metrics = metricsById instanceof Map ? metricsById : new Map();
   const recentRaw = arrayValue(recentRepliesRaw);
-  const lastVerifiedMs = Date.parse(previousState?.meta?.verified_at || "");
-  const oldestRecentMs = recentRaw.length
-    ? Math.min(...recentRaw.map(recentReplyTime).filter((value) => value > 0))
-    : Infinity;
-  // Every email since the last verified run fits in the window unless the
-  // window is full and even its oldest item is newer than that run.
+  const retry = new Set(arrayValue(previousState?.meta?.retry_sequence_ids).map(stringValue));
+  // recent_watermark: the start of the last run whose recent window was read.
+  // Every email since then is in this window unless even its oldest item is
+  // newer than the watermark.
+  const watermarkMs = Date.parse(previousState?.meta?.recent_watermark || "");
+  const recentTimes = recentRaw.map(recentReplyTime).filter((value) => value > 0);
+  const oldestRecentMs = recentTimes.length ? Math.min(...recentTimes) : Infinity;
   const windowSaturated = !recentAvailable
-    || !Number.isFinite(lastVerifiedMs)
-    || (recentRaw.length >= RECENT_WINDOW_SIZE && oldestRecentMs > lastVerifiedMs);
+    || !Number.isFinite(watermarkMs)
+    || (recentRaw.length >= RECENT_WINDOW_TRUNCATED_AT && oldestRecentMs > watermarkMs);
   const recentBySequence = new Map();
   for (const reply of recentRaw) {
     const id = stringValue(reply?.sequence_id);
@@ -1025,18 +1075,18 @@ export function selectChangedInboxCampaigns(
       reason = "projection";
     } else if (current && !sameReplyMetrics(current, snapshot.reply_metrics)) {
       reason = snapshot.reply_metrics ? "counts_changed" : "no_baseline";
-    } else if ((recentBySequence.get(id) || []).some((reply) => {
-      const gmailId = stringValue(reply?.gmail_id);
-      return gmailId
-        && !snapshotGmailIds(snapshot).has(gmailId)
-        && recentReplyTime(reply) > refreshedMs - RECENT_CLOCK_SKEW_MS;
-    })) {
+    } else if (retry.has(id)) {
+      // Selected last run but not read (failed or cut off by the deadline).
+      reason = "retry";
+    } else if ((recentBySequence.get(id) || []).some((reply) => (
+      snapshotMissesRecentEmail(snapshot, reply)
+    ))) {
       reason = "recent_email";
     } else {
-      const newest = newestReplyTime(snapshot);
+      const newest = newestReplyTime(snapshot, refreshedMs);
       if (newest > 0 && refreshedMs - newest < INBOX_SETTLE_MS && nowMs - refreshedMs >= INBOX_SETTLE_MS) {
         reason = "settle";
-      } else if (windowSaturated && newest > 0 && nowMs - newest < INBOX_HOT_REPLY_MS) {
+      } else if (windowSaturated && hasStoredReplies(snapshot)) {
         reason = "window_saturated";
       } else if (!current && nowMs - refreshedMs >= INBOX_UNMETERED_READ_AFTER_MS) {
         reason = "unmetered";
@@ -1046,8 +1096,8 @@ export function selectChangedInboxCampaigns(
     else if (snapshot) rotationPool.push({ campaign, reason: "rotation", refreshedMs });
   }
   const order = [
-    "missing", "projection", "counts_changed", "no_baseline", "recent_email",
-    "settle", "window_saturated", "unmetered",
+    "missing", "projection", "counts_changed", "no_baseline", "retry",
+    "recent_email", "settle", "window_saturated", "unmetered",
   ];
   chosen.sort((a, b) => (
     order.indexOf(a.reason) - order.indexOf(b.reason)
@@ -1210,7 +1260,11 @@ export async function buildInboxRefresh({
         result.data,
         recentByGmail,
         generatedAt,
-        metricsRead?.metrics.get(stringValue(result.campaign?.id)) || null,
+        // A read without counts keeps the previous baseline: an old baseline
+        // can only cause one extra read later, never a missed one.
+        metricsRead?.metrics.get(stringValue(result.campaign?.id))
+          || previousState?.snapshots?.get?.(stringValue(result.campaign?.id))?.reply_metrics
+          || null,
       )),
     recent: recentError
       ? null
@@ -1231,6 +1285,14 @@ export async function buildInboxRefresh({
               !results.some((result) => result.ok && stringValue(result.campaign?.id) === id)
             )),
           ])].filter(Boolean),
+          // Selected but not read: read first next run, whatever the counts say.
+          retry_sequence_ids: [...new Set([
+            ...failures.map((item) => stringValue(item.campaign?.id)),
+            ...changed.deferred_sequence_ids,
+          ])].filter(Boolean),
+          // Every email up to the start of this run is now either read or
+          // queued for retry, provided the recent window itself was read.
+          recent_watermark: recentError ? null : startedAt,
         }
       : null,
     scan: {
@@ -1240,6 +1302,8 @@ export async function buildInboxRefresh({
       window_saturated: changed ? changed.window_saturated : null,
       metrics_batches: metricsRead ? metricsRead.batches : null,
       metrics_failed_batches: metricsRead ? metricsRead.failed_batches : null,
+      unmetered: changed ? changed.unmetered_sequence_ids.length : null,
+      recent_window_size: recentError ? null : recentRepliesRaw.length,
       campaigns_total: campaigns.length,
       campaigns_excluded: Math.max(0, campaigns.length - targets.length),
       campaigns_targeted: targets.length,
@@ -1370,6 +1434,7 @@ function normalizeSequenceSnapshot(value, fieldId) {
       : null,
     refreshed_at: stringValue(snapshot.refreshed_at),
     reply_metrics: normalizeReplyMetrics(snapshot.reply_metrics),
+    seen_gmail_ids: normalizeSeenGmailIds(snapshot.seen_gmail_ids),
     replies: snapshot.replies.filter((reply) => reply && typeof reply === "object"),
     submissions_replies: arrayValue(snapshot.submissions_replies)
       .filter((reply) => reply && typeof reply === "object"),
@@ -1660,6 +1725,13 @@ export function mergeInboxRefreshState(previousState, refresh) {
     : arrayValue(previous.meta?.unverified_sequence_ids).filter((id) => !readOk.has(id)))
     .map(stringValue)
     .filter((id) => id && targetIds.has(id));
+  const retryIds = (verification
+    ? arrayValue(verification.retry_sequence_ids)
+    : arrayValue(previous.meta?.retry_sequence_ids).filter((id) => !readOk.has(id)))
+    .map(stringValue)
+    .filter((id) => id && targetIds.has(id));
+  const recentWatermark = stringValue(verification?.recent_watermark)
+    || stringValue(previous.meta?.recent_watermark);
   const uiFailures = uiScan ? arrayValue(uiScan.failures) : failures
     .filter((failure) => uiTargets.has(stringValue(failure?.sequence_id)));
   const uiCoverageComplete = Boolean(catalog.refreshed_at)
@@ -1703,16 +1775,25 @@ export function mergeInboxRefreshState(previousState, refresh) {
     sequence_attempts: sequenceAttempts,
     verified_at: verifiedAt,
     unverified_sequence_ids: unverifiedIds,
-    last_run: {
-      at: stringValue(refresh?.generated_at),
-      mode: stringValue(refresh?.scan?.mode) || "stale",
-      provider_requests: Number(refresh?.scan?.provider_requests) || 0,
-      sequences_read: arrayValue(refresh?.selected_sequence_ids).length,
-      selection_reasons: refresh?.scan?.selection_reasons || null,
-      window_saturated: refresh?.scan?.window_saturated ?? null,
-      metrics_failed_batches: refresh?.scan?.metrics_failed_batches ?? null,
-      recent_failed: Boolean(refresh?.scan?.recent_failed),
-    },
+    retry_sequence_ids: retryIds,
+    recent_watermark: recentWatermark,
+    // The last change-driven (scheduled or Refresh now) run; stale-mode
+    // refreshes by the Submissions broker or a paused sweep leave it alone.
+    last_run: verification
+      ? {
+          at: stringValue(refresh?.generated_at),
+          mode: "changed",
+          provider_requests: Number(refresh?.scan?.provider_requests) || 0,
+          sequences_read: arrayValue(refresh?.selected_sequence_ids).length,
+          sequences_failed: arrayValue(refresh?.scan?.failures).length,
+          selection_reasons: refresh?.scan?.selection_reasons || null,
+          window_saturated: refresh?.scan?.window_saturated ?? null,
+          metrics_failed_batches: refresh?.scan?.metrics_failed_batches ?? null,
+          unmetered: refresh?.scan?.unmetered ?? null,
+          recent_window_size: refresh?.scan?.recent_window_size ?? null,
+          recent_failed: Boolean(refresh?.scan?.recent_failed),
+        }
+      : previous.meta?.last_run || null,
   };
   return { snapshots, catalog, recent, meta };
 }

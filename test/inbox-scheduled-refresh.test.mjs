@@ -23,6 +23,7 @@ function snapshot(id, {
   refreshedMs = NOW - 5 * HOUR,
   metrics = { replies_count: 2, interested_replies: 1 },
   replies = [{ gmail_id: `${id}-g1`, date: iso(NOW - 3 * 24 * HOUR) }],
+  seen = replies.map((reply) => reply.gmail_id),
 } = {}) {
   return {
     version: 3,
@@ -32,6 +33,7 @@ function snapshot(id, {
     email_replies: null,
     refreshed_at: iso(refreshedMs),
     reply_metrics: metrics,
+    seen_gmail_ids: seen,
     replies,
     submissions_replies: [],
     lead_categories: {},
@@ -41,7 +43,14 @@ function snapshot(id, {
 function stateWith(snapshots, meta = {}) {
   const state = emptyInboxSnapshotState();
   state.snapshots = new Map(snapshots.map((item) => [item.sequence_id, item]));
-  state.meta = { version: 3, sequence_attempts: {}, failures: [], verified_at: iso(NOW - 5 * HOUR), ...meta };
+  state.meta = {
+    version: 3,
+    sequence_attempts: {},
+    failures: [],
+    verified_at: iso(NOW - 5 * HOUR),
+    recent_watermark: iso(NOW - 5 * HOUR),
+    ...meta,
+  };
   return state;
 }
 
@@ -90,8 +99,8 @@ test("each kind of change evidence selects its sequence, most urgent first", () 
   const recent = [
     // A follow-up from someone who already replied: counts do not move.
     { sequence_id: "followup", gmail_id: "followup-new", email_date: iso(NOW - 1 * HOUR) },
-    // Already in the snapshot: no read.
-    { sequence_id: "quiet", gmail_id: "quiet-g1", email_date: iso(NOW - 3 * 24 * HOUR) },
+    // Already seen by the last read: no read.
+    { sequence_id: "quiet", gmail_id: "quiet-g1", email_date: iso(NOW - 1 * HOUR) },
   ];
   const result = selectChangedInboxCampaigns(campaigns, previous, recent, metrics, {
     nowMs: NOW, rotation: 0,
@@ -105,44 +114,90 @@ test("each kind of change evidence selects its sequence, most urgent first", () 
   });
 });
 
-test("a recent email older than the snapshot is not a reason to re-read", () => {
-  const campaigns = [campaign("a")];
-  const previous = stateWith([snapshot("a", { refreshedMs: NOW - HOUR })]);
-  const recent = [{ sequence_id: "a", gmail_id: "excluded-bounce", email_date: iso(NOW - 2 * HOUR) }];
-  const result = selectChangedInboxCampaigns(campaigns, previous, recent,
-    metricsFor({ a: { replies_count: 2, interested_replies: 1 } }), { nowMs: NOW, rotation: 0 });
-  assert.deepEqual(result.selected, []);
+test("the recent-window check trusts the ids a read saw, not the sender's clock", () => {
+  const campaigns = [campaign("a"), campaign("legacy")];
+  const previous = stateWith([
+    // An excluded bounce the read saw: never a reason to re-read.
+    snapshot("a", { refreshedMs: NOW - HOUR, seen: ["a-g1", "bounce-1"] }),
+    // Written before seen_gmail_ids existed: the old date check still applies.
+    { ...snapshot("legacy", { refreshedMs: NOW - HOUR }), seen_gmail_ids: null },
+  ]);
+  const metrics = metricsFor({
+    a: { replies_count: 2, interested_replies: 1 },
+    legacy: { replies_count: 2, interested_replies: 1 },
+  });
+  const quiet = selectChangedInboxCampaigns(campaigns, previous, [
+    { sequence_id: "a", gmail_id: "bounce-1", email_date: iso(NOW - 10 * 60 * 1_000) },
+    { sequence_id: "legacy", gmail_id: "legacy-old", email_date: iso(NOW - 2 * HOUR) },
+  ], metrics, { nowMs: NOW, rotation: 0 });
+  assert.deepEqual(quiet.selected, []);
+
+  // A late-ingested follow-up dated well before the last read is still found.
+  const late = selectChangedInboxCampaigns(campaigns, previous, [
+    { sequence_id: "a", gmail_id: "late-followup", email_date: iso(NOW - 30 * HOUR) },
+  ], metrics, { nowMs: NOW, rotation: 0 });
+  assert.deepEqual(late.selected.map((item) => item.id), ["a"]);
+  assert.deepEqual(late.reasons, { recent_email: 1 });
 });
 
-test("a full recent window older than the last verified run falls back to hot sequences", () => {
-  const campaigns = [campaign("hot"), campaign("cold")];
+test("a window that no longer reaches the watermark re-reads every sequence with replies", () => {
+  const campaigns = [campaign("hot"), campaign("cold"), campaign("silent")];
   const previous = stateWith([
     snapshot("hot", { replies: [{ gmail_id: "hot-g1", date: iso(NOW - 2 * 24 * HOUR) }] }),
     snapshot("cold", { replies: [{ gmail_id: "cold-g1", date: iso(NOW - 30 * 24 * HOUR) }] }),
-  ], { verified_at: iso(NOW - 14 * HOUR) });
+    snapshot("silent", { replies: [], seen: [] }),
+  ], { recent_watermark: iso(NOW - 14 * HOUR) });
   const metrics = metricsFor({
     hot: { replies_count: 2, interested_replies: 1 },
     cold: { replies_count: 2, interested_replies: 1 },
+    silent: { replies_count: 2, interested_replies: 1 },
   });
-  const fullWindow = Array.from({ length: 20 }, (_, index) => ({
-    sequence_id: "elsewhere", gmail_id: `w${index}`, email_date: iso(NOW - (index + 1) * 10 * 60 * 1_000),
+  const window = (oldestAgoHours) => Array.from({ length: 20 }, (_, index) => ({
+    sequence_id: "elsewhere",
+    gmail_id: `w${index}`,
+    email_date: iso(NOW - (oldestAgoHours * HOUR * (index + 1)) / 20),
   }));
-  const saturated = selectChangedInboxCampaigns(campaigns, previous, fullWindow, metrics, {
+  const saturated = selectChangedInboxCampaigns(campaigns, previous, window(10), metrics, {
     nowMs: NOW, rotation: 0,
   });
   assert.equal(saturated.window_saturated, true);
-  assert.deepEqual(saturated.selected.map((item) => item.id), ["hot"]);
+  assert.deepEqual(saturated.selected.map((item) => item.id).sort(), ["cold", "hot"]);
 
-  const calm = selectChangedInboxCampaigns(campaigns, previous, fullWindow.slice(0, 5), metrics, {
+  const covered = selectChangedInboxCampaigns(campaigns, previous, window(45), metrics, {
     nowMs: NOW, rotation: 0,
   });
-  assert.equal(calm.window_saturated, false);
-  assert.deepEqual(calm.selected, []);
+  assert.equal(covered.window_saturated, false);
+  assert.deepEqual(covered.selected, []);
 
   const recentDown = selectChangedInboxCampaigns(campaigns, previous, [], metrics, {
     nowMs: NOW, rotation: 0, recentAvailable: false,
   });
-  assert.deepEqual(recentDown.selected.map((item) => item.id), ["hot"]);
+  assert.deepEqual(recentDown.selected.map((item) => item.id).sort(), ["cold", "hot"]);
+});
+
+test("reads that failed or were cut off last run are retried first", () => {
+  const campaigns = [campaign("failed"), campaign("fine")];
+  const previous = stateWith(campaigns.map((item) => snapshot(item.id)), {
+    retry_sequence_ids: ["failed"],
+  });
+  const metrics = metricsFor({
+    failed: { replies_count: 2, interested_replies: 1 },
+    fine: { replies_count: 2, interested_replies: 1 },
+  });
+  const result = selectChangedInboxCampaigns(campaigns, previous, [], metrics, { nowMs: NOW, rotation: 0 });
+  assert.deepEqual(result.selected.map((item) => item.id), ["failed"]);
+  assert.deepEqual(result.reasons, { retry: 1 });
+});
+
+test("a reply dated after the read cannot trigger a settle on every run", () => {
+  const campaigns = [campaign("future")];
+  const previous = stateWith([snapshot("future", {
+    refreshedMs: NOW - 5 * HOUR,
+    replies: [{ gmail_id: "future-g1", date: iso(NOW + 48 * HOUR) }],
+  })]);
+  const result = selectChangedInboxCampaigns(campaigns, previous, [],
+    metricsFor({ future: { replies_count: 2, interested_replies: 1 } }), { nowMs: NOW, rotation: 0 });
+  assert.deepEqual(result.selected, []);
 });
 
 test("missing counts are unmetered: re-read only once the snapshot is old", () => {
@@ -247,17 +302,61 @@ test("a changed-mode refresh reads only changed sequences and vouches for the re
   assert.equal(refresh.verification.at, iso(NOW));
   assert.deepEqual(refresh.verification.unverified_sequence_ids, ["broken"]);
 
+  assert.deepEqual(refresh.verification.retry_sequence_ids, ["broken"]);
+  assert.equal(refresh.verification.recent_watermark, iso(NOW));
+  assert.deepEqual(grew.seen_gmail_ids, []);
+
   const merged = mergeInboxRefreshState(previous, refresh);
   assert.equal(merged.meta.verified_at, iso(NOW));
+  assert.equal(merged.meta.recent_watermark, iso(NOW));
   assert.deepEqual(merged.meta.unverified_sequence_ids, ["broken"]);
+  assert.deepEqual(merged.meta.retry_sequence_ids, ["broken"]);
   assert.equal(merged.meta.last_run.mode, "changed");
   assert.equal(merged.meta.last_run.sequences_read, 3);
+  assert.equal(merged.meta.last_run.sequences_failed, 1);
 });
 
-test("a stale-mode refresh keeps the last verdict and clears what it read", () => {
+test("a failed recent window does not move the watermark", async () => {
+  const previous = stateWith([snapshot("a")]);
+  const refresh = await buildInboxRefresh({
+    mode: "changed",
+    budgetMs: 60_000,
+    previousState: previous,
+    now: () => new Date(NOW),
+    get: async (procedure) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") return [campaign("a")];
+      if (procedure === "campaigns.getRecentReplies") throw Object.assign(new Error("x"), { code: "PARAFORM_TIMEOUT" });
+      if (procedure === "campaigns.getMetricsForSequences") return { a: { replies_count: 2, interested_replies: 1 } };
+      return { campaign_emails: [], campaign_to_candidate_users: [] };
+    },
+  });
+  assert.equal(refresh.verification.recent_watermark, null);
+  const merged = mergeInboxRefreshState(previous, refresh);
+  assert.equal(merged.meta.recent_watermark, iso(NOW - 5 * HOUR));
+});
+
+test("a stale-mode refresh keeps baselines, the last verdict, and the last run", async () => {
+  const withBaseline = stateWith([snapshot("a", { metrics: { replies_count: 7, interested_replies: 3 } })]);
+  const stale = await buildInboxRefresh({
+    budgetMs: 60_000,
+    previousState: withBaseline,
+    now: () => new Date(NOW),
+    get: async (procedure) => {
+      if (procedure === "campaigns.getListOfCampaignsOptimized") return [campaign("a")];
+      if (procedure === "campaigns.getRecentReplies") return [];
+      if (procedure === "campaigns.getCampaignInboxData") return { campaign_emails: [], campaign_to_candidate_users: [] };
+      throw new Error(`stale mode must not call ${procedure}`);
+    },
+  });
+  assert.equal(stale.scan.mode, "stale");
+  assert.deepEqual(stale.snapshots[0].reply_metrics, { replies_count: 7, interested_replies: 3 });
+  assert.equal(stale.verification, null);
+
   const previous = stateWith(["a", "b"].map((id) => snapshot(id)), {
     verified_at: iso(NOW - 2 * HOUR),
     unverified_sequence_ids: ["a", "b"],
+    retry_sequence_ids: ["a", "b"],
+    last_run: { mode: "changed", at: iso(NOW - 2 * HOUR) },
   });
   const merged = mergeInboxRefreshState(previous, {
     generated_at: iso(NOW),
@@ -270,6 +369,8 @@ test("a stale-mode refresh keeps the last verdict and clears what it read", () =
   });
   assert.equal(merged.meta.verified_at, iso(NOW - 2 * HOUR));
   assert.deepEqual(merged.meta.unverified_sequence_ids, ["b"]);
+  assert.deepEqual(merged.meta.retry_sequence_ids, ["b"]);
+  assert.deepEqual(merged.meta.last_run, { mode: "changed", at: iso(NOW - 2 * HOUR) });
 });
 
 test("the Inbox counts a sequence stale only past the scheduled window", () => {
@@ -343,6 +444,7 @@ test("the cron GET needs the cron secret and runs the change-driven refresh", as
   assert.equal(response.body.trigger, "schedule");
   assert.equal(calls.builds[0].mode, "changed");
   assert.equal(calls.builds[0].batchSize, 150);
+  assert.equal(calls.builds[0].budgetMs, 90_000);
   assert.deepEqual(calls.alerts, []);
 });
 
