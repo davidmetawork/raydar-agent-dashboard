@@ -945,7 +945,7 @@ test("paraai request lanes: a lane 401 parks nothing; a confirmed identity-check
       const before = seen.length;
       assert.deepEqual(await identityStatus(), { checked: true, authExpired: true });
       const identityReads = seen.slice(before);
-      assert.equal(identityReads.length, 5, "the identity read, then two confirmation rounds of two reads");
+      assert.equal(identityReads.length, 7, "the identity read, then three confirmation rounds of two reads");
       assert.ok(identityReads.every((row) => row.cookie === SHARED_GEN_COOKIE));
       assert.equal(storeReads(), 1);
       assert.equal((await paraaiEnsureParaformSession()).slot, "account", "the identity check moved off the dead slot");
@@ -976,9 +976,26 @@ test("paraai auth probe: a dead first slot is parked and the probe answers from 
       assert.equal(result.healthy, true);
       assert.equal(result.movedOffDeadSlot, true);
       assert.deepEqual(seen.map((row) => row.cookie), [
-        SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, ACCOUNT_COOKIE,
-      ], "two passes of two reads on the shared cookie, then the account slot");
+        ...Array(4).fill(SHARED_GEN_COOKIE), // two passes of two reads
+        ...Array(6).fill(SHARED_GEN_COOKIE), // three confirmation rounds of two reads
+        ACCOUNT_COOKIE,
+      ], "every read before the park tested the shared cookie");
       assert.equal(paraformCookieValue(), ACCOUNT_COOKIE);
+    },
+  );
+});
+
+test("paraai auth probe: two failed passes during a burst park nothing when the confirmation read answers", async () => {
+  let calls = 0;
+  await withParaaiStoreSession(
+    () => (++calls <= 4 ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, false, "the probe's own verdict is unchanged");
+      assert.equal(result.movedOffDeadSlot, undefined);
+      assert.equal(seen.length, 5, "four failed reads, then one answered confirmation read");
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "a live slot is not parked");
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
     },
   );
 });

@@ -348,10 +348,11 @@ async function claimRequestLaneIdentityCheck({
 // cooldown armed by an earlier 401 blocks lane traffic, at most once per
 // interval. A lane call's own 401 no longer parks the store slot (a burst
 // throttle would drop the process onto the next candidate, eventually the
-// static env seal). A 401 here parks it only after two confirmation rounds
-// on the same cookie (at most four more reads) agree it is dead, and only
-// while the process still holds that cookie. That is what moves the lanes
-// off a dead slot. The check's own result is unchanged: its 401 is reported.
+// static env seal). A 401 here parks it only after the Para AI classifier's
+// own three confirmation rounds on the same cookie (at most six more reads,
+// about 4.5 seconds) agree it is dead, and only while the process still
+// holds that cookie. That is what moves the lanes off a dead slot. The
+// check's own result is unchanged: its 401 is reported.
 async function identityRead() {
   const cookie = await paraformCookie();
   try {
@@ -359,7 +360,7 @@ async function identityRead() {
   } catch (error) {
     if (
       String(error?.code || "") === "PARAFORM_THROTTLED"
-      && (await isParaformSessionActuallyExpired({ cookie, rounds: 2 }))
+      && (await isParaformSessionActuallyExpired({ cookie }))
     ) {
       notifyParaformSessionRejected({ cookie });
     }

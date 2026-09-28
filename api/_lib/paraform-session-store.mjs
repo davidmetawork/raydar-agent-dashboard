@@ -406,12 +406,13 @@ export function paraformCookieValue(environment = process.env) {
   return staticEnvCookie(environment);
 }
 
-/** The value the resolver last settled on, or null when nothing is resolved
- *  (cold start, or just after a park). Unlike paraformCookieValue() it never
- *  falls back to the static env seal, so a caller mid-retry can tell "the
- *  store session arrived" apart from "the cache was emptied". */
-export function resolvedParaformCookie() {
-  return cache.value;
+/** What the resolver last settled on, as { value, slot }, or null when
+ *  nothing is resolved (cold start, or just after a park). Unlike
+ *  paraformCookieValue() it never falls back to the static env seal, and the
+ *  slot says whether the value came from the store ("shared"/"account") or
+ *  is the env seal ("env", e.g. when n8n was unreachable at resolution). */
+export function resolvedParaformSession() {
+  return cache.value === null ? null : { value: cache.value, slot: cache.slot };
 }
 
 export function hasParaformSessionCookie(environment = process.env) {

@@ -15,7 +15,7 @@ import {
   notifyParaformSessionRejected,
   paraformCookieValue,
   PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
-  resolvedParaformCookie,
+  resolvedParaformSession,
 } from "../../_lib/paraform-session-store.mjs";
 import {
   AGENT_SCHEDULING_URL,
@@ -192,6 +192,7 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
   // Every attempt sends one known cookie, and the expiry probes test the
   // cookie that got the last 401.
   let cookie = paraformCookieValue();
+  let switched = false;
   for (let attempt = 0; ; attempt++) {
     try { return await fn(cookie); }
     catch (e) {
@@ -200,11 +201,16 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
         // Jitter so a fleet of workers does not retry in lockstep.
         await sleep(delays[attempt] + Math.floor(Math.random() * 400));
         // A cold instance can start on the static env seal because the store
-        // read outran the caller's budget (health's 3s); retry on the store
-        // session once it lands. An emptied cache (after a park) is not a
-        // session to move to.
-        const resolved = resolvedParaformCookie();
-        if (resolved !== null && resolved !== cookie) cookie = resolved;
+        // read outran the caller's budget (health's 3s); move to the store
+        // session once it lands, once per call, with a fresh ladder so the
+        // new cookie gets the full evidence. Never onto the env seal, and an
+        // emptied cache (after a park) is not a session to move to.
+        const resolved = resolvedParaformSession();
+        if (!switched && resolved && resolved.slot !== "env" && resolved.value !== cookie) {
+          cookie = resolved.value;
+          switched = true;
+          attempt = -1;
+        }
         continue;
       }
       throw (await confirmSessionExpired(cookie)) ? authExpired(cookie) : e;

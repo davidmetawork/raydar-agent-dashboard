@@ -295,6 +295,29 @@ test("a cold instance whose store read outran its budget retries on the store se
   });
 });
 
+test("a retry never moves onto the env seal, even when the resolver settled on it", async () => {
+  await withStoreSession(async () => {
+    const failingStore = async () => ({ ok: false, status: 503, json: async () => ({}) });
+    const seen = [];
+    await withStubbedParaform(
+      async (url, init) => {
+        seen.push(sentCookie(init));
+        if (seen.length === 1) {
+          // Another invocation re-resolves while n8n is down: the process
+          // cache now holds the env slot.
+          const settled = await ensureParaformSession({ fetchImpl: failingStore, force: true });
+          assert.equal(settled.slot, "env");
+        }
+        return sentCookie(init) === SHARED ? (seen.length === 1 ? unauthorized() : ok({ id: "u1" })) : unauthorized();
+      },
+      async () => {
+        assert.deepEqual(await trpcGet("campaigns.getCampaignLeads", {}, 1), { id: "u1" });
+      },
+    );
+    assert.deepEqual(seen, [SHARED, SHARED], "the call stayed on the live store cookie");
+  });
+});
+
 test("after a park empties the cache, a retry does not move onto the env fallback", async () => {
   await withStoreSession(async () => {
     const seen = [];

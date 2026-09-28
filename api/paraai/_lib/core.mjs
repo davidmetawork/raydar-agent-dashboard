@@ -9,7 +9,7 @@ import {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
-  resolvedParaformCookie,
+  resolvedParaformSession,
 } from "../../_lib/paraform-session-store.mjs";
 
 export { authConfig, cors, ensureParaformSession, requireAuth };
@@ -232,6 +232,7 @@ async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) 
   // cookie that got the last 401. If nothing resolves, the raw call resolves
   // (and fails) itself, after its own input validation, as before.
   let cookie = await paraformCookie().catch(() => undefined);
+  let switched = false;
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await fn(cookie);
@@ -239,10 +240,15 @@ async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) 
       if (error?.code !== "PARAFORM_THROTTLED") throw error;
       if (attempt < delays.length) {
         await sleep(delays[attempt] + Math.floor(Math.random() * 250));
-        // Retry on a newer resolved session if one has landed meanwhile; an
-        // emptied cache (after a park) is not a session to move to.
-        const resolved = resolvedParaformCookie();
-        if (resolved !== null && resolved !== cookie) cookie = resolved;
+        // Move to a store session that landed meanwhile, once per call, with
+        // a fresh ladder. Never onto the env seal, and an emptied cache
+        // (after a park) is not a session to move to.
+        const resolved = resolvedParaformSession();
+        if (!switched && resolved && resolved.slot !== "env" && resolved.value !== cookie) {
+          cookie = resolved.value;
+          switched = true;
+          attempt = -1;
+        }
         continue;
       }
       throw (await isParaformSessionActuallyExpired({ cookie }))
