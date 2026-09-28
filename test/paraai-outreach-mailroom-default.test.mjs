@@ -291,6 +291,8 @@ const {
   planDeliveredMatch,
   processDueFollowup,
   processMatchRequest,
+  processMatchRequestBundleViaMailroom,
+  queuedMailroomCandidateIds,
   queuedMailroomMatchIds,
   reconcileQueuedMailroomMatches,
 } = await import("../api/paraai/_lib/outreach.mjs");
@@ -884,4 +886,172 @@ test("a Mailroom bounce stops the ladder and holds the next role until the addre
     (error) => error.code === "OUTREACH_EMAIL_BOUNCED",
   );
   assert.equal(mailroom.enqueued.length, 1);
+});
+
+// ── Review regressions (2026-09-28) ──────────────────────────────────────────
+
+test("a conversation started for a LATER request keeps the subject that went out, so it can be replied on", async () => {
+  // An earlier request exists in Paraform but was never emailed (ordinal 2).
+  seedRequest("req-old", "cu-l", { company: "Old", createdAt: "2026-09-27T16:00:00.000Z" });
+  const request = seedRequest("req-new", "cu-l", { company: "Acme", createdAt: "2026-09-28T16:00:00.000Z" });
+  await processMatchRequest(request, history(), sendOptions());
+  let state = await getOutreachState("cu-l");
+  assert.equal(mailroom.enqueued[0].subject, "1st Round - Interview Request @ Acme 🎉");
+  assert.equal(state.mailroomConversation.subject, "1st Round - Interview Request @ Acme 🎉");
+  assert.equal(state.threadSubject, "1st Round - Interview Request @ Acme 🎉");
+  // Its nudge replies on it instead of failing every tick.
+  const nudged = await processDueFollowup("cu-l", {
+    config,
+    now: Date.parse("2026-10-01T16:00:00Z"),
+    mailroomDeliveryImpl: instantDelivery,
+  });
+  assert.equal(nudged.action, "sent");
+  assert.equal(mailroom.enqueued[1].subject, "Re: 1st Round - Interview Request @ Acme 🎉");
+});
+
+test("a parked or unanchored Mailroom nudge stops its ladder instead of holding a slot", async () => {
+  const request = seedRequest("req-p", "cu-p");
+  await processMatchRequest(request, history(), sendOptions());
+  let state = await getOutreachState("cu-p");
+  state = await saveOutreachState({
+    ...state,
+    outbox: {
+      ...state.outbox,
+      "followup:req-p:1": {
+        status: "uncertain",
+        transport: "mailroom-sendgrid",
+        mailroomDedupeKey: "paraai-outreach:auto:followup:req-p:1",
+      },
+    },
+  }, state.revision);
+  const parked = await processDueFollowup("cu-p", { config, now: Date.parse("2026-10-01T16:00:00Z"), mailroomDeliveryImpl: instantDelivery });
+  assert.equal(parked.action, "mailroom_parked");
+  assert.equal((await getOutreachState("cu-p")).followup, null);
+
+  const other = seedRequest("req-u", "cu-u");
+  await processMatchRequest(other, history(), sendOptions());
+  state = await getOutreachState("cu-u");
+  await saveOutreachState({ ...state, mailroomConversation: { ...state.mailroomConversation, messageIds: [] } }, state.revision);
+  const unanchored = await processDueFollowup("cu-u", { config, now: Date.parse("2026-10-01T16:00:00Z"), mailroomDeliveryImpl: instantDelivery });
+  assert.equal(unanchored.action, "canceled_no_conversation");
+  assert.equal((await getOutreachState("cu-u")).followup, null);
+});
+
+test("an operator bundle refuses a request whose single send is still queued", async () => {
+  mailroom.onWake = "hold";
+  const premark = (id) => normalizeSubmissionRequest({
+    ...historyRow(id, "cu-bundle"),
+    recipient_types: ["RECRUITER", "CANDIDATE"],
+    reached_out_to_candidate: true,
+    reached_out_to_candidate_at: "2026-09-28T16:00:10.000Z",
+  });
+  paraform.history.push(historyRow("req-ba", "cu-bundle"), historyRow("req-bb", "cu-bundle"));
+  const queued = await processMatchRequest(normalizeSubmissionRequest(historyRow("req-ba", "cu-bundle")), history(), sendOptions());
+  assert.equal(queued.action, "queued");
+  await assert.rejects(
+    processMatchRequestBundleViaMailroom([premark("req-ba"), premark("req-bb")], history(), {
+      config,
+      contactOverride: { email: "cu-bundle@example.com" },
+      deliveryImpl: async () => { throw new Error("bundle must not send"); },
+    }),
+    (error) => error.code === "OUTREACH_ALREADY_IN_FLIGHT",
+  );
+});
+
+test("while one role is queued, the candidate's other roles wait, and the Gmail thread is kept until delivery", async () => {
+  mailroom.onWake = "hold";
+  await createOutreachState("cu-w", { candidateEmail: "cu-w@example.com" });
+  let state = await getOutreachState("cu-w");
+  await saveOutreachState({ ...state, threadId: "old-gmail-thread-without-digest" }, state.revision);
+  gmail.threads.set("old-gmail-thread-without-digest", { id: "old-gmail-thread-without-digest", messages: [] });
+  const first = seedRequest("req-w1", "cu-w");
+  const second = seedRequest("req-w2", "cu-w", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  const result = await processMatchRequest(first, history(), sendOptions());
+  assert.equal(result.action, "queued");
+  state = await getOutreachState("cu-w");
+  assert.equal(state.threadId, "old-gmail-thread-without-digest", "kept until the Mailroom send is delivered");
+  assert.deepEqual([...queuedMailroomCandidateIds([state])], ["cu-w"]);
+  const cfg = { ...config, notBeforeMs: Date.parse("2026-09-01T00:00:00Z") };
+  assert.deepEqual(eligibleNewRequests(history(), cfg, [state], []).map((row) => row.id), []);
+  assert.ok(second);
+});
+
+test("a Mailroom blip never moves a live Mailroom conversation to Gmail; a deliberate switch-off does", async () => {
+  const first = seedRequest("req-m1", "cu-m");
+  await processMatchRequest(first, history(), sendOptions());
+  const second = seedRequest("req-m2", "cu-m", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  const blip = async () => ({ ready: false, reason: "OUTREACH_MAILROOM_UNREACHABLE", transient: true });
+  await assert.rejects(
+    processMatchRequest(second, history(), sendOptions({ mailroomReadyImpl: blip })),
+    (error) => error.code === "OUTREACH_MAILROOM_RETRY",
+  );
+  assert.equal(gmail.sent.length, 0);
+  const switchedOff = async () => ({ ready: false, reason: "lane_disabled" });
+  const moved = await processMatchRequest(second, history(), sendOptions({ mailroomReadyImpl: switchedOff }));
+  assert.equal(moved.transport, "gmail");
+  assert.equal(gmail.sent.length, 1);
+});
+
+test("a review draft is refused while the conversation lives in the Mailroom", async () => {
+  const first = seedRequest("req-d1", "cu-d");
+  await processMatchRequest(first, history(), sendOptions());
+  const second = seedRequest("req-d2", "cu-d", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  await assert.rejects(
+    processMatchRequest(second, history(), { mode: "draft", config }),
+    (error) => error.code === "OUTREACH_DRAFT_UNAVAILABLE_MAILROOM",
+  );
+  assert.equal((await getOutreachState("cu-d")).threadId, null);
+});
+
+test("a nudge claimed but never enqueued re-runs its window and reply checks", async () => {
+  const request = seedRequest("req-k", "cu-k");
+  await processMatchRequest(request, history(), sendOptions());
+  let state = await getOutreachState("cu-k");
+  await saveOutreachState({
+    ...state,
+    outbox: {
+      ...state.outbox,
+      "followup:req-k:1": {
+        status: "claimed",
+        transport: "mailroom-sendgrid",
+        mailroomDedupeKey: "paraai-outreach:auto:followup:req-k:1",
+      },
+    },
+  }, state.revision);
+  // 23:00 Pacific: no row exists, so this is not in flight and the window rules.
+  const late = await processDueFollowup("cu-k", { config, now: Date.parse("2026-10-01T06:00:00Z"), mailroomDeliveryImpl: instantDelivery });
+  assert.equal(late.action, "mailroom_window_closed");
+  assert.equal(mailroom.enqueued.length, 1);
+});
+
+test("a definite Mailroom refusal releases the claim, and the next attempt can go through Gmail", async () => {
+  const request = seedRequest("req-x", "cu-x");
+  // Readiness said yes, but the lane was switched off before the enqueue.
+  const ready = async () => ({ ready: true, reason: null });
+  mailroom.lane.enabled = false;
+  await assert.rejects(
+    processMatchRequest(request, history(), sendOptions({ mailroomReadyImpl: ready })),
+    (error) => error.code === "OUTREACH_MAILROOM_REFUSED",
+  );
+  let state = await getOutreachState("cu-x");
+  assert.equal(state.outbox["match:req-x"].status, "released");
+  assert.equal(mailroom.rows.size, 0);
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.transport, "gmail");
+  assert.equal(gmail.sent.length, 1);
+});
+
+test("a bounce recorded for an address the candidate has replaced is ignored", async () => {
+  const { mailroomConversationBounce } = await import("../api/paraai/_lib/outreach.mjs");
+  const state = {
+    candidateEmail: "new@example.com",
+    mailroomConversation: { dedupeKeys: ["k-old"] },
+  };
+  const statusImpl = async () => ({
+    found: true,
+    to_email: "old@example.com",
+    deliveryEvents: [{ event_type: "bounce", reason: "550" }],
+  });
+  assert.equal(await mailroomConversationBounce(state, { statusImpl }), null);
+  assert.ok(await mailroomConversationBounce({ ...state, candidateEmail: "old@example.com" }, { statusImpl }));
 });

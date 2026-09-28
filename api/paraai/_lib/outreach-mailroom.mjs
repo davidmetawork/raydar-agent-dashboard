@@ -187,7 +187,9 @@ export async function mailroomOutreachLaneReady({
     else if (lane.sendgrid_threading_enabled !== true) value = { ready: false, reason: "threading_disabled" };
     else value = { ready: true, reason: null, senderId: clean(lane.sender_id) || null };
   } catch (error) {
-    value = { ready: false, reason: clean(error?.code) || "lanes_unreadable" };
+    // Transient and never cached: a blip must not read as a deliberate
+    // switch-off for a whole minute.
+    return { ready: false, reason: clean(error?.code) || "lanes_unreadable", transient: true };
   }
   laneReadyCache = { lane: config.lane, at: now, value };
   return value;
@@ -290,7 +292,21 @@ export async function deliverViaMailroomOutreach({
       rowId = enqueued.id ?? enqueued.outboxId ?? null;
     } catch (error) {
       status = await statusFor(dedupeKey, options).catch(() => null);
-      if (!status?.found) throw error;
+      if (!status?.found) {
+        // The Mailroom answered with a definite refusal (lane disabled, bad
+        // recipient, validation) and holds no row under this key: provably
+        // nothing was sent, so the caller may release its claim.
+        if (status?.ok === true && Number(error?.status) >= 400 && Number(error?.status) < 500) {
+          const refused = new OutreachMailroomError(
+            "OUTREACH_MAILROOM_REFUSED",
+            error?.detail || error?.message,
+            error.status,
+          );
+          refused.provablyUnsent = true;
+          throw refused;
+        }
+        throw error;
+      }
     }
     status = await statusFor(dedupeKey, options).catch(() => status);
   }
