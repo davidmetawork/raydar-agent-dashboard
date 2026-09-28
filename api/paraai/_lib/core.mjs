@@ -9,6 +9,7 @@ import {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
+  resolvedParaformSession,
 } from "../../_lib/paraform-session-store.mjs";
 
 export { authConfig, cors, ensureParaformSession, requireAuth };
@@ -79,7 +80,7 @@ export function paraAIConfig() {
 // env-first / legacy-two-chunk-only fallback. clearCookieCache() is kept as
 // the public name (existing tests and callers use it) but now clears the
 // SHARED cache; it does NOT mark any candidate rejected (see
-// notifyParaformSessionRejected below, used by authExpired()/throttled()).
+// notifyParaformSessionRejected below, used only by a confirmed authExpired()).
 export function clearCookieCache() { invalidateParaformSessionCache(); }
 
 export async function paraformCookie() {
@@ -133,8 +134,10 @@ export function paraformCookieName(value) {
   return String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token";
 }
 
-async function paraformHeaders() {
-  const value = await paraformCookie();
+// `cookie` pins one exact session (the throttle classifier passes the value
+// its call started with); without it, the process's current session is used.
+async function paraformHeaders(cookie) {
+  const value = cookie === undefined ? await paraformCookie() : cookie;
   return {
     accept: "application/json",
     "content-type": "application/json",
@@ -163,18 +166,22 @@ function vendorError(response, body) {
   return error;
 }
 
-function authExpired() {
-  // Marks the candidate slot that produced this cookie rejected (30 min) and
-  // invalidates the cache, so the NEXT resolution tries the next candidate
-  // in order instead of unconditionally re-deriving the same one.
-  notifyParaformSessionRejected();
+function authExpired(cookie) {
+  // Only a CONFIRMED expiry reaches here. It parks the store slot that
+  // produced `cookie` (30 min) and invalidates the cache, so the NEXT
+  // resolution tries the next candidate in order, but only while the process
+  // still holds that exact cookie. With no known cookie nothing is parked.
+  if (cookie !== undefined) notifyParaformSessionRejected({ cookie });
   const error = new Error("AUTH_EXPIRED");
   error.code = "AUTH_EXPIRED";
   return error;
 }
 
+// A 401 alone never touches the session store: Paraform also answers 401 for
+// burst throttling. Until 2026-09-28 this parked the slot and cleared the
+// cache, so the next attempt re-resolved onto the next candidate (eventually
+// the static env seal WorkOS rotated away) in the middle of a throttle.
 function throttled() {
-  notifyParaformSessionRejected();
   const error = new Error("PARAFORM_THROTTLED");
   error.code = "PARAFORM_THROTTLED";
   return error;
@@ -221,28 +228,64 @@ const authProbeDelayMs = () => {
 };
 
 async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) {
+  // Every attempt sends one known cookie, and the confirmation reads test the
+  // cookie that got the last 401. If nothing resolves, the raw call resolves
+  // (and fails) itself, after its own input validation, as before.
+  let cookie = await paraformCookie().catch(() => undefined);
+  let switched = false;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await fn();
+      return await fn(cookie);
     } catch (error) {
       if (error?.code !== "PARAFORM_THROTTLED") throw error;
       if (attempt < delays.length) {
         await sleep(delays[attempt] + Math.floor(Math.random() * 250));
+        // Move to a store session that landed meanwhile, once per call, with
+        // a fresh ladder. Never onto the env seal, and an emptied cache
+        // (after a park) is not a session to move to.
+        const resolved = resolvedParaformSession();
+        if (!switched && resolved && resolved.slot !== "env" && resolved.value !== cookie) {
+          cookie = resolved.value;
+          switched = true;
+          attempt = -1;
+        }
         continue;
       }
-      throw (await isParaformSessionActuallyExpired())
-        ? authExpired()
+      throw (await isParaformSessionActuallyExpired({ cookie }))
+        ? authExpired(cookie)
         : error;
     }
   }
 }
 
-export async function isParaformSessionActuallyExpired({ rounds = 3 } = {}) {
+// A raw read got one 401 and no retries, so before the confirmation rounds
+// this spends the same waits the ladder would have, reading the identity
+// once after each. A throttle that clears at any step is not an expiry.
+async function rawReadSessionExpired(cookie, fetchImpl = fetch) {
+  for (const delay of paraformThrottleDelays()) {
+    await sleep(delay + Math.floor(Math.random() * 250));
+    try {
+      await trpcGetRaw("user.getCurrentUser", {}, 1, { cookie, fetchImpl });
+      return false;
+    } catch (error) {
+      if (error?.code !== "PARAFORM_THROTTLED") return false;
+    }
+  }
+  return isParaformSessionActuallyExpired({ cookie, fetchImpl });
+}
+
+// `cookie`: the session under test (the one that got the 401); defaults to
+// the process's current one.
+export async function isParaformSessionActuallyExpired({
+  rounds = 3,
+  cookie,
+  fetchImpl = fetch,
+} = {}) {
   const totalRounds = Math.max(1, Number(rounds) || 1);
   for (let round = 0; round < totalRounds; round += 1) {
     for (const read of AUTH_CONFIRMATION_READS) {
       try {
-        await trpcGetRaw(read.proc, read.input, 1);
+        await trpcGetRaw(read.proc, read.input, 1, { cookie, fetchImpl });
         return false;
       } catch (error) {
         // Any non-401 response reached authenticated vendor logic. It may be a
@@ -268,16 +311,16 @@ export function superjsonEnvelope(json, dateFields = []) {
 const envelope = (json) => superjsonEnvelope(json);
 
 export async function trpcGet(proc, json = {}, tries = 3) {
-  return classifyThrottle(() => trpcGetRaw(proc, json, tries));
+  return classifyThrottle((cookie) => trpcGetRaw(proc, json, tries, { cookie }));
 }
 
-export async function trpcGetRaw(proc, json = {}, tries = 3) {
-  const observedFetch = telemetryFetch(fetch, "paraai");
+export async function trpcGetRaw(proc, json = {}, tries = 3, { cookie, fetchImpl = fetch } = {}) {
+  const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
       const response = await observedFetch(url, {
-        headers: await paraformHeaders(),
+        headers: await paraformHeaders(cookie),
         signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
       });
       const body = await response.json().catch(() => null);
@@ -291,7 +334,7 @@ export async function trpcGetRaw(proc, json = {}, tries = 3) {
 }
 
 export async function trpcPost(proc, json = {}, _tries = 1) {
-  return classifyThrottle(() => trpcPostRaw(proc, json));
+  return classifyThrottle((cookie) => trpcPostRaw(proc, json, [], { cookie }));
 }
 
 // Paraform's current CRM resume writer validates resume_uploaded_at as a Date,
@@ -299,17 +342,17 @@ export async function trpcPost(proc, json = {}, _tries = 1) {
 // ISO string. Keep this separate from ordinary mutations to make the unusual
 // wire contract explicit at the call site.
 export async function trpcPostWithDates(proc, json = {}, dateFields = []) {
-  return classifyThrottle(() => trpcPostRaw(proc, json, dateFields));
+  return classifyThrottle((cookie) => trpcPostRaw(proc, json, dateFields, { cookie }));
 }
 
-export async function trpcPostRaw(proc, json = {}, dateFields = []) {
+export async function trpcPostRaw(proc, json = {}, dateFields = [], { cookie } = {}) {
   const observedFetch = telemetryFetch(fetch, "paraai");
   // No transport retry: a timeout has no authoritative write verdict and a
   // replay can duplicate a non-idempotent mutation. classifyThrottle may call
   // this again only after an explicit 401, which Paraform refused pre-write.
   const response = await observedFetch(`${PARAFORM_BASE}/trpc/${proc}`, {
     method: "POST",
-    headers: await paraformHeaders(),
+    headers: await paraformHeaders(cookie),
     body: JSON.stringify(superjsonEnvelope(json, dateFields)),
     signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
   });
@@ -331,7 +374,7 @@ export async function paraformRest(
   path,
   options = {},
 ) {
-  return classifyThrottle(() => paraformRestRaw(path, options));
+  return classifyThrottle((cookie) => paraformRestRaw(path, { ...options, cookie }));
 }
 
 async function paraformRestRaw(
@@ -341,6 +384,7 @@ async function paraformRestRaw(
     json,
     tries = String(method).toUpperCase() === "GET" ? 3 : 1,
     fetchImpl = fetch,
+    cookie,
   } = {},
 ) {
   const observedFetch = telemetryFetch(fetchImpl, "paraai");
@@ -354,7 +398,7 @@ async function paraformRestRaw(
     try {
       const response = await observedFetch(url, {
         method: verb,
-        headers: await paraformHeaders(),
+        headers: await paraformHeaders(cookie),
         ...(json === undefined ? {} : { body: JSON.stringify(json) }),
         signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
       });
@@ -772,14 +816,22 @@ export async function candidateProfileInfo(
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(id)) {
     throw new Error("CANDIDATE_PROFILE_ID_INVALID");
   }
+  const cookie = await paraformCookie();
   const response = await observedFetch(
     `${PARAFORM_BASE}/candidates/profile/${encodeURIComponent(id)}/info`,
     {
-      headers: await paraformHeaders(),
+      headers: await paraformHeaders(cookie),
       signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
     },
   );
-  if (response.status === 401) throw authExpired();
+  // This read does not ride the ladder, so the ladder's evidence is gathered
+  // on the same cookie: dead is AUTH_EXPIRED (and parks the session),
+  // anything else was throttling.
+  if (response.status === 401) {
+    throw (await rawReadSessionExpired(cookie, fetchImpl))
+      ? authExpired(cookie)
+      : throttled();
+  }
   if (!response.ok) throw new Error(`CANDIDATE_PROFILE_READ_FAILED_${response.status}`);
   const body = await response.json();
   if (!body || typeof body !== "object" || Array.isArray(body)) {

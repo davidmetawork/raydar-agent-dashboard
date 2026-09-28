@@ -29,7 +29,12 @@ import {
   clearCookieCache,
   ensureParaformSession as paraaiEnsureParaformSession,
   paraformCookie,
+  candidateProfileInfo,
+  trpcGet as paraaiTrpcGet,
+  trpcGetRaw as paraaiTrpcGetRaw,
 } from "../api/paraai/_lib/core.mjs";
+import { requestLaneAuthStatus } from "../api/paraai/_lib/request-lane-throttle.mjs";
+import { probeParaformAuth } from "../api/paraai/_lib/auth-probe.mjs";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -575,6 +580,32 @@ test("notifyParaformSessionRejected never retries inside the same call — it on
   });
 });
 
+test("notifyParaformSessionRejected({ cookie }) parks the slot only while the cache still holds that cookie", async () => {
+  const rows = [
+    ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
+  ];
+  const store = fakeN8n(rows);
+  await withEnv({ N8N_BASE_URL: store.base, N8N_API_KEY: store.key }, async () => {
+    const t0 = 2_000_000;
+    await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 });
+    // A verdict about a cookie the process no longer sends (another request
+    // already moved it on) must not park the slot it holds now.
+    assert.equal(notifyParaformSessionRejected({ cookie: ACCOUNT_COOKIE, now: t0 + 1 }), false);
+    assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "the cache is untouched");
+    assert.equal((await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 2 })).cached, true);
+
+    assert.equal(notifyParaformSessionRejected({ cookie: SHARED_GEN_COOKIE, now: t0 + 3 }), true);
+    const next = await ensureParaformSession({ fetchImpl: store.fetchImpl, now: t0 + 4 });
+    assert.equal(next.slot, "account", "the proven-dead shared slot is parked");
+  });
+});
+
+test("notifyParaformSessionRejected is a no-op before anything has been resolved", () => {
+  assert.equal(notifyParaformSessionRejected({ cookie: SHARED_GEN_COOKIE }), false);
+  assert.equal(notifyParaformSessionRejected(), false);
+});
+
 // ── synchronous accessors: cache-or-env, explicit env bypasses the cache ───
 
 test("paraformCookieValue()/hasParaformSessionCookie() read the cache first, then env, when called with no argument", async () => {
@@ -814,4 +845,185 @@ test("api/seq/health.mjs answers within budget when n8n hangs, falling back to e
       await sleep(5);
     }
   });
+});
+
+// ── paraai: a 401 must not move the process off a live store session ────────
+// Same hazard as api/seq (2026-09-28): paraai's throttled() parked the slot and
+// cleared the cache, so the next ladder attempt re-read the store and switched
+// to the next candidate mid-throttle, eventually the dead static env seal.
+
+async function withParaaiStoreSession(handler, run) {
+  const rows = [
+    ...chunkRowsFor(DEFAULT_SESSION_NAMESPACE, 1, SHARED_GEN_COOKIE, 40),
+    ...chunkRowsFor(ACCOUNT_SESSION_NAMESPACE, 1, ACCOUNT_COOKIE, 40),
+  ];
+  const n8nBase = "https://n8n.example.test";
+  let storeReads = 0;
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(n8nBase)) {
+      storeReads += 1;
+      return n8nListResponse(rows);
+    }
+    if (href.startsWith("https://www.paraform.com/")) {
+      const cookie = String(init?.headers?.cookie || "").replace(/^[^=]+=/u, "");
+      seen.push({ href, cookie });
+      return handler(href, cookie);
+    }
+    throw new Error(`unexpected fetch to ${href}`);
+  };
+  await withEnv({
+    N8N_BASE_URL: n8nBase,
+    N8N_API_KEY: "k",
+    PARAFORM_SESSION_COOKIE: ENV_COOKIE,
+    PARAFORM_THROTTLE_DELAYS_MS: "0,0,0",
+    PARAFORM_PROBE_DELAY_MS: "0",
+  }, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      assert.equal((await paraaiEnsureParaformSession()).slot, "shared");
+      await run({ seen, storeReads: () => storeReads });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+const paraformOk = (json) => new Response(JSON.stringify({ result: { data: { json } } }), {
+  status: 200,
+  headers: { "content-type": "application/json" },
+});
+const paraform401 = () => new Response(JSON.stringify({}), { status: 401 });
+
+test("paraai: a throttle 401 retries on the same store session without re-reading the store or parking it", async () => {
+  let calls = 0;
+  await withParaaiStoreSession(
+    () => (++calls === 1 ? paraform401() : paraformOk({ id: "u1" })),
+    async ({ seen, storeReads }) => {
+      assert.deepEqual(await paraaiTrpcGet("user.getCurrentUser", {}, 1), { id: "u1" });
+      assert.deepEqual(seen.map((row) => row.cookie), [SHARED_GEN_COOKIE, SHARED_GEN_COOKIE]);
+      assert.equal(storeReads(), 1, "a throttle must not force a store re-read");
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE);
+    },
+  );
+});
+
+test("paraai: a dead store session is parked only after confirmation reads of that same cookie", async () => {
+  await withParaaiStoreSession(
+    () => paraform401(),
+    async ({ seen }) => {
+      await assert.rejects(
+        () => paraaiTrpcGet("candidateUser.getCRMExternalCandidates", {}, 1),
+        (error) => error?.code === "AUTH_EXPIRED",
+      );
+      assert.ok(seen.length >= 10, "the ladder ran, then the confirmation rounds");
+      assert.ok(seen.every((row) => row.cookie === SHARED_GEN_COOKIE), "no attempt fell back to another session");
+      assert.equal((await paraaiEnsureParaformSession()).slot, "account");
+    },
+  );
+});
+
+const identityStatus = () => requestLaneAuthStatus({
+  now: 3_000_000,
+  kvImpl: async () => 1,
+  recordImpl: async () => {},
+  reportFailureImpl: async () => {},
+});
+
+test("paraai request lanes: a lane 401 parks nothing; a confirmed identity-check 401 parks its own cookie", async () => {
+  await withParaaiStoreSession(
+    () => paraform401(),
+    async ({ seen, storeReads }) => {
+      await assert.rejects(
+        () => paraaiTrpcGetRaw("candidateUser.getCRMExternalCandidates", {}, 1),
+        (error) => error?.code === "PARAFORM_THROTTLED",
+      );
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "a bare lane 401 leaves the session alone");
+
+      const before = seen.length;
+      assert.deepEqual(await identityStatus(), { checked: true, authExpired: true });
+      const identityReads = seen.slice(before);
+      assert.equal(identityReads.length, 7, "the identity read, then three confirmation rounds of two reads");
+      assert.ok(identityReads.every((row) => row.cookie === SHARED_GEN_COOKIE));
+      assert.equal(storeReads(), 1);
+      assert.equal((await paraaiEnsureParaformSession()).slot, "account", "the identity check moved off the dead slot");
+    },
+  );
+});
+
+test("paraai request lanes: an identity-check 401 during a throttle is reported but parks nothing", async () => {
+  let identityCalls = 0;
+  await withParaaiStoreSession(
+    (href) => {
+      if (href.includes("user.getCurrentUser") && ++identityCalls === 1) return paraform401();
+      return paraformOk({ id: "me" });
+    },
+    async () => {
+      assert.deepEqual(await identityStatus(), { checked: true, authExpired: true });
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "the confirmation read answered, so the slot stays");
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
+});
+
+test("paraai auth probe: a dead first slot is parked and the probe answers from the next slot", async () => {
+  await withParaaiStoreSession(
+    (href, cookie) => (cookie === ACCOUNT_COOKIE ? paraformOk({ id: "me" }) : paraform401()),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, true);
+      assert.equal(result.movedOffDeadSlot, true);
+      assert.deepEqual(seen.map((row) => row.cookie), [
+        ...Array(4).fill(SHARED_GEN_COOKIE), // two passes of two reads
+        ...Array(6).fill(SHARED_GEN_COOKIE), // three confirmation rounds of two reads
+        ACCOUNT_COOKIE,
+      ], "every read before the park tested the shared cookie");
+      assert.equal(paraformCookieValue(), ACCOUNT_COOKIE);
+    },
+  );
+});
+
+test("paraai auth probe: two failed passes during a burst park nothing when the confirmation read answers", async () => {
+  let calls = 0;
+  await withParaaiStoreSession(
+    () => (++calls <= 4 ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, false, "the probe's own verdict is unchanged");
+      assert.equal(result.movedOffDeadSlot, undefined);
+      assert.equal(seen.length, 5, "four failed reads, then one answered confirmation read");
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "a live slot is not parked");
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
+});
+
+test("paraai auth probe: a 401 that clears on the retry pass parks nothing", async () => {
+  let calls = 0;
+  await withParaaiStoreSession(
+    () => (++calls <= 2 ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, true);
+      assert.equal(result.reason, "recovered_on_retry");
+      assert.ok(seen.every((row) => row.cookie === SHARED_GEN_COOKIE));
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
+});
+
+test("paraai profile read: a 401 that clears on the confirmation read is PARAFORM_THROTTLED, not a park", async () => {
+  await withParaaiStoreSession(
+    (href) => (href.includes("/candidates/profile/") ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      await assert.rejects(
+        () => candidateProfileInfo("candidate-user-7"),
+        (error) => error?.code === "PARAFORM_THROTTLED",
+      );
+      assert.deepEqual(seen.map((row) => row.cookie), [SHARED_GEN_COOKIE, SHARED_GEN_COOKIE]);
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
 });

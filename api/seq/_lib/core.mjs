@@ -15,6 +15,7 @@ import {
   notifyParaformSessionRejected,
   paraformCookieValue,
   PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+  resolvedParaformSession,
 } from "../../_lib/paraform-session-store.mjs";
 import {
   AGENT_SCHEDULING_URL,
@@ -143,14 +144,19 @@ export function paraformCookieName(value, environment = process.env) {
   return String(value || "").startsWith("Fe26.2") ? "wos-session" : "__Secure-next-auth.session-token";
 }
 
-export const headers = (environment = process.env) => {
-  const cookie = paraformCookieValue(environment);
+// Headers for one exact session value. The throttle classifier below pins
+// the value a call started with, so its retries and its expiry probes all
+// test the cookie that got the 401, never whatever the process holds later.
+export function sessionHeaders(cookie, environment = process.env) {
   return {
     accept: "application/json",
     "content-type": "application/json",
     cookie: `${paraformCookieName(cookie, environment)}=${cookie}`,
   };
-};
+}
+
+export const headers = (environment = process.env) =>
+  sessionHeaders(paraformCookieValue(environment), environment);
 const env = (json) => ({ json, meta: { values: {}, v: 1 } });
 const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 
@@ -167,47 +173,104 @@ const envWithMeta = (json, values = {}) => ({ json, meta: { values, v: 1 } });
 // So every trpc call now rides the ladder itself and only reports AUTH_EXPIRED
 // after a SERIAL probe confirms it. Callers cannot forget, because there is
 // nothing left to remember.
-// A 401 on a request marks WHICHEVER candidate produced the cookie (shared
-// namespace, the 'david' account namespace, or the static env value)
-// rejected for 30 minutes, so the next resolution tries the next candidate
-// in order instead of re-deriving the same bad one. See
-// notifyParaformSessionRejected() in api/_lib/paraform-session-store.mjs.
-// This never retries inside the current request — only classifyThrottle's
-// existing ladder below does that.
-const throttled = () => {
-  notifyParaformSessionRejected();
-  return Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
-};
-const authExpired = () => {
-  notifyParaformSessionRejected();
+// A 401 alone never touches the session store. Only a confirmed expiry parks
+// the store slot (shared namespace, the 'david' account namespace, or the
+// static env value) for 30 minutes, and only while the process still holds
+// the exact cookie the probes proved dead. Until 2026-09-28 every 401 parked
+// the slot and cleared the cache, so one burst-throttle 401 sent the rest of
+// the request, retries and expiry probes included, on the static env seal
+// (which WorkOS rotates away within hours) and ended in a false AUTH_EXPIRED.
+// See notifyParaformSessionRejected() in api/_lib/paraform-session-store.mjs.
+const throttled = () =>
+  Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
+const authExpired = (cookie) => {
+  notifyParaformSessionRejected({ cookie });
   return Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" });
 };
 
 async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
+  // Every attempt sends one known cookie, and the expiry probes test the
+  // cookie that got the last 401.
+  let cookie = paraformCookieValue();
+  let switched = false;
   for (let attempt = 0; ; attempt++) {
-    try { return await fn(); }
+    try { return await fn(cookie); }
     catch (e) {
       if (e?.code !== "PARAFORM_THROTTLED") throw e;
       if (attempt < delays.length) {
         // Jitter so a fleet of workers does not retry in lockstep.
         await sleep(delays[attempt] + Math.floor(Math.random() * 400));
+        // A cold instance can start on the static env seal because the store
+        // read outran the caller's budget (health's 3s); move to the store
+        // session once it lands, once per call, with a fresh ladder so the
+        // new cookie gets the full evidence. Never onto the env seal, and an
+        // emptied cache (after a park) is not a session to move to.
+        const resolved = resolvedParaformSession();
+        if (!switched && resolved && resolved.slot !== "env" && resolved.value !== cookie) {
+          cookie = resolved.value;
+          switched = true;
+          attempt = -1;
+        }
         continue;
       }
-      throw (await isSessionActuallyExpired()) ? authExpired() : e;
+      throw (await confirmSessionExpired(cookie)) ? authExpired(cookie) : e;
     }
   }
 }
 
-export async function trpcGet(proc, json, tries = 3) {
-  return classifyThrottle(() => trpcGetRaw(proc, json, tries));
+// Concurrent callers that reach a verdict on the same cookie share one run,
+// so a burst of 401s across parallel workers costs one confirmation instead
+// of one per worker. A run started by a raw read also rides the ladder's
+// waits (see unauthorizedRead); a caller joining either kind gets its verdict.
+let expiryChecks = new Map(); // cookie -> in-flight verdict
+function confirmSessionExpired(cookie, fetchImpl = fetch, { ladder = false } = {}) {
+  let pending = expiryChecks.get(cookie);
+  if (!pending) {
+    pending = (ladder
+      ? rawReadSessionExpired(cookie, fetchImpl)
+      : isSessionActuallyExpired({ cookie, fetchImpl })
+    ).finally(() => {
+      if (expiryChecks.get(cookie) === pending) expiryChecks.delete(cookie);
+    });
+    expiryChecks.set(cookie, pending);
+  }
+  return pending;
 }
 
-async function trpcGetRaw(proc, json, tries = 3) {
-  const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
+// A raw read got one 401 and no retries, so before the serial probes this
+// spends the same waits the ladder would have, probing once after each. A
+// throttle that clears at any step is not an expiry.
+async function rawReadSessionExpired(cookie, fetchImpl) {
+  for (const delay of authRetryDelays()) {
+    await sleep(delay + Math.floor(Math.random() * 400));
+    if (!(await isSessionActuallyExpired({ probes: 1, cookie, fetchImpl }))) return false;
+  }
+  return isSessionActuallyExpired({ cookie, fetchImpl });
+}
+
+export function __resetSessionExpiryChecksForTests() {
+  expiryChecks = new Map();
+}
+
+/** A 401 on a read that does not ride the ladder (the paged CRM walk, profile
+ *  reads). The same evidence as the ladder decides, on the same cookie: dead
+ *  parks the session and reports AUTH_EXPIRED, anything else was throttling. */
+export async function unauthorizedRead(cookie, { fetchImpl = fetch } = {}) {
+  return (await confirmSessionExpired(cookie, fetchImpl, { ladder: true }))
+    ? authExpired(cookie)
+    : throttled();
+}
+
+export async function trpcGet(proc, json, tries = 3) {
+  return classifyThrottle((cookie) => trpcGetRaw(proc, json, tries, { cookie }));
+}
+
+async function trpcGetRaw(proc, json, tries = 3, { cookie = paraformCookieValue(), fetchImpl = fetch } = {}) {
+  const observedFetch = telemetryFetch(fetchImpl, "dashboard-sequences");
   const url = `${BASE}/trpc/${proc}?input=` + encodeURIComponent(JSON.stringify(env(json)));
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await observedFetch(url, { headers: headers(), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(url, { headers: sessionHeaders(cookie), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       // A 5xx/429 body is usually HTML, so without this the failure surfaced as
       // an opaque JSON parse error that nothing could classify as retryable.
@@ -219,14 +282,14 @@ async function trpcGetRaw(proc, json, tries = 3) {
   }
 }
 export async function trpcPost(proc, json, tries = 3) {
-  return classifyThrottle(() => trpcPostRaw(proc, json, tries));
+  return classifyThrottle((cookie) => trpcPostRaw(proc, json, tries, { cookie }));
 }
 
-async function trpcPostRaw(proc, json, tries = 3) {
+async function trpcPostRaw(proc, json, tries = 3, { cookie = paraformCookieValue() } = {}) {
   const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: sessionHeaders(cookie), body: JSON.stringify(env(json)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
@@ -239,14 +302,14 @@ async function trpcPostRaw(proc, json, tries = 3) {
 // adapter deliberately simple, and opt into metadata only for those pinned
 // contracts (currently campaign start_date, which must deserialize as Date).
 export async function trpcPostWithMeta(proc, json, values = {}, tries = 3) {
-  return classifyThrottle(() => trpcPostWithMetaRaw(proc, json, values, tries));
+  return classifyThrottle((cookie) => trpcPostWithMetaRaw(proc, json, values, tries, { cookie }));
 }
 
-async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3) {
+async function trpcPostWithMetaRaw(proc, json, values = {}, tries = 3, { cookie = paraformCookieValue() } = {}) {
   const observedFetch = telemetryFetch(fetch, "dashboard-sequences");
   for (let a = 0; a < tries; a++) {
     try {
-      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: headers(), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
+      const r = await observedFetch(`${BASE}/trpc/${proc}`, { method: "POST", headers: sessionHeaders(cookie), body: JSON.stringify(envWithMeta(json, values)), signal: AbortSignal.timeout(20000) });
       if (r.status === 401) throw throttled();
       if (r.status === 429 || r.status >= 500) throw transportStatusError(r.status);
       const b = await r.json();
@@ -431,6 +494,7 @@ export async function crmProjectMembers(
   const items = [];
   const seenIds = new Set();
   const seenCursors = new Set();
+  const cookie = paraformCookieValue();
   let cursor = 0;
   while (true) {
     const cursorKey = String(cursor);
@@ -461,15 +525,10 @@ export async function crmProjectMembers(
         },
       }));
     const response = await fetchImpl(url, {
-      headers: headers(),
+      headers: sessionHeaders(cookie),
       signal: AbortSignal.timeout(20000),
     });
-    if (response.status === 401) {
-      notifyParaformSessionRejected();
-      const error = new Error("AUTH_EXPIRED");
-      error.code = "AUTH_EXPIRED";
-      throw error;
-    }
+    if (response.status === 401) throw await unauthorizedRead(cookie, { fetchImpl });
     if (!response.ok) throw new Error(`CRM_READ_FAILED_${response.status}`);
     const body = (await response.json())?.result?.data?.json || {};
     const page = Array.isArray(body.items) ? body.items : [];
@@ -725,15 +784,20 @@ export async function withThrottleRetry(fn, {
 }
 
 /** A cheap read retried with growing backoff. One probe is not enough: it races
- *  the very burst it is trying to rule out. */
-export async function isSessionActuallyExpired({ probes = 3 } = {}) {
+ *  the very burst it is trying to rule out. `cookie` is the session under
+ *  test (the one that got the 401); it defaults to the process's current one. */
+export async function isSessionActuallyExpired({
+  probes = 3,
+  cookie = paraformCookieValue(),
+  fetchImpl = fetch,
+} = {}) {
   // Deliberately trpcGetRaw: the classifier calls THIS to decide, so going back
   // through it would recurse forever. Raw also means one probe, one verdict.
   for (let i = 0; i < probes; i++) {
-    try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1); return false; }
+    try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1, { cookie, fetchImpl }); return false; }
     catch (e) {
       if (e?.code !== "PARAFORM_THROTTLED") return false; // reached it, so auth is fine
-      await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
+      if (i < probes - 1) await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
     }
   }
   return true;
@@ -957,6 +1021,7 @@ export async function archiveImportSet(
       .map((id) => String(id || "").trim())
       .filter(Boolean),
   )];
+  const cookie = paraformCookieValue();
   let index = 0;
   const worker = async () => {
     while (index < ids.length) {
@@ -964,16 +1029,11 @@ export async function archiveImportSet(
       const response = await fetchImpl(
         `${BASE}/candidates/profile/${encodeURIComponent(id)}/info`,
         {
-          headers: headers(),
+          headers: sessionHeaders(cookie),
           signal: AbortSignal.timeout(20000),
         },
       );
-      if (response.status === 401) {
-        notifyParaformSessionRejected();
-        const error = new Error("AUTH_EXPIRED");
-        error.code = "AUTH_EXPIRED";
-        throw error;
-      }
+      if (response.status === 401) throw await unauthorizedRead(cookie, { fetchImpl });
       if (!response.ok) {
         throw new Error(`CANDIDATE_PROFILE_READ_FAILED_${response.status}`);
       }

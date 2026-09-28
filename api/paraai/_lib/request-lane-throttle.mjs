@@ -37,8 +37,14 @@ import {
   requestLaneKv,
   requestLaneStoreConfigured,
 } from "./request-lane-store.mjs";
-import { trpcGetRaw, trpcPostRaw } from "./core.mjs";
+import {
+  isParaformSessionActuallyExpired,
+  paraformCookie,
+  trpcGetRaw,
+  trpcPostRaw,
+} from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
+import { notifyParaformSessionRejected } from "../../_lib/paraform-session-store.mjs";
 
 export const REQUEST_LANE_COOLDOWN_CODE = "PARAFORM_REQUEST_LANES_COOLING_DOWN";
 export const REQUEST_LANE_RATE_LIMITED_CODE = "PARAFORM_REQUEST_LANES_RATE_LIMITED";
@@ -338,10 +344,34 @@ async function claimRequestLaneIdentityCheck({
   }
 }
 
+// The identity check is these lanes' expiry verdict: it runs only while a
+// cooldown armed by an earlier 401 blocks lane traffic, at most once per
+// interval. A lane call's own 401 no longer parks the store slot (a burst
+// throttle would drop the process onto the next candidate, eventually the
+// static env seal). A 401 here parks it only after the Para AI classifier's
+// own three confirmation rounds on the same cookie (at most six more reads,
+// about 4.5 seconds) agree it is dead, and only while the process still
+// holds that cookie. That is what moves the lanes off a dead slot. The
+// check's own result is unchanged: its 401 is reported.
+async function identityRead() {
+  const cookie = await paraformCookie();
+  try {
+    return await trpcGetRaw("user.getCurrentUser", {}, 1, { cookie });
+  } catch (error) {
+    if (
+      String(error?.code || "") === "PARAFORM_THROTTLED"
+      && (await isParaformSessionActuallyExpired({ cookie }))
+    ) {
+      notifyParaformSessionRejected({ cookie });
+    }
+    throw error;
+  }
+}
+
 export async function requestLaneAuthStatus({
   now = Date.now(),
   minIntervalMs = IDENTITY_CHECK_MIN_INTERVAL_MS,
-  readImpl = () => trpcGetRaw("user.getCurrentUser", {}, 1),
+  readImpl = identityRead,
   reportFailureImpl = reportParaformReadAuthFailure,
   recordImpl = recordRequestLaneRequest,
   kvImpl = requestLaneKv,

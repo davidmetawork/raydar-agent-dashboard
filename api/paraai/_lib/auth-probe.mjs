@@ -32,7 +32,13 @@
 // - The probe consumes the shared cookie through the existing core.mjs
 //   helpers and never logs or stores the cookie value anywhere.
 
-import { notifySlack, trpcGetRaw } from "./core.mjs";
+import {
+  isParaformSessionActuallyExpired,
+  notifySlack,
+  paraformCookie,
+  trpcGetRaw,
+} from "./core.mjs";
+import { notifyParaformSessionRejected } from "../../_lib/paraform-session-store.mjs";
 import { kv } from "./store.mjs";
 
 export const AUTH_FLAG_KEY = "auth:paraform:down";
@@ -173,8 +179,8 @@ async function probePasses({ trpcGetImpl, sleepImpl, budgetMs }) {
     return { healthy: null, reason: first.reason, passes: 1 };
   }
   // Both distinct reads 401'd. Retry once before declaring down — lone
-  // intermittent 401s are known Paraform behavior (verifier note), and a
-  // 401 already cleared the cookie cache, so this pass rereads the store.
+  // intermittent 401s are known Paraform behavior (verifier note). Both
+  // passes send the same pinned cookie (see probeParaformAuth).
   await sleepImpl(PROBE_RETRY_DELAY_MS);
   const second = await probePass({ trpcGetImpl, budgetMs });
   if (second.outcome === "healthy") {
@@ -200,18 +206,58 @@ async function probePasses({ trpcGetImpl, sleepImpl, budgetMs }) {
   };
 }
 
+// Session hooks for the probe, injectable in tests.
+export const PROBE_SESSION = Object.freeze({
+  current: () => paraformCookie(),
+  confirmDead: (cookie) => isParaformSessionActuallyExpired({ cookie }),
+  park: (cookie) => notifyParaformSessionRejected({ cookie }),
+});
+
+// A caller that injects its own transport has no store session to pin or
+// park.
+const NO_SESSION = Object.freeze({
+  current: async () => undefined,
+  confirmDead: async () => false,
+  park: () => false,
+});
+
+// All four reads of one run send one pinned cookie. A 401 no longer parks the
+// store slot by itself (a burst throttle would move the process onto the
+// next candidate, eventually the static env seal). When both passes fail,
+// the Para AI classifier's three confirmation rounds run on that cookie, and
+// only if they agree it is dead is its slot parked and the probe run once
+// more on the next candidate, so a dead slot is not reported as a dead seat
+// while another slot is live.
+async function probeRun({ trpcGetImpl, sleepImpl, budgetMs, session }) {
+  const cookie = await session.current().catch(() => undefined);
+  const pinned = (cookieValue) => (proc, input, tries) =>
+    trpcGetImpl(proc, input, tries, { cookie: cookieValue });
+  const result = await probePasses({ trpcGetImpl: pinned(cookie), sleepImpl, budgetMs });
+  if (result.healthy !== false || cookie === undefined) return result;
+  if (!(await session.confirmDead(cookie)) || !session.park(cookie)) return result;
+  const next = await session.current().catch(() => undefined);
+  if (next === undefined || next === cookie) return result;
+  const retried = await probePasses({ trpcGetImpl: pinned(next), sleepImpl, budgetMs });
+  return { ...retried, movedOffDeadSlot: true };
+}
+
 export async function probeParaformAuth(
   { budgetMs = PROBE_READ_BUDGET_MS } = {},
-  { trpcGetImpl = trpcGetRaw, sleepImpl = sleep } = {},
+  {
+    trpcGetImpl = trpcGetRaw,
+    sleepImpl = sleep,
+    session = trpcGetImpl === trpcGetRaw ? PROBE_SESSION : NO_SESSION,
+  } = {},
 ) {
   // The per-read cap alone still lets slow failures stack: four near-budget
   // 401s plus the retry gap is ~4x the read budget before the lanes run.
   // One overall cap of 2x the per-read budget bounds the whole probe (both
-  // passes AND the retry gap). Overrun proves nothing about the cookie, so
-  // it fails open exactly like a per-read timeout.
+  // passes, the retry gap, and any run on the next slot). Overrun proves
+  // nothing about the cookie, so it fails open exactly like a per-read
+  // timeout.
   try {
     return await withBudget(
-      probePasses({ trpcGetImpl, sleepImpl, budgetMs }),
+      probeRun({ trpcGetImpl, sleepImpl, budgetMs, session }),
       budgetMs * 2,
     );
   } catch (error) {
