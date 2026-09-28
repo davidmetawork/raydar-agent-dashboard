@@ -258,3 +258,202 @@ test("catchUpBookingIndexes, driven through the real applyDecisions + pacedApply
     global.fetch = originalFetch;
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The rotor inside the catch-up route's 120 s (2026-09-28 gap): its default
+// budget of 60 reads at the pacer's 6.5 s spacing cannot fit, and it saved
+// its cursor only at the end, so a run the platform killed never advanced
+// it and the same first rows were re-read every day.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function rotorRows(count, { cuOf = (i) => `cu_${i}` } = {}) {
+  const rows = Array.from({ length: count }, (_, i) => ({
+    ccu: `ccu_${String(i).padStart(2, "0")}`,
+    cu: cuOf(i),
+    n: `Cand ${i}`,
+    s: "seq_1",
+    sn: "No Show - Agent Call",
+    t: "2026-01-01T00:00:00.000Z",
+  }));
+  return Object.fromEntries(rows.map((row, i) => [`row${i}@example.com`, [row]]));
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("bookTimeRotorCheck saves its cursor after every read, so a run killed mid-read keeps the rows it finished", async () => {
+  const saves = [];
+  let release;
+  const hang = new Promise((resolve) => { release = resolve; });
+  const run = bookTimeRotorCheck({
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(5)),
+    loadRotor: async () => null,
+    saveRotor: async (cursor) => { saves.push(cursor); },
+    // The third read never answers: the platform kills the run here.
+    relationshipStatusLoader: async (cu) => (cu === "cu_2" ? hang : null),
+    budget: 5,
+  });
+  for (let i = 0; i < 10; i++) await settle();
+  assert.deepEqual(saves, [1, 2], "rows 0 and 1 are saved before the hung read");
+  release(null);
+  const out = await run;
+  assert.deepEqual(saves, [1, 2, 3, 4, 0]);
+  assert.equal(out.stoppedBy, "lap");
+  assert.equal(out.cursor, 0);
+});
+
+test("bookTimeRotorCheck starts no read past its deadline and records where it stopped", async () => {
+  let clockMs = 0;
+  const saves = [];
+  const out = await bookTimeRotorCheck({
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(10)),
+    loadRotor: async () => null,
+    saveRotor: async (cursor) => { saves.push(cursor); },
+    relationshipStatusLoader: async () => { clockMs += PACE_MIN_INTERVAL_MS; return null; },
+    budget: 60,
+    deadlineAt: 20_000,
+    clock: () => clockMs,
+  });
+  // Reads start at 0, 6.5, 13 and 19.5 s; at 26 s the deadline has passed.
+  assert.equal(out.checked, 4);
+  assert.equal(out.stoppedBy, "deadline");
+  assert.equal(out.cursor, 4);
+  assert.deepEqual(saves, [1, 2, 3, 4]);
+});
+
+test("bookTimeRotorCheck stops on a refusal and leaves the cursor on the refused row", async () => {
+  let rotorState = null;
+  const read = [];
+  const common = {
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(5)),
+    loadRotor: async () => rotorState,
+    saveRotor: async (cursor) => { rotorState = { cursor }; },
+    budget: 5,
+  };
+  const first = await bookTimeRotorCheck({
+    ...common,
+    relationshipStatusLoader: async (cu) => {
+      if (cu === "cu_1") throw Object.assign(new Error("PARAFORM_PACED_BACKOFF"), { code: "PARAFORM_PACED_BACKOFF" });
+      read.push(cu);
+      return null;
+    },
+  });
+  assert.equal(first.checked, 1);
+  assert.equal(first.stoppedBy, "refused");
+  assert.equal(first.stopReason, "PARAFORM_PACED_BACKOFF");
+  assert.equal(first.cursor, 1);
+  assert.deepEqual(rotorState, { cursor: 1 });
+
+  const second = await bookTimeRotorCheck({
+    ...common,
+    budget: 2,
+    relationshipStatusLoader: async (cu) => { read.push(cu); return null; },
+  });
+  assert.equal(second.checked, 2);
+  assert.deepEqual(read, ["cu_0", "cu_1", "cu_2"], "the next run starts at the row that was refused");
+});
+
+test("bookTimeRotorCheck passes over a row whose own read fails, so one bad row cannot hold the rotor", async () => {
+  const out = await bookTimeRotorCheck({
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(3)),
+    loadRotor: async () => null,
+    saveRotor: async () => {},
+    relationshipStatusLoader: async (cu) => {
+      if (cu === "cu_1") throw Object.assign(new Error("not found"), { code: "PARAFORM_REFUSED", status: 404 });
+      return null;
+    },
+    budget: 3,
+  });
+  assert.equal(out.checked, 3);
+  assert.equal(out.readErrors, 1);
+  assert.equal(out.stoppedBy, "lap");
+});
+
+test("bookTimeRotorCheck treats 401, 403, 429, 5xx, transport and dead-session failures as refusals", async () => {
+  const refusals = [
+    { code: "PARAFORM_REFUSED_AUTH", status: 401 },
+    { code: "PARAFORM_REFUSED", status: 403 },
+    { code: "PARAFORM_REFUSED", status: 429 },
+    { code: "PARAFORM_REFUSED", status: 502 },
+    { code: "PARAFORM_TRANSPORT_ERROR" },
+    { code: "PARAFORM_SESSION_DEAD", status: 401 },
+    { code: "KV_UNAVAILABLE" },
+  ];
+  for (const refusal of refusals) {
+    const out = await bookTimeRotorCheck({
+      now: NOW,
+      loadLive: async () => usableLiveSet(rotorRows(3)),
+      loadRotor: async () => null,
+      saveRotor: async () => {},
+      relationshipStatusLoader: async () => { throw Object.assign(new Error(refusal.code), refusal); },
+      budget: 3,
+    });
+    assert.equal(out.stoppedBy, "refused", `${refusal.code} ${refusal.status ?? ""}`);
+    assert.equal(out.checked, 0);
+    assert.equal(out.cursor, 0);
+  }
+});
+
+test("bookTimeRotorCheck moves past rows with no candidate user id instead of sticking on them", async () => {
+  // The old cursor advanced by the number of rows READ, so a stretch of at
+  // least `budget` rows without a cu id held it in place for good.
+  let rotorState = null;
+  const read = [];
+  const common = {
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(6, { cuOf: (i) => (i < 3 ? null : `cu_${i}`) })),
+    loadRotor: async () => rotorState,
+    saveRotor: async (cursor) => { rotorState = { cursor }; },
+    relationshipStatusLoader: async (cu) => { read.push(cu); return null; },
+    budget: 2,
+  };
+  const first = await bookTimeRotorCheck(common);
+  assert.equal(first.checked, 2);
+  assert.equal(first.cursor, 5);
+  const second = await bookTimeRotorCheck(common);
+  assert.deepEqual(read, ["cu_3", "cu_4", "cu_5", "cu_3"], "the second run reads row 5, passes over rows 0-2 and wraps to row 3");
+  assert.equal(second.cursor, 4);
+});
+
+test("bookTimeRotorCheck through the real pacer: a 429 stops the rotor after one request, with the cursor on that row", async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  let now = NOW;
+  let state = null;
+  let rotorState = null;
+  const pace = createPacer({
+    loadState: async () => state,
+    saveState: async (value) => { state = value; },
+    incrementCount: async () => {},
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+    heldSession: () => ({ value: "Fe26.2**test-cookie", slot: "env" }),
+    nextSession: async () => null,
+    log: () => {},
+  });
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    if (calls.length === 2) return new Response(null, { status: 429 });
+    return Response.json({ result: { data: { json: { candidate_user_relationship_status: null } } } });
+  };
+  try {
+    const out = await bookTimeRotorCheck({
+      now: NOW,
+      loadLive: async () => usableLiveSet(rotorRows(5, { cuOf: (i) => `cu_rotor_429_${i}` })),
+      loadRotor: async () => rotorState,
+      saveRotor: async (cursor) => { rotorState = { cursor }; },
+      relationshipStatusLoader: pacedRelationshipStatusLoader(pace),
+      budget: 5,
+    });
+    assert.equal(calls.length, 2, "one read, then the refused one; nothing after it");
+    assert.equal(out.checked, 1);
+    assert.equal(out.stoppedBy, "refused");
+    assert.equal(out.stopReason, "PARAFORM_REFUSED");
+    assert.deepEqual(rotorState, { cursor: 1 });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

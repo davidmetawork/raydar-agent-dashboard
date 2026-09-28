@@ -13,6 +13,7 @@ import { completeCampaignLeads } from "./_lib/core.mjs";
 import {
   createPacer,
   pacedTrpcClient,
+  pacedWithinDeadline,
 } from "./_lib/booking-protection-pace.mjs";
 import {
   buildLiveSet,
@@ -56,15 +57,72 @@ async function recordAttempt(status, extra = {}) {
   }, 3 * 24 * 3600).catch(() => {});
 }
 
-async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
+/**
+ * The walk's two paced call sites: the catalog read, and the pause between
+ * sequence walks. Either can meet a backoff in force, written by an earlier
+ * refusal in this run or by another invocation (a worker tick's refusal, or
+ * the pacer holding others off while it confirms a 401). A backoff that ends
+ * before the deadline is waited out instead of failing the day's refresh;
+ * one that does not still fails it loudly as PARAFORM_PACED_BACKOFF. The
+ * catalog read also gets one more attempt after a transient refusal (a
+ * throttle 401, 403, 429, 5xx or transport failure), after its backoff.
+ * `stats` counts the waits for the attempt record.
+ */
+export function refreshPacedCalls({
+  pace,
+  deadlineAt,
+  stats = {},
+  now,
+  sleep,
+  log,
+} = {}) {
+  const client = pacedTrpcClient(pace);
+  stats.backoffWaits = 0;
+  stats.backoffWaitMs = 0;
+  stats.catalogRetries = 0;
+  const waitSleep = sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const counted = {
+    deadlineAt,
+    now,
+    log,
+    sleep: async (ms) => {
+      stats.backoffWaits++;
+      stats.backoffWaitMs += ms;
+      await waitSleep(ms);
+    },
+  };
+  return {
+    listSequences: () => pacedWithinDeadline(
+      () => client.get("campaigns.getListOfCampaignsOptimized", {}),
+      {
+        ...counted,
+        retryTransientRefusals: 1,
+        label: "the catalog read",
+        onRetry: () => { stats.catalogRetries++; },
+      },
+    ),
+    sleepBetweenSequences: () => pacedWithinDeadline(
+      () => pace(async () => {}),
+      { ...counted, label: "the pause between sequence walks" },
+    ).catch((error) => {
+      if (error?.code === "PARAFORM_PACED_BACKOFF") throw error;
+    }),
+  };
+}
+
+async function runRefresh({ triggeredBy, startedAt = Date.now(), pacingStats = {} }) {
   await ensureParaformSession();
   if (!hasCookie()) {
     await recordAttempt("failure", { error: "no_cookie" });
     return { ok: false, error: "no_cookie" };
   }
+  const deadlineAt = startedAt + LIVESET_REFRESH_BUDGET_MS;
   const pace = createPacer();
-  const client = pacedTrpcClient(pace);
-  const listSequences = () => client.get("campaigns.getListOfCampaignsOptimized", {});
+  const { listSequences, sleepBetweenSequences } = refreshPacedCalls({
+    pace,
+    deadlineAt,
+    stats: pacingStats,
+  });
   // completeCampaignLeads walks one sequence internally (page reads, and a
   // rare oracle-backed backfill) at its own established pace; pacing is
   // applied BETWEEN sequences here, one sequence in flight at a time, which
@@ -74,20 +132,18 @@ async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
   // own internal page walk can briefly exceed strict per-request spacing;
   // it stays far under Paraform's measured ~30/min refusal edge.
   const membershipLoader = (id) => completeCampaignLeads(id);
-  const sleepBetweenSequences = () => pace(async () => {}).catch((error) => {
-    if (error?.code === "PARAFORM_PACED_BACKOFF") throw error;
-  });
 
   const liveSet = await buildLiveSet({
     listSequences,
     membershipLoader,
     sleepBetweenSequences,
-    deadlineAt: startedAt + LIVESET_REFRESH_BUDGET_MS,
+    deadlineAt,
   });
   await publishLiveSet(liveSet);
   await recordAttempt("success", {
     triggeredBy,
     durationMs: Date.now() - startedAt,
+    ...pacingStats,
     catalogSequences: liveSet.catalogSequences,
     candidateSequences: liveSet.candidateSequences,
     sequencesWithActiveLeads: liveSet.sequencesWithActiveLeads,
@@ -123,8 +179,9 @@ async function handleBookingLivesetRefresh(req, res) {
   }
 
   const startedAt = Date.now();
+  const pacingStats = {};
   try {
-    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator", startedAt });
+    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator", startedAt, pacingStats });
     if (!result.ok && (await shouldAlert(`liveset-refresh-${result.error}`, 6 * 3600))) {
       await notifySlack(`:rotating_light: Booking live-set refresh could not run (${result.error}). The worker will keep serving the last published index until it ages past ${Math.round((36 * 3600))}s.`).catch(() => {});
     }
@@ -138,6 +195,7 @@ async function handleBookingLivesetRefresh(req, res) {
       error: code,
       reason: String(error?.code || "").slice(0, 60) || null,
       durationMs: Date.now() - startedAt,
+      ...pacingStats,
     });
     if (await shouldAlert(`liveset-refresh-${code}`, 6 * 3600)) {
       await notifySlack(`:rotating_light: Booking live-set refresh failed: ${String(error?.message || error).slice(0, 160)}`).catch(() => {});
