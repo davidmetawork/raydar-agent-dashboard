@@ -243,11 +243,11 @@ test("a row refused on two runs in a row is passed over, so one row Paraform alw
   };
   const first = await bookTimeRotorCheck(common);
   assert.equal(first.stoppedBy, "refused");
-  assert.deepEqual(rotorState, { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", count: 1 } });
+  assert.deepEqual(rotorState, { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", kind: "read", count: 1 } });
 
   const second = await bookTimeRotorCheck(common);
   assert.equal(second.passedRefused, 1);
-  assert.equal(second.readErrors, 1);
+  assert.equal(second.readErrors, 0, "a passed refusal is not also a read error");
   assert.equal(second.stoppedBy, "budget");
   assert.deepEqual(read, ["cu_0", "cu_1", "cu_1", "cu_2"], "the second refusal passes the row and the run moves on");
   assert.deepEqual(rotorState, { cursor: 3, next: "ccu_03", refused: null });
@@ -255,7 +255,7 @@ test("a row refused on two runs in a row is passed over, so one row Paraform alw
 
 test("a backoff or a dead session at the cursor does not count against the row", async () => {
   for (const code of ["PARAFORM_PACED_BACKOFF", "PARAFORM_SESSION_DEAD"]) {
-    const before = { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", count: 1 } };
+    const before = { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", kind: "read", count: 1 } };
     let rotorState = before;
     const out = await bookTimeRotorCheck({
       now: NOW,
@@ -324,7 +324,7 @@ test("a failed pause stops the run on that row, so the next run retries it inste
   assert.equal(first.stoppedBy, "refused");
   assert.equal(first.stopReason, "PAUSE_FAILED");
   assert.equal(first.pauseErrors.length, 1);
-  assert.deepEqual(rotorState, { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", count: 1 } });
+  assert.deepEqual(rotorState, { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", kind: "pause", count: 1 } });
 
   // The next run retries the same row first; a second failure passes it.
   const second = await bookTimeRotorCheck(common);
@@ -453,4 +453,69 @@ test("a budget setting that is not a number reads nothing, as before", async () 
   });
   assert.equal(reads, 0);
   assert.equal(out.stoppedBy, "budget_invalid");
+});
+
+test("a refused read and then one failed pause do not add up to passing a booked lead over", async () => {
+  // Focused-check finding: read refusals and pause failures shared one count.
+  const booked = { status: "SCHEDULED_CALL", at: "2026-08-01T00:00:00.000Z" };
+  let rotorState = { cursor: 1, next: "ccu_01", refused: { ccu: "ccu_01", kind: "read", count: 1 } };
+  const common = {
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(3)),
+    loadRotor: async () => rotorState,
+    saveRotor: async (cursor, extra = {}) => { rotorState = { cursor, ...extra }; },
+    relationshipStatusLoader: async (cu) => (cu === "cu_1" ? booked : null),
+    applyDecisionsImpl: async () => ({ paused: 0, pauseErrors: [{ sequence: "seq_1", reason: "PARAFORM_HTTP_429" }] }),
+    budget: 3,
+  };
+  const out = await bookTimeRotorCheck(common);
+  assert.equal(out.passedPauseFailures, 0);
+  assert.equal(out.stoppedBy, "refused");
+  assert.deepEqual(rotorState.refused, { ccu: "ccu_01", kind: "pause", count: 1 });
+  const again = await bookTimeRotorCheck(common);
+  assert.equal(again.passedPauseFailures, 1, "the second failed pause in a row passes it");
+});
+
+test("a passed-over refusal does not pass another lead of the same candidate unread", async () => {
+  // Focused-check finding: the passed row's error was cached for the
+  // candidate, so a sibling lead was passed with no refusal of its own.
+  const rows = {
+    "same@example.com": [
+      { ccu: "ccu_0", cu: "cu_same", n: "Cand", s: "seq_1", sn: "No Show - Agent Call", t: "2026-07-01T00:00:00.000Z" },
+      { ccu: "ccu_1", cu: "cu_same", n: "Cand", s: "seq_2", sn: "No Show - Agent Call", t: "2026-07-01T00:00:00.000Z" },
+    ],
+  };
+  let rotorState = { cursor: 0, next: "ccu_0", refused: { ccu: "ccu_0", kind: "read", count: 1 } };
+  let reads = 0;
+  const out = await bookTimeRotorCheck({
+    now: NOW,
+    loadLive: async () => usableLiveSet(rows),
+    loadRotor: async () => rotorState,
+    saveRotor: async (cursor, extra = {}) => { rotorState = { cursor, ...extra }; },
+    relationshipStatusLoader: async () => {
+      reads++;
+      throw Object.assign(new Error("PARAFORM_HTTP_403"), { code: "PARAFORM_REFUSED", status: 403 });
+    },
+    budget: 5,
+  });
+  assert.equal(reads, 2, "the sibling lead is read again");
+  assert.equal(out.passedRefused, 1);
+  assert.equal(out.stoppedBy, "refused");
+  assert.deepEqual(rotorState, { cursor: 1, next: "ccu_1", refused: { ccu: "ccu_1", kind: "read", count: 1 } });
+});
+
+test("a position-only cursor is rewritten with its lead id on the first run, even one that sends nothing", async () => {
+  let rotorState = { cursor: 2, refused: { ccu: "ccu_00", count: 1 } };
+  const out = await bookTimeRotorCheck({
+    now: NOW,
+    loadLive: async () => usableLiveSet(rotorRows(4)),
+    loadRotor: async () => rotorState,
+    saveRotor: async (cursor, extra = {}) => { rotorState = { cursor, ...extra }; },
+    relationshipStatusLoader: async () => {
+      throw Object.assign(new Error("PARAFORM_PACED_BACKOFF"), { code: "PARAFORM_PACED_BACKOFF" });
+    },
+    budget: 2,
+  });
+  assert.equal(out.stoppedBy, "refused");
+  assert.deepEqual(rotorState, { cursor: 2, next: "ccu_02", refused: null }, "an old count on another row is not carried over");
 });

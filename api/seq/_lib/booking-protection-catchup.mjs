@@ -195,13 +195,16 @@ const UNSENT_CODES = new Set(["PARAFORM_PACED_BACKOFF", "PARAFORM_SESSION_DEAD",
  *     401, 403, 429 or 5xx, a dead session, a transport failure): every
  *     later read in the same run would be refused too;
  *   - a pause fails: the next run retries it, instead of a lap later.
- * A row that stops the run on ROTOR_ROW_REFUSAL_LIMIT runs in a row, with
- * a request actually sent each time, is then passed over (`passedRefused`,
- * or `passedPauseFailures` for a booked lead that could not be paused); the
- * count is saved with the cursor as `refused`. A read that fails for that
- * row alone (a tRPC error, a 400 or 404) is counted in `readErrors` and
- * passed over at once. The pacer backs off after any failed call, so the
- * read after it usually stops the run with `PARAFORM_PACED_BACKOFF`.
+ * A row that stops the run the same way (its read refused, or its pause
+ * failed) on ROTOR_ROW_REFUSAL_LIMIT runs in a row, with a request actually
+ * sent each time, is then passed over (`passedRefused`, or
+ * `passedPauseFailures` for a booked lead that could not be paused); the
+ * count is saved with the cursor as `refused: {ccu, kind, count}`. A read
+ * that fails for that row alone (a tRPC error, a 400 or 404) is counted in
+ * `readErrors` and passed over at once. The pacer backs off after any failed
+ * call, so the read after it usually stops the run with
+ * `PARAFORM_PACED_BACKOFF`; a row Paraform always refuses therefore costs
+ * about two runs per lap.
  */
 export async function bookTimeRotorCheck({
   now = Date.now(),
@@ -247,21 +250,27 @@ export async function bookTimeRotorCheck({
   const byCcu = (a, b) => (String(a.ccu) < String(b.ccu) ? -1 : String(a.ccu) > String(b.ccu) ? 1 : 0);
   rows.sort(byCcu);
 
+  const idOf = (row) => String(row.ccu);
   const rotorState = await loadRotor();
   let startAt = 0;
   if (typeof rotorState?.next === "string") {
     // The first row at or after the saved one; past the end, wrap to 0.
-    const at = rows.findIndex((row) => String(row.ccu) >= rotorState.next);
+    const at = rows.findIndex((row) => idOf(row) >= rotorState.next);
     startAt = at < 0 ? 0 : at;
   } else if (Number.isInteger(rotorState?.cursor)) {
     startAt = ((rotorState.cursor % rows.length) + rows.length) % rows.length;
   }
-  // The row a previous run stopped on, and on how many runs in a row. Kept
-  // only while that row is still in the live set.
-  let refused = typeof rotorState?.refused?.ccu === "string"
-    && Number.isInteger(rotorState.refused.count)
-    && rows.some((row) => row.ccu === rotorState.refused.ccu)
-    ? { ccu: rotorState.refused.ccu, count: rotorState.refused.count }
+  // A cursor saved before `next` existed is rewritten on this run, even if
+  // it stops without sending anything.
+  let migrate = Boolean(rotorState) && typeof rotorState.next !== "string";
+  // The row a previous run stopped on, how, and on how many runs in a row.
+  // Kept only when it is the row this run starts on.
+  const priorRefused = rotorState?.refused;
+  let refused = typeof priorRefused?.ccu === "string"
+    && Number.isInteger(priorRefused.count)
+    && typeof priorRefused.kind === "string"
+    && priorRefused.ccu === idOf(rows[startAt])
+    ? { ccu: priorRefused.ccu, kind: priorRefused.kind, count: priorRefused.count }
     : null;
   // `scanned` counts rows passed over in rotor order, including rows with no
   // candidate user id, so a run of those can never hold the cursor in place.
@@ -269,32 +278,34 @@ export async function bookTimeRotorCheck({
   let saved = { scanned: 0, refused };
   const rowAt = (offset) => rows[(startAt + offset) % rows.length];
   async function saveProgress() {
-    if (scanned === saved.scanned && refused === saved.refused) return;
+    if (!migrate && scanned === saved.scanned && refused === saved.refused) return;
     const position = (startAt + scanned) % rows.length;
     try {
-      await saveRotor(position, { next: String(rows[position].ccu), refused });
+      await saveRotor(position, { next: idOf(rows[position]), refused });
       saved = { scanned, refused };
+      migrate = false;
     } catch {
       // Best effort: the next save, or tomorrow's run, covers it.
     }
   }
   function advance(row) {
     scanned++;
-    if (refused?.ccu === row.ccu) refused = null;
+    if (refused?.ccu === idOf(row)) refused = null;
   }
-  // Stop on `row`, or pass it over once it has stopped the rotor on
-  // ROTOR_ROW_REFUSAL_LIMIT runs in a row. `sent` is false when nothing
-  // reached Paraform: the run stops, and the count does not move. Returns
-  // true to stop.
-  function stopOrPass(row, reason, { sent }) {
+  // Stop on `row`, or pass it over once it has stopped the rotor the same
+  // way (`kind`: "read" or "pause") on ROTOR_ROW_REFUSAL_LIMIT runs in a row.
+  // `sent` is false when nothing reached Paraform: the run stops, and the
+  // count does not move. Returns true to stop.
+  function stopOrPass(row, reason, { sent, kind }) {
     out.stopReason = reason;
     if (!sent) { out.stoppedBy = "refused"; return true; }
-    const count = (refused?.ccu === row.ccu ? refused.count : 0) + 1;
+    const same = refused?.ccu === idOf(row) && refused.kind === kind;
+    const count = (same ? refused.count : 0) + 1;
     if (count >= ROTOR_ROW_REFUSAL_LIMIT) {
       out.stopReason = null;
       return false;
     }
-    refused = { ccu: row.ccu, count };
+    refused = { ccu: idOf(row), kind, count };
     out.stoppedBy = "refused";
     return true;
   }
@@ -315,8 +326,12 @@ export async function bookTimeRotorCheck({
       } catch (error) {
         const reason = String(error?.code || error?.message || "error").slice(0, 60);
         if (stopsTheRotor(error)) {
-          if (stopOrPass(row, reason, { sent: isTransientRefusal(error) })) break;
+          if (stopOrPass(row, reason, { sent: isTransientRefusal(error), kind: "read" })) break;
+          // Passed over, this row only: another lead of the same candidate
+          // later in the run reads again and earns its own refusals.
           out.passedRefused++;
+          advance(row);
+          continue;
         }
         entry = { error: reason };
       }
@@ -353,7 +368,7 @@ export async function bookTimeRotorCheck({
         if (applied.pauseErrors?.length) {
           out.pauseErrors.push(...applied.pauseErrors);
           const sent = applied.pauseErrors.some((e) => !UNSENT_CODES.has(String(e?.reason || "")));
-          if (stopOrPass(row, "PAUSE_FAILED", { sent })) break;
+          if (stopOrPass(row, "PAUSE_FAILED", { sent, kind: "pause" })) break;
           out.passedPauseFailures++;
         }
       }
@@ -364,7 +379,7 @@ export async function bookTimeRotorCheck({
   await saveProgress();
   const position = (startAt + saved.scanned) % rows.length;
   out.cursor = position;
-  out.next = String(rows[position].ccu);
+  out.next = idOf(rows[position]);
   return out;
 }
 

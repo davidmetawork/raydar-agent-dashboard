@@ -200,6 +200,25 @@ test("catchupAttemptStatus names each outcome", () => {
   );
 });
 
+test("a deduplicated moved-past alert does not fall through to the retried message", async () => {
+  await withFakeKv(async () => {
+    const sent = [];
+    await runCatchup({
+      pace: async (fn) => fn(),
+      catchUp: async () => ({ ...READY_INDEXES, raydar: { ...READY_INDEXES.raydar, paused: 0 } }),
+      bookTime: async () => ({
+        ...BOOKTIME_DONE,
+        passedPauseFailures: 1,
+        pauseErrors: [{ sequence: "seq_1", reason: "PARAFORM_HTTP_429" }],
+      }),
+      cookiePresent: () => true,
+      alert: async (key) => key !== "booking-catchup-booktime-passed",
+      notify: async (text) => { sent.push(text); },
+    });
+    assert.deepEqual(sent, []);
+  });
+});
+
 test("a booked lead the rotor moved past after two failed pauses is alerted as such, not as retried", async () => {
   await withFakeKv(async () => {
     const sent = [];

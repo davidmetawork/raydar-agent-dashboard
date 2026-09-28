@@ -124,6 +124,7 @@ export function catchupAttemptRecord(out, { startedAt, finishedAt }) {
       stoppedBy: bookTime.stoppedBy ?? null,
       stopReason: bookTime.stopReason ?? null,
       cursor: bookTime.cursor ?? null,
+      next: bookTime.next ?? null,
     } : null,
     bookTimeError: out.bookTimeError ?? null,
     bookTimeSkipped: out.bookTimeSkipped ?? null,
@@ -184,11 +185,16 @@ export async function runCatchup({
       });
       // A failed pause stops the rotor on that lead, so the next run retries
       // it; after a second failed run the rotor moves past it instead.
+      // The message is chosen first, then deduplicated on its own key.
       const passedPauses = out.bookTime.passedPauseFailures || 0;
-      if (passedPauses && (await alert("booking-catchup-booktime-passed", 6 * 3600))) {
-        await notify(`:rotating_light: Booking catch-up's Book Time check could not pause ${passedPauses} booked lead(s) on two runs in a row and moved past them; they come round again only after a full rotor lap. See /api/seq/health.`);
-      } else if (out.bookTime.pauseErrors?.length && (await alert("booking-catchup-booktime-errors", 6 * 3600))) {
-        await notify(`:warning: Booking catch-up's Book Time check failed to pause ${out.bookTime.pauseErrors.length} lead(s); the next run retries.`);
+      if (passedPauses) {
+        if (await alert("booking-catchup-booktime-passed", 6 * 3600)) {
+          await notify(`:rotating_light: Booking catch-up's Book Time check could not pause ${passedPauses} booked lead(s) on two runs in a row and moved past them; they come round again only after a full rotor lap. See /api/seq/health.`);
+        }
+      } else if (out.bookTime.pauseErrors?.length) {
+        if (await alert("booking-catchup-booktime-errors", 6 * 3600)) {
+          await notify(`:warning: Booking catch-up's Book Time check failed to pause ${out.bookTime.pauseErrors.length} lead(s); the next run retries.`);
+        }
       }
       if (out.bookTime.paused > 0) {
         await notify(`:pause_button: Booking catch-up's Book Time check paused ${out.bookTime.paused} candidate(s) who booked on Paraform's own page.`);
