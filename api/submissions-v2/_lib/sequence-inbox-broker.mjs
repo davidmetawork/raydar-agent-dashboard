@@ -13,6 +13,7 @@ import {
   inboxSubmissionsProjectionCoverage,
   readInboxSnapshotState,
   releaseInboxSyncLock,
+  resolveInboxParaformSession,
   writeInboxRefreshState,
 } from "../../inbox/_lib/core.mjs";
 
@@ -115,6 +116,7 @@ export async function readSequenceInboxBrokerBatch(input, {
   sleepImpl = wait,
   clock = () => Date.now(),
   readRoleMappings = readSourcingSequenceRoleMappings,
+  ensureSession = resolveInboxParaformSession,
 } = {}) {
   const request = validateSequenceInboxBatchRequest(input);
   const activationAt = sequenceInboxActivation({ env, now: now().getTime() });
@@ -140,14 +142,6 @@ export async function readSequenceInboxBrokerBatch(input, {
       digest: sourcingRoleMappingInternals.UNAVAILABLE_DIGEST,
     };
   }
-  const lock = await acquireLock();
-  if (lock?.status !== "acquired") {
-    if (lock?.status === "busy") {
-      throw fail("sequence_inbox_refresh_busy", "The bounded Sequence Inbox cache refresh is unavailable.", 503);
-    }
-    throw cacheUnavailable("lock_unavailable");
-  }
-  let batch;
   const deadline = clock() + SEQUENCE_INBOX_BROKER_DEADLINE_MS;
   const remaining = () => deadline - clock();
   const requireBudget = (minimumMs = 0) => {
@@ -159,6 +153,21 @@ export async function readSequenceInboxBrokerBatch(input, {
       );
     }
   };
+  // Resolve the live n8n-store Paraform session before any Paraform read;
+  // without it the refresh and point reads send the dead static env seal and
+  // every read 401s (reported as PARAFORM_THROTTLED). Bounded at 8s, outside
+  // the shared lock, and inside the broker deadline so the worker's 110s call
+  // budget does not grow. A 401 is never reported as a rejection here:
+  // inboxTrpcGet only parks a slot after its own spaced probes confirm it dead.
+  await ensureSession();
+  const lock = await acquireLock();
+  if (lock?.status !== "acquired") {
+    if (lock?.status === "busy") {
+      throw fail("sequence_inbox_refresh_busy", "The bounded Sequence Inbox cache refresh is unavailable.", 503);
+    }
+    throw cacheUnavailable("lock_unavailable");
+  }
+  let batch;
   try {
     const loaded = await readState();
     if (loaded?.status !== "ready" || !loaded.value) {

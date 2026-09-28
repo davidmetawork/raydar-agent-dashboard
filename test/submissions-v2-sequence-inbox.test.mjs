@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
 
 import {
   adaptSequenceInboxReply,
@@ -19,7 +20,7 @@ import {
   sequenceInboxActivation,
   validateSequenceInboxBatchRequest,
 } from "../api/submissions-v2/_lib/sequence-inbox-broker.mjs";
-import { publicMessage } from "../api/inbox/_lib/core.mjs";
+import { INBOX_SESSION_TIMEOUT_MS, publicMessage } from "../api/inbox/_lib/core.mjs";
 import { reconcileSequenceInbox } from "../submissions-v2-worker/sequence-inbox-reader.mjs";
 import {
   normalizeSourcingRoleMappingRecord,
@@ -370,6 +371,7 @@ test("broker holds the shared lock for at most its conservative refresh and poin
     env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
     now: () => new Date("2026-09-04T00:00:00.000Z"),
     clock: () => clock,
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "acquired", token: "lock" }),
     releaseLock: async () => { released = true; },
     readState: async () => ({ status: "ready", value: state }),
@@ -425,6 +427,7 @@ test("broker repairs 136 stale campaigns across bounded mid-scan refreshes witho
   const dependencies = {
     env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
     now: () => new Date("2026-09-04T12:02:00.000Z"),
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "acquired", token: "lock" }),
     releaseLock: async () => {},
     readState: async () => ({ status: "ready", value: cached }),
@@ -500,6 +503,7 @@ test("broker, cache reader, and worker reconcile 136 stale campaigns through a f
   const brokerDependencies = {
     env: { ...env, SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
     now: () => new Date("2026-09-03T12:04:00.000Z"),
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "acquired", token: "lock" }),
     releaseLock: async () => {},
     readState: async () => ({ status: "ready", value: cached }),
@@ -616,6 +620,7 @@ test("broker, cache reader, and worker finish a pinned replay across 130-to-137 
   const brokerDependencies = {
     env: { ...env, SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
     now: () => new Date("2026-09-03T12:04:00.000Z"),
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "acquired", token: "lock" }),
     releaseLock: async () => {},
     readState: async () => {
@@ -700,6 +705,7 @@ test("broker deadline releases the lock and leaves the page resumable", async ()
       env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
       now: () => new Date("2026-09-04T00:00:00.000Z"),
       clock: () => clock,
+      ensureSession: async () => {},
       acquireLock: async () => ({ status: "acquired", token: "lock" }),
       releaseLock: async () => { released = true; },
       readState: async () => ({ status: "ready", value: {} }),
@@ -718,6 +724,7 @@ test("broker exposes only the fixed cache failure cause", async () => {
     readSequenceInboxBrokerBatch({}, {
       env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
       now: () => new Date("2026-09-04T00:00:00.000Z"),
+      ensureSession: async () => {},
       acquireLock: async () => ({ status: "acquired", token: "lock" }),
       releaseLock: async () => {},
       readState: async () => ({ status: "error", cause: "pipeline_wrongtype", value: null }),
@@ -725,6 +732,134 @@ test("broker exposes only the fixed cache failure cause", async () => {
     (error) => error.code === "sequence_inbox_cache_unavailable"
       && error.message === "The Sequence Inbox cache is unavailable (pipeline_wrongtype).",
   );
+});
+
+test("broker resolves the live Paraform session before any Paraform read and outside the shared lock", async () => {
+  const order = [];
+  await readSequenceInboxBrokerBatch({}, {
+    env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-04T00:00:00.000Z"),
+    readRoleMappings: async () => { order.push("mappings"); return null; },
+    ensureSession: async () => { order.push("session"); },
+    acquireLock: async () => { order.push("lock"); return { status: "acquired", token: "lock" }; },
+    releaseLock: async () => { order.push("release"); },
+    readState: async () => ({ status: "ready", value: {} }),
+    buildRefresh: async () => { order.push("refresh"); return {}; },
+    writeState: async () => ({}),
+    sleepImpl: async () => {},
+    readBatch: async ({ readMessage }) => {
+      await readMessage("message-1");
+      return { records: [], deferred: [], checkpoint_cursor: null, coverage: {} };
+    },
+    readMessage: async () => { order.push("point-read"); return { complete: true, message: {} }; },
+  });
+  assert.deepEqual(order, ["mappings", "session", "lock", "refresh", "point-read", "release"]);
+});
+
+test("a session resolution that uses its whole 8s budget still leaves the full refresh and point-read budget", async () => {
+  assert.equal(INBOX_SESSION_TIMEOUT_MS, 8_000);
+  let clock = 0;
+  const timeouts = [];
+  await readSequenceInboxBrokerBatch({}, {
+    env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+    now: () => new Date("2026-09-04T00:00:00.000Z"),
+    clock: () => clock,
+    ensureSession: async () => { clock += INBOX_SESSION_TIMEOUT_MS; },
+    acquireLock: async () => ({ status: "acquired", token: "lock" }),
+    releaseLock: async () => {},
+    readState: async () => ({ status: "ready", value: {} }),
+    buildRefresh: async ({ budgetMs }) => {
+      assert.equal(budgetMs, SEQUENCE_INBOX_REFRESH_BUDGET_MS);
+      clock += budgetMs;
+      return {};
+    },
+    writeState: async () => ({}),
+    sleepImpl: async (milliseconds) => { clock += milliseconds; },
+    readRoleMappings: async () => null,
+    readBatch: async ({ readMessage }) => {
+      for (let index = 0; index < SEQUENCE_INBOX_BATCH_LIMIT; index += 1) {
+        await readMessage(`message-${index}`);
+      }
+      return { records: [], deferred: [], checkpoint_cursor: null, coverage: {} };
+    },
+    readMessage: async (_gmailId, { timeoutMs }) => {
+      timeouts.push(timeoutMs);
+      clock += timeoutMs;
+      return { complete: true, message: {} };
+    },
+  });
+  assert.deepEqual(timeouts, Array(SEQUENCE_INBOX_BATCH_LIMIT).fill(SEQUENCE_INBOX_POINT_READ_TIMEOUT_MS));
+  assert.equal(clock, 90_000);
+  assert.ok(clock < SEQUENCE_INBOX_BROKER_DEADLINE_MS);
+});
+
+test("session resolution spends the broker deadline instead of adding to the worker's call budget", async () => {
+  let clock = 0;
+  let locked = false;
+  await assert.rejects(
+    readSequenceInboxBrokerBatch({}, {
+      env: { SUBMISSIONS_V2_GMAIL_ACTIVATED_AT: activationAt },
+      now: () => new Date("2026-09-04T00:00:00.000Z"),
+      clock: () => clock,
+      ensureSession: async () => { clock = SEQUENCE_INBOX_BROKER_DEADLINE_MS - 500; },
+      acquireLock: async () => { locked = true; return { status: "acquired", token: "lock" }; },
+      releaseLock: async () => { locked = false; },
+      readState: async () => ({ status: "ready", value: {} }),
+      buildRefresh: async () => assert.fail("the deadline must stop the refresh"),
+      writeState: async () => ({}),
+      readRoleMappings: async () => null,
+    }),
+    (error) => error.code === "sequence_inbox_broker_deadline",
+  );
+  assert.equal(locked, false);
+});
+
+function withoutComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/^\s*\/\/.*$/gmu, "");
+}
+
+test("the batch broker resolves the Inbox session by default and never reports a 401 as a rejection", async () => {
+  const source = withoutComments(await readFile(
+    new URL("../api/submissions-v2/_lib/sequence-inbox-broker.mjs", import.meta.url),
+    "utf8",
+  ));
+  assert.match(source, /ensureSession = resolveInboxParaformSession,/u);
+  assert.match(source, /await ensureSession\(\);[\s\S]*await acquireLock\(\)/u);
+  // Paraform also answers 401 for burst throttling. Parking a slot is left to
+  // inboxTrpcGet, which confirms a dead cookie with spaced probes first.
+  assert.doesNotMatch(source, /notifyParaformSessionRejected|INBOX_SESSION_HOOKS/u);
+});
+
+test("every Submissions V2 route into the Inbox Paraform readers resolves the live session first", async () => {
+  // Scans the lane so a new caller is covered without editing this test. The
+  // point-read library defines readCompleteSequenceInboxMessage and must stay
+  // reachable only through the broker.
+  const readers = /\b(buildInboxRefresh|buildInboxFeed|inboxTrpcGet|paraformHealth|readCompleteSequenceInboxMessage)\b/u;
+  const library = "_lib/sequence-inbox-source.mjs";
+  const root = new URL("../api/submissions-v2/", import.meta.url);
+  const names = (await readdir(root, { recursive: true }))
+    .map((name) => name.split("\\").join("/"))
+    .filter((name) => name.endsWith(".mjs"));
+  assert.ok(names.includes("_lib/sequence-inbox-broker.mjs"));
+  const callers = [];
+  for (const name of names) {
+    const source = withoutComments(await readFile(new URL(name, root), "utf8"));
+    if (!readers.test(source)) continue;
+    if (name === library) continue;
+    callers.push(name);
+    assert.match(
+      source,
+      /ensureSession = resolveInboxParaformSession\b/u,
+      `api/submissions-v2/${name} reaches Paraform without a session resolver default`,
+    );
+    assert.match(source, /await ensureSession\(\)/u, `api/submissions-v2/${name} never awaits its session resolver`);
+  }
+  assert.deepEqual(callers, ["_lib/sequence-inbox-broker.mjs"]);
+  const worker = await readdir(new URL("../submissions-v2-worker/", import.meta.url));
+  for (const name of worker.filter((entry) => entry.endsWith(".mjs"))) {
+    const source = withoutComments(await readFile(new URL(`../submissions-v2-worker/${name}`, import.meta.url), "utf8"));
+    assert.doesNotMatch(source, readers, `submissions-v2-worker/${name} must read Sequence Inbox through the broker`);
+  }
 });
 
 test("legacy broker request limits through twelve execute at the eight-record cap", () => {
