@@ -8,7 +8,7 @@
 import { cors, requireAuth, cronAuth, ensureParaformSession } from "./_lib/core.mjs";
 import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { drainPendingBookings } from "./_lib/booking-protection-worker.mjs";
-import { oldestPendingAgeMs } from "./_lib/booking-protection-queue.mjs";
+import { pendingQueueSummary } from "./_lib/booking-protection-queue.mjs";
 import {
   createPacer,
   pacedApplyDecisionsOverrides,
@@ -19,6 +19,93 @@ import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.
 export const config = { maxDuration: 120 };
 
 const STUCK_PENDING_AGE_MS = 6 * 3600 * 1000; // §4 "lost or delayed events" cover
+
+// A held job waits for the next daily refresh to read the sequences the last
+// one could not. Past a full day plus margin, that refresh has run and not
+// cleared it, so a human has to look. The job is still never dropped before
+// its record expires (PENDING_JOB_TTL_SECONDS, 14 days).
+export function heldAlertAgeMs(env = process.env) {
+  const hours = Number(env.BOOKING_STOP_LITE_HOLD_ALERT_HOURS);
+  return (Number.isFinite(hours) && hours > 0 ? hours : 26) * 3600 * 1000;
+}
+
+export function heldAlertText({ held, oldestHeldAgeMs, heldSequenceIds = [], unverifiedSequences = [] }) {
+  const nameById = new Map(unverifiedSequences.map((s) => [s.id, s.name]));
+  const names = heldSequenceIds.map((id) => nameById.get(id) || id).filter(Boolean);
+  const listed = names.slice(0, 5).join(", ") + (names.length > 5 ? ` and ${names.length - 5} more` : "");
+  return `:rotating_light: Booking worker is holding ${held} booking(s), the oldest for ${Math.round(oldestHeldAgeMs / 3600000)}h, because the live-set index could not read ${listed ? `these sequences: ${listed}` : "one or more sequences"}. They stay queued, not dropped, but the daily refresh has not cleared them, so those candidates may still get nudges. Someone needs to find out why those sequences fail to read.`;
+}
+
+/**
+ * Which Slack messages this tick owes, as {key, dedupeSeconds, text}
+ * (dedupeSeconds null = always send). Pure, so the gating is testable.
+ */
+export function workerAlerts({ result, queue, env = process.env }) {
+  const alerts = [];
+  // Held jobs are waiting by design and have their own alert below; this
+  // one is for jobs nothing is working on.
+  const stuckAgeMs = queue?.oldestUnheldAgeMs ?? null;
+  if (stuckAgeMs != null && stuckAgeMs > STUCK_PENDING_AGE_MS) {
+    alerts.push({
+      key: "booking-worker-stuck-pending",
+      dedupeSeconds: 3600,
+      text: `:rotating_light: Booking worker has a pending booking older than ${Math.round(stuckAgeMs / 3600000)}h — it is not being matched. Check /api/seq/health and the live-set index age.`,
+    });
+  }
+  if (queue?.oldestHeldAgeMs != null && queue.oldestHeldAgeMs > heldAlertAgeMs(env)) {
+    alerts.push({
+      key: "booking-worker-held",
+      dedupeSeconds: 6 * 3600,
+      text: heldAlertText({
+        held: queue.held,
+        oldestHeldAgeMs: queue.oldestHeldAgeMs,
+        heldSequenceIds: queue.heldSequenceIds,
+        unverifiedSequences: result.unverifiedSequences,
+      }),
+    });
+  }
+  if (result.missing > 0) {
+    alerts.push({
+      key: "booking-worker-missing",
+      dedupeSeconds: 6 * 3600,
+      text: `:warning: Booking worker removed ${result.missing} queued booking(s) whose record was gone: expired after 14 days unmatched (a hold that never cleared), or never written. Those bookings were never cleared against a complete index.`,
+    });
+  }
+  // A job KV will not return stays queued but is invisible to the age checks
+  // above, so a store that answers the queue list but not the records would
+  // otherwise stall every booking in silence. Both passes (the drain, then
+  // the summary seconds later) must fail, so a one-off blip stays quiet.
+  const unreadable = Math.min(result.unreadable || 0, queue?.unreadable || 0);
+  if (unreadable > 0) {
+    alerts.push({
+      key: "booking-worker-unreadable",
+      dedupeSeconds: 3600,
+      text: `:warning: Booking worker could not read ${unreadable} queued booking record(s) from KV. They stay queued, but are not being matched until KV answers.`,
+    });
+  }
+  if (result.pending > 0 && !result.liveSetReady) {
+    alerts.push({
+      key: "booking-worker-liveset-stale",
+      dedupeSeconds: 3600,
+      text: ":warning: Booking worker has pending bookings but no usable live-set index — the daily refresh may be failing. See /api/seq/booking-liveset-refresh.",
+    });
+  }
+  if (result.pauseErrors.length) {
+    alerts.push({
+      key: "booking-worker-pause-errors",
+      dedupeSeconds: 3600,
+      text: `:warning: Booking worker failed to pause ${result.pauseErrors.length} booked lead(s); left queued for the next tick.`,
+    });
+  }
+  if (result.paused > 0) {
+    alerts.push({
+      key: "booking-worker-paused",
+      dedupeSeconds: null,
+      text: `:pause_button: Booking worker paused ${result.paused} booked candidate(s) (${result.matched} matched of ${result.processed} processed).`,
+    });
+  }
+  return alerts;
+}
 
 async function warnOnCronRejection(cron) {
   if (cron.ok || !cron.headerPresent) return;
@@ -38,26 +125,11 @@ async function handleBookingWorker(req, res) {
     const result = await drainPendingBookings({
       applyDecisionsOverrides: pacedApplyDecisionsOverrides(pace),
     });
-    const stuckAgeMs = await oldestPendingAgeMs().catch(() => null);
-    if (
-      stuckAgeMs != null
-      && stuckAgeMs > STUCK_PENDING_AGE_MS
-      && (await shouldAlert("booking-worker-stuck-pending", 3600))
-    ) {
-      await notifySlack(`:rotating_light: Booking worker has a pending booking older than ${Math.round(stuckAgeMs / 3600000)}h — it is not being matched. Check /api/seq/health and the live-set index age.`).catch(() => {});
-    }
-    if (
-      result.pending > 0
-      && !result.liveSetReady
-      && (await shouldAlert("booking-worker-liveset-stale", 3600))
-    ) {
-      await notifySlack(":warning: Booking worker has pending bookings but no usable live-set index — the daily refresh may be failing. See /api/seq/booking-liveset-refresh.").catch(() => {});
-    }
-    if (result.pauseErrors.length && (await shouldAlert("booking-worker-pause-errors", 3600))) {
-      await notifySlack(`:warning: Booking worker failed to pause ${result.pauseErrors.length} booked lead(s); left queued for the next tick.`).catch(() => {});
-    }
-    if (result.paused > 0) {
-      await notifySlack(`:pause_button: Booking worker paused ${result.paused} booked candidate(s) (${result.matched} matched of ${result.processed} processed).`).catch(() => {});
+    const queue = await pendingQueueSummary().catch(() => null);
+    for (const alert of workerAlerts({ result, queue })) {
+      if (alert.dedupeSeconds == null || (await shouldAlert(alert.key, alert.dedupeSeconds))) {
+        await notifySlack(alert.text).catch(() => {});
+      }
     }
     return res.status(200).json({
       ok: true,
@@ -67,9 +139,14 @@ async function handleBookingWorker(req, res) {
       paused: result.paused,
       deferred: result.deferred,
       cancelled: result.cancelled,
+      held: result.held,
+      missing: result.missing,
+      unreadable: result.unreadable,
       pauseErrors: result.pauseErrors.length,
       liveSetReady: result.liveSetReady,
-      oldestPendingAgeMinutes: stuckAgeMs == null ? null : Math.round(stuckAgeMs / 60000),
+      liveSetUnverifiedSequences: result.unverifiedSequences.length,
+      oldestPendingAgeMinutes: queue?.oldestPendingAgeMs == null ? null : Math.round(queue.oldestPendingAgeMs / 60000),
+      oldestHeldAgeMinutes: queue?.oldestHeldAgeMs == null ? null : Math.round(queue.oldestHeldAgeMs / 60000),
       ranAt: new Date().toISOString(),
     });
   } catch (e) {

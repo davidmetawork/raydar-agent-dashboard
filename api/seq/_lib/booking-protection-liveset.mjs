@@ -36,12 +36,22 @@
 // same-day count-delta walk would close this at the cost of the exact daily
 // per-sequence read this redesign exists to remove; left to David to decide
 // whether that trade is worth it (see the PR's Residual risks section).
+//
+// An INCOMPLETE index (a sequence walk that threw, or came back short) is
+// still published: its verified sequences protect people today. But it lists
+// the sequences it could not read (`unverifiedSequences`), and a booking
+// checked against it is HELD, not resolved, until a later index reads those
+// sequences (holdAfterMatch below). A "no match" against an index that never
+// read a sequence says nothing about that sequence, and treating it as final
+// once dropped queued bookings for good.
 import {
   isNudgeSequence,
   seqKeys,
   decideLead,
   normEmail,
   bookingStopColdExclusionProtectionKeys,
+  K as LEGACY_K,
+  kvGet as legacyKvGet,
 } from "./booking-stop.mjs";
 import {
   coldExclusionDisposition,
@@ -85,9 +95,9 @@ export function liveSetUsable(liveSet, now = Date.now(), maxAgeMs = LIVESET_MAX_
  *
  * `deadlineAt` (epoch ms, optional): past it, no further sequence is started
  * and the build throws BOOKING_LIVESET_DEADLINE. A partial index is never
- * returned for publishing: a booking checked against one would be dropped
- * from the queue as "no match" for any sequence the walk never reached,
- * while an unusable index leaves it queued. The point is a loud failure the
+ * returned for publishing: every sequence the walk never reached would be
+ * unverified, so every booking checked against it would be held, while an
+ * unusable index leaves it queued just the same and says so louder. The point is a loud failure the
  * route can record and alert on, before the platform kills the function
  * silently at its maxDuration.
  */
@@ -126,6 +136,7 @@ export async function buildLiveSet({
   const byEmail = new Map();
   const sequencesWithActiveLeads = [];
   const errors = [];
+  const unverifiedSequences = [];
   let leadsIndexed = 0;
   let first = true;
   let walked = 0;
@@ -142,14 +153,25 @@ export async function buildLiveSet({
     try {
       membership = await membershipLoader(seq.id);
     } catch (error) {
-      errors.push({
-        sequenceId: seq.id,
-        name: seq.name,
-        reason: String(error?.code || error?.message || "error").slice(0, 120),
-      });
+      const reason = String(error?.code || error?.message || "error").slice(0, 120);
+      errors.push({ sequenceId: seq.id, name: seq.name, reason });
+      unverifiedSequences.push({ id: seq.id, name: seq.name, reason });
       continue;
     }
     const leads = Array.isArray(membership?.leads) ? membership.leads : [];
+    const complete = membership?.complete !== false;
+    if (!complete) {
+      // A short read (completeCampaignLeads' shortfall after its oracle
+      // backfill) is indexed for what it did return, but the missing rows
+      // could be anyone, so the sequence is not verified. Checked before the
+      // active-lead filter: a short read that returned nobody is the worst
+      // case, not an empty sequence.
+      unverifiedSequences.push({
+        id: seq.id,
+        name: seq.name,
+        reason: `short_read:${membership?.unique ?? leads.length}/${membership?.totalCount ?? "?"}`,
+      });
+    }
     const active = leads.filter((lead) =>
       lead?.ccu_id && !lead.is_paused && !lead.is_archived);
     if (!active.length) continue;
@@ -157,7 +179,7 @@ export async function buildLiveSet({
       id: seq.id,
       name: seq.name,
       activeLeads: active.length,
-      complete: membership.complete !== false,
+      complete,
     });
     for (const lead of active) {
       const email = normEmail(lead.to_use_email);
@@ -190,9 +212,128 @@ export async function buildLiveSet({
     leadsIndexed,
     indexedEmails: byEmail.size,
     byEmail: Object.fromEntries(byEmail),
-    incomplete: errors.length > 0,
+    incomplete: unverifiedSequences.length > 0,
+    unverifiedSequences,
     errors,
   };
+}
+
+// Stands in for "every sequence" when an index says it is incomplete but not
+// which sequences it missed (only a malformed or hand-written index). Fails
+// closed: nothing checked against it resolves.
+export const UNVERIFIED_ANY = "*";
+
+/**
+ * The sequences a published index could not read: [{id, name, reason}].
+ * Also reads the older shape (`errors[]`, `sequences[].complete`) so an index
+ * published before `unverifiedSequences` existed is judged the same way.
+ */
+export function liveSetUnverifiedSequences(liveSet) {
+  const byId = new Map();
+  const add = (id, name, reason) => {
+    if (typeof id === "string" && id && !byId.has(id)) {
+      byId.set(id, { id, name: name ?? null, reason: reason ?? null });
+    }
+  };
+  for (const s of Array.isArray(liveSet?.unverifiedSequences) ? liveSet.unverifiedSequences : []) {
+    add(s?.id, s?.name, s?.reason);
+  }
+  for (const e of Array.isArray(liveSet?.errors) ? liveSet.errors : []) {
+    add(e?.sequenceId, e?.name, e?.reason);
+  }
+  for (const s of Array.isArray(liveSet?.sequences) ? liveSet.sequences : []) {
+    if (s?.complete === false) add(s.id, s.name, "short_read");
+  }
+  if (!byId.size && liveSet?.incomplete === true) {
+    add(UNVERIFIED_ANY, null, "incomplete_unspecified");
+  }
+  return [...byId.values()];
+}
+
+/**
+ * What a booking check against `liveSet` may apply, and whether the booking
+ * must stay held afterwards.
+ *
+ * A booking resolves once every protected sequence has been read by SOME
+ * index it was checked against. The first check applies every decision and
+ * holds the booking for the sequences this index could not read. A later
+ * check (a newer index, `hold.checkedAgainst` differs) applies every decision
+ * except leads already handled for this booking (`appliedCcuIds`), so a pause
+ * is never re-sent and a person who has since un-paused that lead is not
+ * overridden, while a lead the earlier index could not see is still caught.
+ * It keeps holding only for sequences no index has read.
+ *
+ * The returned hold records this check's decisions as handled, so callers
+ * must write it only after those decisions applied without pause errors
+ * (both callers leave the booking untouched on a pause error).
+ *
+ * Returns { apply: decisions[], hold: {checkedAgainst, unverifiedSequenceIds,
+ * heldSince, appliedCcuIds} | null }. `hold: null` means resolved.
+ */
+export function holdAfterMatch({
+  liveSet,
+  hold = null,
+  decisions = [],
+  now = Date.now(),
+  // False on a dry run (BOOKING_STOP_APPLY=0): nothing is sent, so nothing
+  // may be recorded as handled, or switching apply on would skip those leads.
+  recordApplied = true,
+} = {}) {
+  const current = liveSetUnverifiedSequences(liveSet).map((s) => s.id);
+  const prior = Array.isArray(hold?.unverifiedSequenceIds) ? hold.unverifiedSequenceIds : null;
+  const handled = new Set(Array.isArray(hold?.appliedCcuIds) ? hold.appliedCcuIds : []);
+  const apply = decisions.filter((d) => !handled.has(d.ccuId));
+  let pending = current;
+  if (prior) {
+    const priorAny = prior.includes(UNVERIFIED_ANY);
+    if (priorAny) pending = current;
+    else if (current.includes(UNVERIFIED_ANY)) pending = prior;
+    else pending = prior.filter((id) => current.includes(id));
+  }
+  return {
+    apply,
+    hold: pending.length
+      ? {
+        checkedAgainst: liveSet?.builtAt ?? null,
+        unverifiedSequenceIds: pending,
+        heldSince: hold?.heldSince || new Date(now).toISOString(),
+        appliedCcuIds: [...new Set([
+          ...handled,
+          ...(recordApplied ? apply.map((d) => d.ccuId).filter(Boolean) : []),
+        ])],
+      }
+      : null,
+  };
+}
+
+/**
+ * Drop decisions for leads already verified-paused after BOTH this index was
+ * built and this booking was made (applyDecisions writes that record,
+ * `seqguard:paused:<ccu>`, after a read-back). The index is older than that
+ * pause, so it still lists the lead as active; the pause already covers this
+ * booking. This is what stops the worker and the 05:40Z catch-up both pausing
+ * the same lead when a held booking clears, and a re-check after a failed
+ * hold write re-sending its pauses. A lead paused before this booking (the
+ * pause canary after its daily rearm, or a person's un-pause followed by a
+ * new booking) is kept. One KV read per decision, zero Paraform; a read that
+ * fails keeps the decision.
+ */
+export async function dropAlreadyPaused(decisions, {
+  liveSet,
+  bookedAtMs,
+  read = legacyKvGet,
+} = {}) {
+  const builtAtMs = Date.parse(liveSet?.builtAt || "");
+  if (!decisions.length || !Number.isFinite(builtAtMs) || !Number.isFinite(bookedAtMs)) return decisions;
+  const since = Math.max(builtAtMs, bookedAtMs);
+  const kept = [];
+  for (const decision of decisions) {
+    const record = decision?.ccuId ? await read(LEGACY_K.paused(decision.ccuId)).catch(() => null) : null;
+    const pausedAt = Date.parse(record?.at || "");
+    if (Number.isFinite(pausedAt) && pausedAt > since) continue;
+    kept.push(decision);
+  }
+  return kept;
 }
 
 export async function publishLiveSet(liveSet, {

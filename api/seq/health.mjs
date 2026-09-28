@@ -19,13 +19,11 @@ import {
 } from "./_lib/raydar-booking-index.mjs";
 import {
   loadLiveSet,
+  liveSetUnverifiedSequences,
   liveSetUsable,
   LIVESET_MAX_AGE_MS,
 } from "./_lib/booking-protection-liveset.mjs";
-import {
-  pendingQueueDepth,
-  oldestPendingAgeMs,
-} from "./_lib/booking-protection-queue.mjs";
+import { pendingQueueSummary } from "./_lib/booking-protection-queue.mjs";
 import {
   LITE_KEYS,
   kvGet as liteKvGet,
@@ -43,14 +41,14 @@ import { alsoPauseIfBookedBeforeJoining } from "./_lib/booking-protection-policy
  */
 async function bookingProtectionLiteHealth(now = Date.now()) {
   if (!liteKvConfigured()) return { configured: false };
-  const [liveSet, liveSetAttempt, catchupAttempt, queueDepth, oldestPendingMs] =
+  const [liveSet, liveSetAttempt, catchupAttempt, queue] =
     await Promise.all([
       loadLiveSet({}).catch(() => null),
       liteKvGet(LITE_KEYS.liveSetAttempt).catch(() => null),
       liteKvGet(LITE_KEYS.catchupAttempt).catch(() => null),
-      pendingQueueDepth().catch(() => null),
-      oldestPendingAgeMs(now).catch(() => null),
+      pendingQueueSummary(now).catch(() => null),
     ]);
+  const minutes = (ms) => (ms == null ? null : Math.round(ms / 60000));
   const liveSetAgeMs = liveSet?.builtAt ? now - Date.parse(liveSet.builtAt) : null;
   return {
     configured: true,
@@ -62,12 +60,18 @@ async function bookingProtectionLiteHealth(now = Date.now()) {
       leadsIndexed: liveSet?.leadsIndexed ?? null,
       sequencesWithActiveLeads: liveSet?.sequencesWithActiveLeads ?? null,
       incomplete: liveSet?.incomplete ?? null,
+      // Count only: this endpoint is public, and the names are in Slack.
+      unverifiedSequences: liveSet ? liveSetUnverifiedSequences(liveSet).length : null,
       lastAttemptStatus: liveSetAttempt?.status ?? null,
       lastAttemptAt: liveSetAttempt?.at ?? null,
     },
     pendingQueue: {
-      depth: queueDepth,
-      oldestPendingAgeMinutes: oldestPendingMs == null ? null : Math.round(oldestPendingMs / 60000),
+      depth: queue?.depth ?? null,
+      oldestPendingAgeMinutes: minutes(queue?.oldestPendingAgeMs),
+      // Held: checked against an index that could not read a sequence they
+      // might be in, so kept for a later index rather than resolved.
+      held: queue?.held ?? null,
+      oldestHeldAgeMinutes: minutes(queue?.oldestHeldAgeMs),
     },
     catchup: {
       lastAttemptStatus: catchupAttempt?.status ?? null,

@@ -19,6 +19,7 @@ import {
   calendlyConfigured,
   calendlyBookingIndex,
   normEmail,
+  kvGet as legacyKvGet,
 } from "./booking-stop.mjs";
 import {
   fetchRaydarBookingIndex,
@@ -26,6 +27,8 @@ import {
   raydarSchedulerIndexConfigured,
 } from "./raydar-booking-index.mjs";
 import {
+  dropAlreadyPaused,
+  holdAfterMatch,
   loadLiveSet,
   liveSetUsable,
   matchBookingAgainstLiveSet,
@@ -41,12 +44,22 @@ import {
 
 const PROCESSED_TTL_SECONDS = 60 * 24 * 3600;
 
-async function markProcessed(bookingId, { claim = kvSetNx } = {}) {
-  try { await claim(LITE_KEYS.processed(bookingId), { at: new Date().toISOString() }, PROCESSED_TTL_SECONDS); }
-  catch { /* best-effort marker; a duplicate re-check next run is harmless */ }
+// The marker is `{at}` once a booking is resolved, or `{at, hold}` while it
+// is held (checked against an index that could not read every protected
+// sequence — holdAfterMatch). A held marker is overwritten when it resolves,
+// so only the first resolution uses the NX claim.
+async function markProcessed(bookingId, { claim = kvSetNx, write = kvSet, overwrite = false } = {}) {
+  const marker = { at: new Date().toISOString() };
+  try {
+    if (overwrite) await write(LITE_KEYS.processed(bookingId), marker, PROCESSED_TTL_SECONDS);
+    else await claim(LITE_KEYS.processed(bookingId), marker, PROCESSED_TTL_SECONDS);
+  } catch { /* best-effort marker; a duplicate re-check next run is harmless */ }
 }
-async function isProcessed(bookingId, { read = kvGet } = {}) {
-  return Boolean(await read(LITE_KEYS.processed(bookingId)));
+async function holdMarker(bookingId, hold, { write = kvSet } = {}) {
+  await write(LITE_KEYS.processed(bookingId), { at: new Date().toISOString(), hold }, PROCESSED_TTL_SECONDS);
+}
+async function readMarker(bookingId, { read = kvGet } = {}) {
+  return read(LITE_KEYS.processed(bookingId));
 }
 
 /**
@@ -63,16 +76,25 @@ async function reconcileIndex(index, {
   applyDecisionsImpl,
   apply,
   alsoBeforeJoin,
-  isProcessedFn,
+  readMarkerFn,
   markProcessedFn,
+  holdMarkerFn,
+  pausedRead,
 }) {
-  const out = { checked: 0, matched: 0, paused: 0, pauseErrors: [] };
+  const out = { checked: 0, matched: 0, paused: 0, held: 0, pauseErrors: [] };
   for (const [email, booking] of index.entries()) {
     if (booking.status !== "active") continue;
     const bookingId = bookingIdOf(booking, email);
-    if (await isProcessedFn(bookingId)) continue;
+    const marker = await readMarkerFn(bookingId);
+    if (marker && !marker.hold) continue;
+    const priorHold = marker?.hold || null;
+    if (priorHold && priorHold.checkedAgainst === liveSet.builtAt) {
+      // Already checked against this index; only a newer one can clear it.
+      out.held++;
+      continue;
+    }
     out.checked++;
-    const decisions = matchBookingAgainstLiveSet({
+    const matched = matchBookingAgainstLiveSet({
       liveSet,
       email,
       bookedAtMs: booking.bookedAt,
@@ -81,6 +103,23 @@ async function reconcileIndex(index, {
       startsAt: booking.startsAt ?? null,
       alsoPauseBeforeJoiningInterviewChase: alsoBeforeJoin,
       now,
+    });
+    // Same rule as the worker: a "no match" against an index that could not
+    // read a sequence is not final, so the booking is held, not marked
+    // processed (which would skip it for 60 days).
+    const step = holdAfterMatch({
+      liveSet,
+      hold: priorHold,
+      decisions: matched,
+      now,
+      recordApplied: Boolean(apply),
+    });
+    // A lead the worker already paused for this booking (after this index
+    // was built) is still "active" in the index; do not pause it twice.
+    const decisions = await dropAlreadyPaused(step.apply, {
+      liveSet,
+      bookedAtMs: booking.bookedAt,
+      read: pausedRead,
     });
     out.matched += decisions.length;
     if (decisions.length && apply) {
@@ -91,7 +130,12 @@ async function reconcileIndex(index, {
         continue; // leave unmarked -> retried tomorrow, same idempotent rule
       }
     }
-    await markProcessedFn(bookingId);
+    if (step.hold) {
+      await holdMarkerFn(bookingId, step.hold);
+      out.held++;
+    } else {
+      await markProcessedFn(bookingId, { overwrite: Boolean(marker) });
+    }
   }
   return out;
 }
@@ -105,6 +149,8 @@ export async function catchUpBookingIndexes({
   apply = process.env.BOOKING_STOP_APPLY !== "0",
   processedRead = kvGet,
   processedClaim = kvSetNx,
+  processedWrite = kvSet,
+  pausedRead = legacyKvGet,
 } = {}) {
   const out = {
     raydar: null,
@@ -118,8 +164,10 @@ export async function catchUpBookingIndexes({
   if (!out.liveSetReady) return out;
 
   const alsoBeforeJoin = alsoPauseIfBookedBeforeJoining();
-  const isProcessedFn = (id) => isProcessed(id, { read: processedRead });
-  const markProcessedFn = (id) => markProcessed(id, { claim: processedClaim });
+  const readMarkerFn = (id) => readMarker(id, { read: processedRead });
+  const markProcessedFn = (id, { overwrite = false } = {}) =>
+    markProcessed(id, { claim: processedClaim, write: processedWrite, overwrite });
+  const holdMarkerFn = (id, hold) => holdMarker(id, hold, { write: processedWrite });
 
   if (raydarSchedulerBookingStopEnabled() && raydarSchedulerIndexConfigured()) {
     try {
@@ -129,7 +177,7 @@ export async function catchUpBookingIndexes({
           now, liveSet, source: "raydar_scheduler",
           bookingIdOf: (booking) => `raydar:${booking.bookingId}`,
           applyDecisionsImpl, apply, alsoBeforeJoin,
-          isProcessedFn, markProcessedFn,
+          readMarkerFn, markProcessedFn, holdMarkerFn, pausedRead,
         });
       } else {
         out.raydarError = "incomplete_index";
@@ -147,7 +195,7 @@ export async function catchUpBookingIndexes({
           now, liveSet, source: "calendly",
           bookingIdOf: (booking, email) => `calendly:${normEmail(email)}:${booking.bookedAt}`,
           applyDecisionsImpl, apply, alsoBeforeJoin,
-          isProcessedFn, markProcessedFn,
+          readMarkerFn, markProcessedFn, holdMarkerFn, pausedRead,
         });
       } else {
         out.calendlyError = "incomplete_index";
