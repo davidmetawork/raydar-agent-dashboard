@@ -10,6 +10,8 @@ import {
   ensureParaformSession,
   hasCookie,
   headers,
+  notifyParaformSessionRejected,
+  paraformCookieValue,
   paraformHealth,
   requireAuth,
 } from "../../seq/_lib/core.mjs";
@@ -25,10 +27,9 @@ import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 // resolved in this process, falling back to the static env seal (which
 // WorkOS rotates away within hours) when nothing has been resolved yet. Every
 // Inbox entrypoint that reaches Paraform must await ensureParaformSession()
-// first. inboxTrpcGet deliberately does NOT call
-// notifyParaformSessionRejected() on a 401: Paraform also answers 401 for
-// burst throttling, and demoting the live store session for 30 minutes on a
-// throttle would push the rest of the sweep back onto the dead env seal.
+// first. A 401 is not a verdict on its own (Paraform also answers 401 for
+// burst throttling); see fallThroughDeadInboxSession below for how inboxTrpcGet
+// moves off a stored session that is actually dead.
 export {
   authConfig,
   cors,
@@ -40,6 +41,45 @@ export {
 
 export function resolveInboxParaformSession() {
   return ensureParaformSession({ timeoutMs: INBOX_SESSION_TIMEOUT_MS });
+}
+
+export const INBOX_SESSION_HOOKS = Object.freeze({
+  current: () => paraformCookieValue(),
+  reject: () => notifyParaformSessionRejected(),
+  resolve: () => resolveInboxParaformSession(),
+});
+
+const CURRENT_USER_PROBE_INPUT = encodeURIComponent(
+  JSON.stringify({ json: null, meta: { values: {}, v: 1 } }),
+);
+
+// The store resolves slots in order (shared, then the david account, then
+// env) and only moves past one that was reported rejected. Measured
+// 2026-09-28: the shared n8n slot was dead (last renewed Sep 25) while the
+// david slot was live, so an Inbox that never reported a 401 retried the dead
+// slot forever. Reporting every 401 is wrong too: a throttle would park a live
+// slot for 30 minutes. So when the refused session is still this process's
+// session, one serial user.getCurrentUser probe decides: 401 parks the slot
+// and re-resolves before the caller retries; anything else keeps it. When
+// another read already moved the process on, just wait for that resolution.
+export async function fallThroughDeadInboxSession(
+  sentCookie,
+  observedFetch,
+  timeoutMs,
+  session = INBOX_SESSION_HOOKS,
+) {
+  if (sentCookie && session.current() === sentCookie) {
+    const probe = await observedFetch(
+      `${BASE}/trpc/user.getCurrentUser?input=${CURRENT_USER_PROBE_INPUT}`,
+      { headers: headers(), signal: AbortSignal.timeout(timeoutMs) },
+    ).catch(() => null);
+    if (probe?.status !== 401) return "kept";
+    // Re-check after the await: a concurrent read may already have parked
+    // this slot and resolved the next one, which must not be parked too.
+    if (session.current() === sentCookie) session.reject();
+  }
+  await Promise.resolve().then(() => session.resolve()).catch(() => {});
+  return "resolved";
 }
 
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
@@ -235,6 +275,7 @@ export async function inboxTrpcGet(
   fetchImpl = fetch,
   sleepImpl = sleep,
   randomImpl = Math.random,
+  session = INBOX_SESSION_HOOKS,
 ) {
   const observedFetch = telemetryFetch(fetchImpl, "dashboard-inbox");
   const input = {
@@ -246,11 +287,18 @@ export async function inboxTrpcGet(
   const attempts = Math.max(1, Number(tries) || 1);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      const sentCookie = session.current();
       const response = await observedFetch(url, {
         headers: headers(),
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (response.status === 401) {
+        await fallThroughDeadInboxSession(
+          sentCookie,
+          observedFetch,
+          timeoutMs,
+          session,
+        );
         // Paraform also uses 401 as a burst-throttle signal. Treating it as a
         // session verdict is what made healthy Inbox runs silently lose most
         // sequences. The health endpoint owns session-expiry classification;
