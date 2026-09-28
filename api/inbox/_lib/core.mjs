@@ -55,20 +55,31 @@ const CURRENT_USER_PROBE_URL = `${BASE}/trpc/user.getCurrentUser?input=`
 const INBOX_PROBE_DELAY_MS = 1_500;
 const INBOX_PROBE_TIMEOUT_MS = 4_000;
 const INBOX_DEAD_COOKIE_MEMORY = 16;
-let deadInboxCookies = new Set();
+// Same window as the store's slot rejection: a verdict reached during a long
+// account-wide throttle must not brand a live cookie dead for good.
+const INBOX_DEAD_COOKIE_TTL_MS = 30 * 60 * 1_000;
+let deadInboxCookies = new Map(); // cookie -> epoch ms the verdict expires
 let inboxCookieProbes = new Map();
 
 export function __resetInboxSessionProbesForTests() {
-  deadInboxCookies = new Set();
+  deadInboxCookies = new Map();
   inboxCookieProbes = new Map();
+}
+
+function knownDeadInboxCookie(cookie, nowMs = Date.now()) {
+  const until = deadInboxCookies.get(cookie);
+  if (until === undefined) return false;
+  if (until > nowMs) return true;
+  deadInboxCookies.delete(cookie);
+  return false;
 }
 
 // Two spaced serial probes of the exact refused cookie, shared by every read
 // that got a 401 on it, so a burst of concurrent 401s costs one probe run and
 // a throttle that clears within a few seconds keeps the slot. A cookie proven
-// dead is remembered so later 401s on it skip straight to the fall-through.
+// dead is remembered for 30 minutes so later 401s on it skip the probes.
 function inboxCookieIsDead(cookie, observedFetch, sleepImpl, randomImpl) {
-  if (deadInboxCookies.has(cookie)) return Promise.resolve(true);
+  if (knownDeadInboxCookie(cookie)) return Promise.resolve(true);
   let pending = inboxCookieProbes.get(cookie);
   if (!pending) {
     pending = (async () => {
@@ -84,9 +95,10 @@ function inboxCookieIsDead(cookie, observedFetch, sleepImpl, randomImpl) {
         }).catch(() => null);
         if (probe?.status !== 401) return false;
       }
-      deadInboxCookies.add(cookie);
+      deadInboxCookies.delete(cookie);
+      deadInboxCookies.set(cookie, Date.now() + INBOX_DEAD_COOKIE_TTL_MS);
       if (deadInboxCookies.size > INBOX_DEAD_COOKIE_MEMORY) {
-        deadInboxCookies.delete(deadInboxCookies.values().next().value);
+        deadInboxCookies.delete(deadInboxCookies.keys().next().value);
       }
       return true;
     })().catch(() => false).finally(() => inboxCookieProbes.delete(cookie));

@@ -2198,3 +2198,29 @@ test("a slot another read moved on during the probe is never parked", async () =
   assert.equal(state.rejects, 0);
   assert.equal(state.cookie, "live-account-seal");
 });
+
+test("a dead-cookie verdict expires after 30 minutes and the cookie is probed again", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("throttled-seal");
+  const opts = { sleepImpl: async () => {}, randomImpl: () => 0, session: hooks };
+  assert.equal(
+    await fallThroughDeadInboxSession("throttled-seal", async () => unauthorized(), opts),
+    "resolved",
+  );
+  assert.equal(state.rejects, 1);
+  const realNow = Date.now;
+  try {
+    state.cookie = "throttled-seal";
+    Date.now = () => realNow() + 31 * 60 * 1_000;
+    let probes = 0;
+    const outcome = await fallThroughDeadInboxSession("throttled-seal", async () => {
+      probes += 1;
+      return okJson({ id: "u" });
+    }, opts);
+    assert.equal(outcome, "kept");
+    assert.equal(probes, 1);
+    assert.equal(state.rejects, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
