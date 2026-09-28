@@ -6,11 +6,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  archiveImportSet,
+  crmProjectMembers,
+  ensureParaformSession,
   isSessionActuallyExpired,
+  paraformCookieValue,
   trpcGet,
   trpcPost,
   withThrottleRetry,
+  __resetSessionExpiryChecksForTests,
 } from "../api/seq/_lib/core.mjs";
+import {
+  notifyParaformSessionRejected,
+  __resetParaformSessionStateForTests,
+} from "../api/_lib/paraform-session-store.mjs";
 
 function withStubbedParaform(handler, run) {
   const realFetch = globalThis.fetch;
@@ -110,4 +119,195 @@ test("a mutation refused by a throttle is retried, because a 401 never applied i
       assert.equal(attempts, 2);
     },
   );
+});
+
+// ─── A 401 must not move the process off a live store session ────────────────
+// Measured hazard, 2026-09-28: every 401 parked the store slot and cleared the
+// cache, so after one burst-throttle 401 the rest of the request (retries and
+// the serial expiry probes) sent the static env seal, which WorkOS had rotated
+// away hours earlier, and ended in a false AUTH_EXPIRED. These tests run the
+// production shape: a live store session resolved, a dead env seal underneath.
+
+const SHARED = `Fe26.2${"s".repeat(70)}`;
+const ACCOUNT = `Fe26.2${"a".repeat(70)}`;
+const ENV_SEAL = `Fe26.2${"e".repeat(70)}`;
+const N8N = "https://n8n.example.test";
+const STORE_ROWS = [
+  { key: "PARAFORM_SESSION_COOKIE_G1_1", value: SHARED },
+  { key: "PARAFORM_SESSION_COOKIE_G1_PARTS", value: "1" },
+  { key: "PARAFORM_DAVID_SESSION_G1_1", value: ACCOUNT },
+  { key: "PARAFORM_DAVID_SESSION_G1_PARTS", value: "1" },
+];
+
+const sentCookie = (init) => String(init?.headers?.cookie || "").replace(/^[^=]+=/u, "");
+const isProbe = (url) => String(url).includes("getListOfCampaignsOptimized");
+
+async function withStoreSession(run) {
+  const env = {
+    N8N_BASE_URL: N8N,
+    N8N_API_KEY: "test-n8n-key",
+    PARAFORM_SESSION_COOKIE: ENV_SEAL,
+    PARAFORM_THROTTLE_DELAYS_MS: "0,0,0",
+    PARAFORM_PROBE_DELAY_MS: "0",
+  };
+  const saved = {};
+  for (const key of Object.keys(env)) {
+    saved[key] = process.env[key];
+    process.env[key] = env[key];
+  }
+  let storeReads = 0;
+  const storeFetch = async (url) => {
+    storeReads += 1;
+    assert.match(String(url), /^https:\/\/n8n\.example\.test\/api\/v1\/variables/u);
+    return { ok: true, json: async () => ({ data: STORE_ROWS }) };
+  };
+  __resetParaformSessionStateForTests();
+  __resetSessionExpiryChecksForTests();
+  try {
+    const resolved = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(resolved.slot, "shared");
+    return await run({ storeFetch, storeReads: () => storeReads });
+  } finally {
+    for (const key of Object.keys(env)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    __resetParaformSessionStateForTests();
+    __resetSessionExpiryChecksForTests();
+  }
+}
+
+test("a throttle 401 keeps the store session: the retry sends the same cookie and nothing is parked", async () => {
+  await withStoreSession(async ({ storeFetch, storeReads }) => {
+    const seen = [];
+    await withStubbedParaform(
+      async (url, init) => {
+        seen.push(sentCookie(init));
+        return seen.length === 1 ? unauthorized() : ok({ id: "u1" });
+      },
+      async () => {
+        assert.deepEqual(await trpcGet("campaigns.getCampaignLeads", {}, 1), { id: "u1" });
+      },
+    );
+    assert.deepEqual(seen, [SHARED, SHARED], "the retry never fell back to the env seal");
+    assert.equal(paraformCookieValue(), SHARED);
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.cached, true, "a throttle must not invalidate the cache");
+    assert.equal(next.slot, "shared", "a throttle must not park the slot");
+    assert.equal(storeReads(), 1);
+  });
+});
+
+test("a sustained throttle on a live store session stays PARAFORM_THROTTLED and never sends the env seal", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    const seen = [];
+    await withStubbedParaform(
+      async (url, init) => {
+        seen.push(sentCookie(init));
+        return isProbe(url) ? ok([]) : unauthorized();
+      },
+      async () => {
+        await assert.rejects(
+          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
+          (e) => e.code === "PARAFORM_THROTTLED",
+        );
+      },
+    );
+    assert.ok(seen.length >= 5, "the ladder ran and then the probe");
+    assert.ok(seen.every((cookie) => cookie === SHARED), "every attempt and the probe used the store cookie");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "shared");
+    assert.equal(next.cached, true);
+  });
+});
+
+test("a dead store session is parked only after probes of that same cookie confirm it", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    const seen = [];
+    await withStubbedParaform(
+      async (url, init) => {
+        seen.push({ probe: isProbe(url), cookie: sentCookie(init) });
+        return unauthorized();
+      },
+      async () => {
+        await assert.rejects(
+          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
+          (e) => e.code === "AUTH_EXPIRED",
+        );
+      },
+    );
+    assert.equal(seen.filter((row) => !row.probe).length, 4, "one attempt plus three ladder retries");
+    assert.equal(seen.filter((row) => row.probe).length, 3, "three serial probes");
+    assert.ok(seen.every((row) => row.cookie === SHARED), "the probes tested the cookie that got the 401");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "account", "the confirmed-dead shared slot is parked");
+  });
+});
+
+test("a confirmed expiry does not park a session the process already moved to", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    let moved = false;
+    await withStubbedParaform(
+      async (url, init) => {
+        if (!moved) {
+          // Another request confirms the shared cookie dead mid-ladder and the
+          // process resolves the account slot.
+          moved = true;
+          assert.equal(notifyParaformSessionRejected({ cookie: SHARED }), true);
+          assert.equal((await ensureParaformSession({ fetchImpl: storeFetch })).slot, "account");
+        }
+        return sentCookie(init) === ACCOUNT ? ok([]) : unauthorized();
+      },
+      async () => {
+        await assert.rejects(
+          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
+          (e) => e.code === "AUTH_EXPIRED",
+          "this call pinned the dead shared cookie, so its own verdict is expiry",
+        );
+      },
+    );
+    assert.equal(paraformCookieValue(), ACCOUNT, "the live account session was not parked by the stale verdict");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.cached, true);
+    assert.equal(next.slot, "account");
+  });
+});
+
+test("a raw CRM page 401 on a live session is PARAFORM_THROTTLED, not a parked slot", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    const seen = [];
+    const fetchImpl = async (url, init) => {
+      seen.push(sentCookie(init));
+      if (isProbe(url)) return ok([]);
+      return unauthorized();
+    };
+    await assert.rejects(
+      () => crmProjectMembers("project-1", { fetchImpl }),
+      (e) => e.code === "PARAFORM_THROTTLED",
+    );
+    assert.deepEqual(seen, [SHARED, SHARED], "the page read, then one probe of the same cookie");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "shared");
+    assert.equal(next.cached, true);
+  });
+});
+
+test("concurrent profile 401s on a dead session share one probe run, then park the slot once", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    let probes = 0;
+    const cookies = new Set();
+    const fetchImpl = async (url, init) => {
+      cookies.add(sentCookie(init));
+      if (isProbe(url)) probes += 1;
+      return unauthorized();
+    };
+    await assert.rejects(
+      () => archiveImportSet(["c1", "c2", "c3", "c4", "c5"], { fetchImpl }),
+      (e) => e.code === "AUTH_EXPIRED",
+    );
+    assert.equal(probes, 3, "five workers' 401s cost one serial probe run");
+    assert.deepEqual([...cookies], [SHARED]);
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "account");
+  });
 });

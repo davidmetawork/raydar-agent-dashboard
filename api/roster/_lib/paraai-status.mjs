@@ -196,7 +196,7 @@ export async function defaultCrmPage({
   recruiterId = RECRUITER_ID,
 } = {}) {
   // trpcGet uses the Para AI adapter, whose cookie is resolved at request time
-  // (env or n8n fallback), cached, and cleared on a 401. Do not use the
+  // (env or n8n fallback), cached, and cleared on a confirmed expiry. Do not use the
   // Sequences adapter's module-time COOKIE constant for this long-lived index.
   const result = await trpcGet("candidateUser.getCRMExternalCandidates", {
     cursor,

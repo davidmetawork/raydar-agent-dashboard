@@ -212,7 +212,7 @@ export async function listVariables({ base, key, fetchImpl = fetch }) {
 // outranks the other by construction. Instead of unconditionally preferring
 // the account slot, this module holds an ORDERED CANDIDATE LIST, tries the
 // first one that is both resolvable and not currently in cooldown, and only
-// moves on when a live 401 proves that candidate bad:
+// moves on when serial probes prove that candidate dead:
 //
 //   default order:            [shared, account('david'), env]
 //   PARAFORM_SESSION_ACCOUNT: [account(<that account>), shared, env]
@@ -418,24 +418,33 @@ export function invalidateParaformSessionCache() {
 }
 
 /**
- * Call this when a live Paraform request gets a 401 using the currently
- * cached value. Marks THAT candidate's slot rejected for
+ * Call this once a Paraform session is CONFIRMED dead, never on a bare 401:
+ * Paraform also answers 401 for burst throttling, and parking a live slot
+ * drops the rest of the process onto the next candidate, which can be the
+ * static env seal WorkOS rotated away hours ago (measured hazard, 2026-09-28).
+ * Marks the cached candidate's slot rejected for
  * PARAFORM_SESSION_REJECTION_TTL_MS (30 minutes) so the next resolution
  * skips it in favor of the next candidate in order, and invalidates the
  * cache so the NEXT ensureParaformSession() call actually re-resolves rather
  * than serve the same now-known-bad value for the rest of the 10-minute TTL.
- * Never retries inside the current request — the caller's existing
- * throttle/backoff ladder is unchanged; this only affects what the NEXT
+ * Never retries inside the current request; this only affects what the NEXT
  * invocation resolves.
+ *
+ * `cookie`: the exact value the confirming probes sent. When given, the slot
+ * is parked only if the cache still holds that value. A concurrent request
+ * may already have parked it and moved the process to the next candidate,
+ * which nothing has proven dead. Returns true when a slot was parked.
  */
-export function notifyParaformSessionRejected({ now = Date.now() } = {}) {
+export function notifyParaformSessionRejected({ now = Date.now(), cookie } = {}) {
   // cache.slot (not cache.value) is the guard: a slot resolves to "" when
   // nothing is configured for it, which is still a real resolution worth
   // marking rejected — cache.slot is only null in the pristine, nothing-has-
   // ever-been-resolved state.
-  if (!cache.slot) return;
+  if (!cache.slot) return false;
+  if (cookie !== undefined && cache.value !== cookie) return false;
   rejectedUntil.set(cache.slot, now + PARAFORM_SESSION_REJECTION_TTL_MS);
   invalidateParaformSessionCache();
+  return true;
 }
 
 /** Test-only: force the module back to its just-loaded state. */
