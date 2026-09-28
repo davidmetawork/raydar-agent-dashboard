@@ -187,6 +187,13 @@ export async function mailroomOutreachLaneReady({
     else if (lane.sendgrid_threading_enabled !== true) value = { ready: false, reason: "threading_disabled" };
     else value = { ready: true, reason: null, senderId: clean(lane.sender_id) || null };
   } catch (error) {
+    // A refused key is a definite answer (cached, not transient): retrying
+    // quietly would only run the requests into their expiry pages.
+    if ([401, 403].includes(Number(error?.status))) {
+      value = { ready: false, reason: clean(error?.code) || "lanes_unauthorized" };
+      laneReadyCache = { lane: config.lane, at: now, value };
+      return value;
+    }
     // Transient and never cached: a blip must not read as a deliberate
     // switch-off for a whole minute.
     return { ready: false, reason: clean(error?.code) || "lanes_unreadable", transient: true };

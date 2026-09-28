@@ -1055,3 +1055,85 @@ test("a bounce recorded for an address the candidate has replaced is ignored", a
   assert.equal(await mailroomConversationBounce(state, { statusImpl }), null);
   assert.ok(await mailroomConversationBounce({ ...state, candidateEmail: "old@example.com" }, { statusImpl }));
 });
+
+// ── Re-review regressions (2026-09-28) ───────────────────────────────────────
+
+test("two roles admitted in the same tick: the second waits for the first's Mailroom conversation", async () => {
+  mailroom.onWake = "hold";
+  const first = seedRequest("req-s1", "cu-s");
+  const second = seedRequest("req-s2", "cu-s", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  assert.equal((await processMatchRequest(first, history(), sendOptions())).action, "queued");
+  await assert.rejects(
+    processMatchRequest(second, history(), sendOptions()),
+    (error) => error.code === "OUTREACH_MAILROOM_RETRY",
+  );
+  assert.equal(mailroom.enqueued.length, 1, "the second role opened no conversation of its own");
+});
+
+test("a stale queued row stops holding the candidate's other roles after 12 hours", async () => {
+  const { openMailroomMatch } = await import("../api/paraai/_lib/outreach.mjs");
+  const now = Date.parse("2026-09-29T12:00:00Z");
+  const state = {
+    candidateUserId: "cu-z",
+    outbox: {
+      "match:a": {
+        status: "queued",
+        transport: "mailroom-sendgrid",
+        mailroomDedupeKey: "k",
+        requestId: "a",
+        queuedAt: "2026-09-29T02:00:00Z",
+      },
+    },
+  };
+  assert.deepEqual(openMailroomMatch(state, { now }), { requestId: "a", status: "queued" });
+  assert.equal(openMailroomMatch(state, { now, excludeRequestId: "a" }), null);
+  assert.equal(openMailroomMatch(state, { now: now + 13 * 60 * 60 * 1000 }), null);
+  assert.equal(queuedMailroomCandidateIds([state], { now: now + 13 * 60 * 60 * 1000 }).size, 0);
+});
+
+test("a refused Mailroom key is a definite answer, not a blip", async () => {
+  const cfg = { base: MAILROOM_BASE, key: "bad", lane: "paraai-outreach-relief", configured: true };
+  const unauthorized = async () => jsonResponse(401, { error: "unauthorized" });
+  const result = await mailroomOutreachLaneReady({ config: cfg, fetchImpl: unauthorized });
+  assert.equal(result.ready, false);
+  assert.equal(result.transient, undefined);
+});
+
+test("a claim that never reached the Mailroom is released when the lane is off, and the role goes by Gmail", async () => {
+  const request = seedRequest("req-rel", "cu-rel");
+  const unreachable = async () => { const error = new Error("down"); error.code = "OUTREACH_MAILROOM_UNREACHABLE"; throw error; };
+  await assert.rejects(
+    processMatchRequest(request, history(), sendOptions({ mailroomDeliveryImpl: unreachable })),
+    (error) => error.code === "OUTREACH_MAILROOM_RETRY",
+  );
+  let state = await getOutreachState("cu-rel");
+  // Age the claim past the in-flight guard, then switch the lane off.
+  await saveOutreachState({
+    ...state,
+    outbox: {
+      ...state.outbox,
+      "match:req-rel": { ...state.outbox["match:req-rel"], claimedAt: "2026-09-28T00:00:00.000Z" },
+    },
+  }, state.revision);
+  mailroom.lane.enabled = false;
+  resetMailroomOutreachLaneCache();
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.transport, "gmail");
+  assert.equal(gmail.sent.length, 1);
+  assert.equal(mailroom.enqueued.length, 0);
+  state = await getOutreachState("cu-rel");
+  assert.ok(state.journal.some((entry) => entry.event === "mailroom_claim_released"));
+  assert.equal(state.matches["req-rel"].transport, "gmail");
+});
+
+test("an operator action refused for a Mailroom conversation never overwrites the request's hold", async () => {
+  const { handleOutreachFailure } = await import("../api/paraai/_lib/outreach.mjs");
+  const { listOutreachExceptions } = await import("../api/paraai/_lib/outreach-store.mjs");
+  const request = normalizeSubmissionRequest(historyRow("req-op", "cu-op"));
+  for (const code of ["OUTREACH_MAILROOM_CLAIM_OPEN", "OUTREACH_DRAFT_UNAVAILABLE_MAILROOM"]) {
+    const error = new Error(code);
+    error.code = code;
+    assert.equal(await handleOutreachFailure(error, request, { config }), undefined);
+  }
+  assert.equal((await listOutreachExceptions()).filter((row) => row.requestId === "req-op").length, 0);
+});

@@ -452,7 +452,7 @@ export function eligibleNewRequests(
   // While a candidate has a Mailroom send queued, their other roles wait too:
   // otherwise a second role would open its own conversation before the first
   // exists to thread onto.
-  const inFlightCandidates = queuedMailroomCandidateIds(states);
+  const inFlightCandidates = queuedMailroomCandidateIds(states, { now });
   const recoverable = (exceptions || []).filter((row) => (
     row?.status === "open" && (
       row?.retryable === true ||
@@ -554,10 +554,28 @@ export function queuedMailroomMatchIds(states = []) {
   return ids;
 }
 
-export function queuedMailroomCandidateIds(states = []) {
+// A candidate's other roles wait for a queued Mailroom send only while it is
+// fresh. A row can stay queued indefinitely (the lane switched off, a brake),
+// and one stuck row must not silently hold every other role until expiry.
+const MAILROOM_SIBLING_HOLD_MS = 12 * HOUR_MS;
+
+export function openMailroomMatch(state, { excludeRequestId = null, now = Date.now() } = {}) {
+  for (const [key, record] of Object.entries(state?.outbox || {})) {
+    if (!key.startsWith("match:") || record?.transport !== "mailroom-sendgrid") continue;
+    if (!clean(record?.mailroomDedupeKey) || !["queued", "claimed"].includes(record?.status)) continue;
+    const requestId = clean(record.requestId) || key.slice("match:".length);
+    if (excludeRequestId && requestId === clean(excludeRequestId)) continue;
+    const since = finiteDate(record.queuedAt) ?? finiteDate(record.claimedAt);
+    if (since != null && now - since > MAILROOM_SIBLING_HOLD_MS) continue;
+    return { requestId, status: record.status };
+  }
+  return null;
+}
+
+export function queuedMailroomCandidateIds(states = [], { now = Date.now() } = {}) {
   const ids = new Set();
   for (const state of states || []) {
-    if (queuedMailroomMatchIds([state]).size && clean(state?.candidateUserId)) {
+    if (openMailroomMatch(state, { now }) && clean(state?.candidateUserId)) {
       ids.add(clean(state.candidateUserId));
     }
   }
@@ -1466,6 +1484,7 @@ export async function processMatchRequest(
     mailroomReadyImpl = mailroomOutreachLaneReady,
     mailroomThreadImpl = mailroomReplyThread,
     mailroomBounceImpl = mailroomConversationBounce,
+    mailroomStatusImpl = readMailroomOutreachStatus,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -1550,6 +1569,20 @@ export async function processMatchRequest(
     };
     const existingMatch = state.matches?.[request.id];
     if (existingMatch?.sentAt) return { action: "existing", state, request, match: existingMatch };
+
+    // The tick computes eligibility once, so two of a candidate's roles can
+    // both be admitted in one pass, and operator sends skip eligibility. While
+    // a fresh Mailroom send for another role is still open, this one waits
+    // for that conversation to exist instead of opening a second one.
+    if (mode === "send" && !reliefTransport) {
+      const sibling = openMailroomMatch(state, { excludeRequestId: request.id });
+      if (sibling) {
+        const error = new Error(`another role's Mailroom send is still ${sibling.status}; this role waits for it`);
+        error.code = "OUTREACH_MAILROOM_RETRY";
+        error.outreachStage = "candidate_safety";
+        throw error;
+      }
+    }
 
     // INCIDENT 2026-07-26 → REVISED 2026-07-28. The 07-26 fix made ANY inbound
     // message a permanent block on every future match. It was right about nudges
@@ -1734,7 +1767,7 @@ export async function processMatchRequest(
     // Mailroom conversation continues in the Mailroom. An action already
     // claimed on one transport is only ever finished on that same transport,
     // because switching mid-claim is the one way to send an email twice.
-    const priorMailroomClaim = previousOutbox.transport === "mailroom-sendgrid" &&
+    let priorMailroomClaim = previousOutbox.transport === "mailroom-sendgrid" &&
       Boolean(clean(previousOutbox.mailroomDedupeKey)) &&
       ["claimed", "queued", "uncertain"].includes(previousOutbox.status);
     // Any other open claim (Gmail, or a relief send that never finished) keeps
@@ -1754,9 +1787,36 @@ export async function processMatchRequest(
       throw error;
     }
     if (priorMailroomClaim && !laneReady.ready) {
-      const error = new Error(`claimed Mailroom action waits for the lane (${laneReady.reason})`);
-      error.code = "OUTREACH_MAILROOM_RETRY";
-      throw error;
+      // A claim that never reached the Mailroom (it holds no row) sent
+      // nothing, so it is released and routes afresh, through Gmail while the
+      // lane is off. The claim must be old enough that no enqueue from it can
+      // still be in flight.
+      const claimedAt = finiteDate(previousOutbox.claimedAt);
+      const settled = previousOutbox.status === "claimed" &&
+        claimedAt != null && Date.now() - claimedAt > 2 * 60_000;
+      const status = settled
+        ? await mailroomStatusImpl(previousOutbox.mailroomDedupeKey).catch(() => null)
+        : null;
+      if (status?.ok === true && status.found === false) {
+        state = await saveOutreachState(appendOutreachJournal({
+          ...state,
+          outbox: {
+            ...(state.outbox || {}),
+            [actionKey]: {
+              ...previousOutbox,
+              status: "released",
+              releasedAt: new Date().toISOString(),
+              releaseCode: `lane_not_ready:${clean(laneReady.reason)}`,
+            },
+          },
+        }, "mailroom_claim_released", { requestId: request.id, reason: laneReady.reason || null }), state.revision);
+        previousOutbox.status = "released";
+        priorMailroomClaim = false;
+      } else {
+        const error = new Error(`claimed Mailroom action waits for the lane (${laneReady.reason})`);
+        error.code = "OUTREACH_MAILROOM_RETRY";
+        throw error;
+      }
     }
     const mailroomActive = !state.threadId && Boolean(state.mailroomConversation);
     // A Gmail draft cannot join a Mailroom conversation, and writing its thread
@@ -2871,12 +2931,21 @@ export async function processDueFollowup(
         statusImpl: mailroomStatusImpl,
       });
     }
-    // A nudge still open in the Mailroom is never re-sent through Gmail, even
-    // if a Gmail thread became active meanwhile.
+    // A nudge claimed on the Mailroom is only ever finished there, even if a
+    // Gmail thread became active meanwhile: the transport on its claim picks
+    // the path, exactly as for a match.
     {
       const open = state.outbox?.[`followup:${followup.ownerMatchId}:${followup.number}`];
       if (open?.transport === "mailroom-sendgrid" && ["claimed", "queued", "uncertain"].includes(open.status)) {
-        return { action: "mailroom_in_flight", state };
+        return await processDueMailroomFollowup(state, followup, {
+          config,
+          now,
+          readyImpl: mailroomReadyImpl,
+          deliveryImpl: mailroomDeliveryImpl,
+          threadImpl: mailroomThreadImpl,
+          bounceImpl: mailroomBounceImpl,
+          statusImpl: mailroomStatusImpl,
+        });
       }
     }
     if (!state.threadId) {
@@ -3326,7 +3395,14 @@ export async function handleOutreachFailure(
   }
   // A lock race is expected concurrency, not an attempt failure. The request
   // remains eligible for the next tick and no operator action is needed.
-  if (code === "OUTREACH_BUSY") return;
+  // The two Mailroom refusals below answer an operator action (relief or a
+  // draft on a Mailroom conversation); recording them would overwrite a real
+  // hold on the request.
+  if (
+    code === "OUTREACH_BUSY" ||
+    code === "OUTREACH_MAILROOM_CLAIM_OPEN" ||
+    code === "OUTREACH_DRAFT_UNAVAILABLE_MAILROOM"
+  ) return;
   // The Mailroom did not take (or has not yet confirmed) the hand-off. The
   // retry converges on the same outbox key, so it self-heals quietly; a request
   // that stays stuck still gets the 48h/12h deadline pages.
