@@ -53,6 +53,14 @@ export const kvGet = async (key) => {
   if (raw == null) return null;
   try { return JSON.parse(raw); } catch { return raw; }
 };
+// A GET that tells "no such key" (null) apart from "KV did not answer"
+// (throws KV_UNAVAILABLE). The worker needs the difference: it removes a queue
+// entry whose record is gone, and a transport blip must never read as gone.
+export const kvGetStrict = async (key) => {
+  const raw = await kv(["GET", key], { throwOnTransport: true });
+  if (raw == null) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
+};
 export const kvSet = (key, value, ttlSeconds) =>
   kv(ttlSeconds
     ? ["SET", key, JSON.stringify(value), "EX", String(ttlSeconds)]

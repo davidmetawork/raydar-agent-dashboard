@@ -117,6 +117,54 @@ test("an incomplete Scheduler index is reported without throwing or touching Cal
   assert.ok(out.calendly);
 });
 
+function markerStore() {
+  const docs = new Map();
+  return {
+    docs,
+    read: async (key) => docs.get(key) ?? null,
+    claim: async (key, value) => { if (!docs.has(key)) docs.set(key, value); },
+    write: async (key, value) => { docs.set(key, value); },
+  };
+}
+
+test("catch-up holds a no-match booking against an incomplete index instead of marking it processed, and clears it on the next complete one", async () => {
+  const store = markerStore();
+  const booking = { bookedAt: Date.parse("2026-08-01T00:00:00.000Z"), status: "active", bookingId: "bk_1" };
+  const run = (liveSet, applied) => catchUpBookingIndexes({
+    now: NOW,
+    loadLive: async () => liveSet,
+    fetchRaydarIndex: async () => ({ complete: true, index: new Map([["candidate@example.com", booking]]) }),
+    fetchCalendlyIndex: async () => ({ index: new Map() }),
+    applyDecisionsImpl: async (decisions) => { applied.push(decisions.map((d) => d.sequenceId)); return { paused: decisions.length, pauseErrors: [] }; },
+    processedRead: store.read,
+    processedClaim: store.claim,
+    processedWrite: store.write,
+  });
+  const l1 = { ...usableLiveSet({}), incomplete: true, unverifiedSequences: [{ id: "seq_2", name: "Audio Failed", reason: "PARAFORM_HTTP_401" }] };
+
+  const applied = [];
+  const first = await run(l1, applied);
+  assert.equal(first.raydar.held, 1);
+  const [marker] = store.docs.values();
+  assert.deepEqual(marker.hold.unverifiedSequenceIds, ["seq_2"], "held, not marked processed for 60 days");
+
+  const again = await run(l1, applied);
+  assert.equal(again.raydar.checked, 0, "the same index is not re-checked");
+  assert.equal(again.raydar.held, 1);
+
+  const l2 = {
+    schema: LIVESET_SCHEMA,
+    builtAt: new Date(NOW - 60_000).toISOString(),
+    byEmail: { "candidate@example.com": [{ ccu: "ccu_2", cu: "cu_2", n: "Cand", s: "seq_2", sn: "Audio Failed", t: "2026-07-01T00:00:00.000Z" }] },
+    unverifiedSequences: [],
+  };
+  const cleared = await run(l2, applied);
+  assert.equal(cleared.raydar.paused, 1);
+  assert.deepEqual(applied, [["seq_2"]]);
+  const [resolved] = store.docs.values();
+  assert.equal(resolved.hold, undefined, "the held marker is overwritten as resolved");
+});
+
 test("bookTimeRotorCheck stays within its daily budget and advances the rotor across ticks", async () => {
   const rows = Array.from({ length: 5 }, (_, i) => ({
     ccu: `ccu_${i}`, cu: `cu_${i}`, n: `Cand ${i}`, s: "seq_1", sn: "No Show - Agent Call", t: "2026-01-01T00:00:00.000Z",

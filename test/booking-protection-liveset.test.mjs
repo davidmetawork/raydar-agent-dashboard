@@ -8,10 +8,13 @@ import assert from "node:assert/strict";
 
 import {
   buildLiveSet,
+  holdAfterMatch,
+  liveSetUnverifiedSequences,
   liveSetUsable,
   matchBookingAgainstLiveSet,
   LIVESET_SCHEMA,
   LIVESET_MAX_AGE_MS,
+  UNVERIFIED_ANY,
 } from "../api/seq/_lib/booking-protection-liveset.mjs";
 
 const CATALOG = [
@@ -193,4 +196,55 @@ test("matchBookingAgainstLiveSet is a pure lookup against unknown emails/entries
   const liveSet = liveSetWith({});
   assert.deepEqual(matchBookingAgainstLiveSet({ liveSet, email: "nobody@example.com", bookedAtMs: Date.now(), source: "calendly" }), []);
   assert.deepEqual(matchBookingAgainstLiveSet({ liveSet: null, email: "nobody@example.com", bookedAtMs: Date.now(), source: "calendly" }), []);
+});
+
+test("buildLiveSet lists a failed walk and a short read as unverified, even a short read that returned nobody", async () => {
+  const liveSet = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async (id) => (id === "seq_interview"
+      ? { leads: [], complete: false, unique: 0, totalCount: 5 }
+      : Promise.reject(Object.assign(new Error("nope"), { code: "PARAFORM_HTTP_401" }))),
+  });
+  assert.equal(liveSet.incomplete, true);
+  assert.deepEqual(liveSet.unverifiedSequences, [
+    { id: "seq_interview", name: CATALOG[0].name, reason: "short_read:0/5" },
+    { id: "seq_no_show", name: "No Show - Agent Call", reason: "PARAFORM_HTTP_401" },
+  ]);
+  assert.equal(liveSet.errors.length, 1, "errors keeps its old meaning: walks that threw");
+
+  const complete = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async () => ({ leads: [lead()], complete: true }),
+  });
+  assert.equal(complete.incomplete, false);
+  assert.deepEqual(complete.unverifiedSequences, []);
+});
+
+test("liveSetUnverifiedSequences reads old and new index shapes, and fails closed on an unspecified gap", () => {
+  assert.deepEqual(liveSetUnverifiedSequences({ unverifiedSequences: [], errors: [] }), []);
+  assert.deepEqual(
+    liveSetUnverifiedSequences({
+      errors: [{ sequenceId: "a", name: "A", reason: "x" }],
+      sequences: [{ id: "b", name: "B", complete: false }, { id: "c", name: "C", complete: true }],
+    }).map((s) => s.id),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    liveSetUnverifiedSequences({ incomplete: true, errors: [] }).map((s) => s.id),
+    [UNVERIFIED_ANY],
+  );
+});
+
+test("holdAfterMatch: a wildcard hold or index never lets a booking resolve early", () => {
+  const decisions = [{ sequenceId: "a" }, { sequenceId: "b" }];
+  const anyIndex = { builtAt: "t2", incomplete: true };
+  const priorHold = { checkedAgainst: "t1", unverifiedSequenceIds: ["a"], heldSince: "t1" };
+  const kept = holdAfterMatch({ liveSet: anyIndex, hold: priorHold, decisions });
+  assert.deepEqual(kept.apply, [{ sequenceId: "a" }]);
+  assert.deepEqual(kept.hold.unverifiedSequenceIds, ["a"], "an index that cannot say what it missed clears nothing");
+
+  const anyHold = { checkedAgainst: "t1", unverifiedSequenceIds: [UNVERIFIED_ANY], heldSince: "t1" };
+  const reopened = holdAfterMatch({ liveSet: { builtAt: "t2", unverifiedSequences: [] }, hold: anyHold, decisions });
+  assert.deepEqual(reopened.apply, decisions, "every decision is still owed");
+  assert.equal(reopened.hold, null);
 });

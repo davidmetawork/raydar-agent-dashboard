@@ -120,10 +120,11 @@ test("defers every pending job when the live-set index is stale or missing, with
   assert.deepEqual(deps._removed, []);
 });
 
-test("silently drops a dangling queue entry whose job payload is missing", async () => {
+test("drops a dangling queue entry whose job payload is missing, and counts it", async () => {
   const deps = baseDeps({ readJob: async () => null });
   const result = await drainPendingBookings(deps);
   assert.equal(result.processed, 0);
+  assert.equal(result.missing, 1);
   assert.deepEqual(deps._removed, ["bevt_test_001"]);
 });
 
@@ -404,4 +405,176 @@ test("a pause on a confirmed-dead session with nowhere to move is one pause erro
     __resetSessionExpiryChecksForTests();
     __resetPacerSessionMemoryForTests();
   }
+});
+
+// ── Incomplete live sets: hold, never drop (found in the PR 244 review) ──────
+// A refresh that could not read one sequence still publishes. A booking for a
+// lead in that sequence finds no match, and used to be removed for good.
+
+const L1_BUILT = new Date(NOW_MS - 3600_000).toISOString();
+const L2_BUILT = new Date(NOW_MS - 60_000).toISOString();
+
+function entry(overrides = {}) {
+  return {
+    ccu: "ccu_1", cu: "cu_1", n: "Test Candidate", s: "seq_1",
+    sn: "No Show - Agent Call", t: "2026-07-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function incompleteLiveSet(entries, unverified, builtAt = L1_BUILT) {
+  return {
+    schema: LIVESET_SCHEMA,
+    builtAt,
+    byEmail: entries,
+    incomplete: true,
+    unverifiedSequences: unverified.map((id) => ({ id, name: `Seq ${id}`, reason: "PARAFORM_HTTP_401" })),
+  };
+}
+
+function holdingDeps(overrides = {}) {
+  const holds = [];
+  const applied = [];
+  return baseDeps({
+    holdJob: async (eventId, jobDoc, hold) => { holds.push({ eventId, jobDoc, hold }); },
+    applyDecisionsImpl: async (decisions) => {
+      applied.push(decisions.map((d) => d.sequenceId));
+      return { paused: decisions.length, pauseErrors: [] };
+    },
+    _holds: holds,
+    _applied: applied,
+    ...overrides,
+  });
+}
+
+test("a no-match booking checked against an incomplete index is held, not dropped", async () => {
+  const deps = holdingDeps({
+    loadLive: async () => incompleteLiveSet({}, ["seq_2"]),
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.processed, 1);
+  assert.equal(result.matched, 0);
+  assert.equal(result.held, 1);
+  assert.deepEqual(deps._removed, [], "the booking stays queued");
+  assert.equal(deps._holds.length, 1);
+  assert.deepEqual(deps._holds[0].hold, {
+    checkedAgainst: L1_BUILT,
+    unverifiedSequenceIds: ["seq_2"],
+    heldSince: new Date(NOW_MS).toISOString(),
+  });
+  assert.deepEqual(result.unverifiedSequences.map((s) => s.id), ["seq_2"]);
+});
+
+test("a held booking is skipped against the same index, then paused and resolved by the next complete one", async () => {
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2"], heldSince: L1_BUILT };
+  const same = holdingDeps({
+    readJob: async () => job({ hold }),
+    loadLive: async () => incompleteLiveSet({}, ["seq_2"]),
+  });
+  const skipped = await drainPendingBookings(same);
+  assert.equal(skipped.held, 1);
+  assert.equal(skipped.processed, 0, "nothing new can be learnt from the same index");
+  assert.deepEqual(same._applied, []);
+  assert.deepEqual(same._removed, []);
+  assert.deepEqual(same._holds, [], "no rewrite either");
+
+  const next = holdingDeps({
+    readJob: async () => job({ hold }),
+    loadLive: async () => ({
+      schema: LIVESET_SCHEMA,
+      builtAt: L2_BUILT,
+      byEmail: { "candidate@example.com": [entry({ ccu: "ccu_2", s: "seq_2", sn: "Audio Failed" })] },
+      incomplete: false,
+      unverifiedSequences: [],
+    }),
+  });
+  const resolved = await drainPendingBookings(next);
+  assert.deepEqual(next._applied, [["seq_2"]], "the lead in the once-unread sequence is paused");
+  assert.equal(resolved.paused, 1);
+  assert.deepEqual(next._removed, ["bevt_test_001"], "resolved once every sequence has been read");
+});
+
+test("a match against an incomplete index pauses now, and the next index applies only the once-unread sequence", async () => {
+  const first = holdingDeps({
+    loadLive: async () => incompleteLiveSet({ "candidate@example.com": [entry()] }, ["seq_2"]),
+  });
+  const r1 = await drainPendingBookings(first);
+  assert.deepEqual(first._applied, [["seq_1"]], "the readable sequence is protected immediately");
+  assert.equal(r1.paused, 1);
+  assert.deepEqual(first._removed, []);
+  const hold = first._holds[0].hold;
+
+  // A person has since un-paused the seq_1 lead, so it is active again in
+  // the next index. Only seq_2's decision may be applied.
+  const second = holdingDeps({
+    readJob: async () => job({ hold }),
+    loadLive: async () => ({
+      schema: LIVESET_SCHEMA,
+      builtAt: L2_BUILT,
+      byEmail: { "candidate@example.com": [entry(), entry({ ccu: "ccu_2", s: "seq_2", sn: "Audio Failed" })] },
+      unverifiedSequences: [],
+    }),
+  });
+  await drainPendingBookings(second);
+  assert.deepEqual(second._applied, [["seq_2"]], "the seq_1 pause is not re-sent");
+  assert.deepEqual(second._removed, ["bevt_test_001"]);
+});
+
+test("a hold narrows to sequences no index has read, and keeps its first heldSince", async () => {
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2", "seq_3"], heldSince: L1_BUILT };
+  const deps = holdingDeps({
+    readJob: async () => job({ hold }),
+    loadLive: async () => incompleteLiveSet({}, ["seq_3", "seq_4"], L2_BUILT),
+  });
+  await drainPendingBookings(deps);
+  assert.deepEqual(deps._removed, []);
+  assert.deepEqual(deps._holds[0].hold, {
+    checkedAgainst: L2_BUILT,
+    unverifiedSequenceIds: ["seq_3"],
+    heldSince: L1_BUILT,
+  }, "seq_2 was read now and seq_4 was read before, so only seq_3 is still unknown");
+
+  const cleared = holdingDeps({
+    readJob: async () => job({ hold: { ...hold, unverifiedSequenceIds: ["seq_2"] } }),
+    loadLive: async () => incompleteLiveSet({}, ["seq_4"], L2_BUILT),
+  });
+  await drainPendingBookings(cleared);
+  assert.deepEqual(cleared._removed, ["bevt_test_001"], "every sequence was read by one index or the other");
+});
+
+test("an index published before unverifiedSequences existed is judged by its errors list", async () => {
+  const deps = holdingDeps({
+    loadLive: async () => ({
+      ...usableLiveSet({}),
+      incomplete: true,
+      errors: [{ sequenceId: "seq_2", name: "Audio Failed", reason: "PARAFORM_HTTP_401" }],
+    }),
+  });
+  await drainPendingBookings(deps);
+  assert.deepEqual(deps._removed, []);
+  assert.deepEqual(deps._holds[0].hold.unverifiedSequenceIds, ["seq_2"]);
+});
+
+test("held jobs do not spend maxJobsPerRun, so a held backlog cannot starve a new booking", async () => {
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2"], heldSince: L1_BUILT };
+  const deps = holdingDeps({
+    listPending: async () => ["h1", "h2", "h3", "new"],
+    readJob: async (id) => (id === "new" ? job({ eventId: id }) : job({ eventId: id, hold })),
+    loadLive: async () => incompleteLiveSet({ "candidate@example.com": [entry()] }, ["seq_2"]),
+    maxJobsPerRun: 1,
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.processed, 1);
+  assert.deepEqual(deps._applied, [["seq_1"]], "the new booking behind three held ones was matched");
+  assert.equal(result.held, 4, "three already held plus the new one");
+});
+
+test("a job record KV could not return is left queued, not removed as missing", async () => {
+  const deps = baseDeps({
+    readJob: async () => { throw Object.assign(new Error("KV_UNAVAILABLE"), { code: "KV_UNAVAILABLE" }); },
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.unreadable, 1);
+  assert.equal(result.missing, 0);
+  assert.deepEqual(deps._removed, []);
 });

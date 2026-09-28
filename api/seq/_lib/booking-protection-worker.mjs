@@ -13,12 +13,15 @@ import {
   kvSet as legacyKvSet,
 } from "./booking-stop.mjs";
 import {
+  holdAfterMatch,
   loadLiveSet,
+  liveSetUnverifiedSequences,
   liveSetUsable,
   matchBookingAgainstLiveSet,
 } from "./booking-protection-liveset.mjs";
 import { alsoPauseIfBookedBeforeJoining } from "./booking-protection-policy.mjs";
 import {
+  holdPendingBooking,
   pendingBookingIds,
   readPendingBooking,
   removePendingBooking,
@@ -34,6 +37,7 @@ export async function drainPendingBookings({
   listPending = pendingBookingIds,
   readJob = readPendingBooking,
   removeJob = removePendingBooking,
+  holdJob = (eventId, job, hold) => holdPendingBooking(eventId, job, hold, { now }),
   loadLive = loadLiveSet,
   applyDecisionsImpl = applyDecisions,
   writeProof = legacyKvSet,
@@ -51,8 +55,18 @@ export async function drainPendingBookings({
     paused: 0,
     deferred: 0,
     cancelled: 0,
+    // Jobs kept because the index could not read a sequence they might be
+    // in (holdAfterMatch). Counted whether held this tick or already held
+    // against this same index.
+    held: 0,
+    // Queue entries whose record had expired or was never written: removed,
+    // as before, but counted.
+    missing: 0,
+    // Records KV did not return this tick: left queued.
+    unreadable: 0,
     pauseErrors: [],
     liveSetReady: false,
+    unverifiedSequences: [],
   };
   const eventIds = await listPending();
   out.pending = eventIds.length;
@@ -60,11 +74,31 @@ export async function drainPendingBookings({
 
   const liveSet = await loadLive();
   out.liveSetReady = liveSetUsable(liveSet, now);
+  if (out.liveSetReady) out.unverifiedSequences = liveSetUnverifiedSequences(liveSet);
   const alsoBeforeJoin = alsoPauseIfBookedBeforeJoining();
 
-  for (const eventId of eventIds.slice(0, maxJobsPerRun)) {
-    const job = await readJob(eventId);
-    if (!job) { await removeJob(eventId); continue; }
+  // maxJobsPerRun bounds the jobs that do work this tick. A job already held
+  // against this exact index is skipped without spending it (one KV read,
+  // zero Paraform), so a backlog of held jobs can never starve new bookings
+  // queued behind them.
+  let budget = 0;
+  for (const eventId of eventIds) {
+    if (budget >= maxJobsPerRun) break;
+    let job;
+    try {
+      job = await readJob(eventId);
+    } catch {
+      out.unreadable++;
+      budget++;
+      continue;
+    }
+    if (!job) { out.missing++; await removeJob(eventId); continue; }
+
+    if (out.liveSetReady && job.hold && job.hold.checkedAgainst === liveSet.builtAt) {
+      out.held++;
+      continue;
+    }
+    budget++;
 
     // The hook durably records a booking.cancelled/rescheduled event under
     // K.raydarCancel(bookingId) (raydar-booking-hook.mjs) but a job for the
@@ -90,7 +124,7 @@ export async function drainPendingBookings({
     }
 
     out.processed++;
-    const decisions = matchBookingAgainstLiveSet({
+    const matchedDecisions = matchBookingAgainstLiveSet({
       liveSet,
       email: job.email,
       bookedAtMs: job.effectiveBookedAtMs ?? job.bookedAtMs,
@@ -100,6 +134,11 @@ export async function drainPendingBookings({
       alsoPauseBeforeJoiningInterviewChase: alsoBeforeJoin,
       now,
     });
+    // Against an index that could not read every protected sequence, "no
+    // match" is not final: the booking is held for those sequences instead of
+    // being removed. Decisions from the sequences it did read apply now.
+    const step = holdAfterMatch({ liveSet, hold: job.hold || null, decisions: matchedDecisions, now });
+    const decisions = step.apply;
 
     let applied = { paused: 0, pauseErrors: [] };
     if (apply && decisions.length) {
@@ -114,7 +153,12 @@ export async function drainPendingBookings({
       continue;
     }
 
-    await removeJob(eventId);
+    if (step.hold) {
+      await holdJob(eventId, job, step.hold);
+      out.held++;
+    } else {
+      await removeJob(eventId);
+    }
 
     try {
       const proof = {
@@ -147,7 +191,7 @@ export async function drainPendingBookings({
     } catch {
       // Proof-writing is observability, not correctness: the pause itself
       // already passed read-back verification above and the job is removed
-      // from the queue either way.
+      // (or held) either way.
     }
   }
   return out;

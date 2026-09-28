@@ -40,6 +40,12 @@ export const LIVESET_REFRESH_BUDGET_MS = 225_000;
 
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;
 
+export function incompleteRefreshText(unverifiedSequences = []) {
+  const parts = unverifiedSequences.map((s) => `${s.name || s.id} (${s.reason || "unread"})`);
+  const listed = parts.slice(0, 5).join(", ") + (parts.length > 5 ? ` and ${parts.length - 5} more` : "");
+  return `:warning: Booking live-set refresh published, but could not fully read ${unverifiedSequences.length} sequence(s): ${listed || "unnamed"}. Bookings checked against this index are held in the queue, not dropped, until a later refresh reads those sequences.`;
+}
+
 function operatorAuthorized(header, key) {
   if (!OPERATOR_KEY_PATTERN.test(String(key ?? "")) || typeof header !== "string") return false;
   const actual = Buffer.from(header, "utf8");
@@ -94,6 +100,7 @@ async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
     leadsIndexed: liveSet.leadsIndexed,
     indexedEmails: liveSet.indexedEmails,
     incomplete: liveSet.incomplete,
+    unverifiedSequences: liveSet.unverifiedSequences.length,
   });
   return {
     ok: true,
@@ -104,6 +111,7 @@ async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
     leadsIndexed: liveSet.leadsIndexed,
     indexedEmails: liveSet.indexedEmails,
     incomplete: liveSet.incomplete,
+    unverifiedSequences: liveSet.unverifiedSequences,
     errors: liveSet.errors,
   };
 }
@@ -129,7 +137,7 @@ async function handleBookingLivesetRefresh(req, res) {
       await notifySlack(`:rotating_light: Booking live-set refresh could not run (${result.error}). The worker will keep serving the last published index until it ages past ${Math.round((36 * 3600))}s.`).catch(() => {});
     }
     if (result.ok && result.incomplete && (await shouldAlert("liveset-refresh-incomplete", 6 * 3600))) {
-      await notifySlack(`:warning: Booking live-set refresh published with ${result.errors?.length || 0} sequence read error(s) — see /api/seq/health.`).catch(() => {});
+      await notifySlack(incompleteRefreshText(result.unverifiedSequences)).catch(() => {});
     }
     return res.status(200).json({ ...result, ranAt: new Date().toISOString() });
   } catch (error) {
