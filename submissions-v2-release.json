@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 107,
-  "digest": "4c67676d10dcec891248c60e20b23d95f2358145a9932298c40895faf3dc9f51",
+  "digest": "023c96566c1ffa21071e093c4b3d0983342ed30f80166e86ac3e417fb84da753",
   "vercel_json_canonical_sha256": "ab148cb972a9b01608f881fdc14d64e736fe754aa938fc6070955112dc8d388e",
   "files": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "path": "api/inbox/_lib/core.mjs",
-      "sha256": "e65c24fbc0c5e5801bd83b7972bcbed60695395a728f41a411cf901140913420"
+      "sha256": "34ef66d199095f6df2a8850dcc6139c4a84b635402b74c2f631d0bb2f6847afa"
     },
     {
       "path": "api/inbox/health.mjs",

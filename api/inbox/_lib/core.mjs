@@ -11,6 +11,7 @@ import {
   hasCookie,
   headers,
   notifyParaformSessionRejected,
+  paraformCookieName,
   paraformCookieValue,
   paraformHealth,
   requireAuth,
@@ -49,37 +50,80 @@ export const INBOX_SESSION_HOOKS = Object.freeze({
   resolve: () => resolveInboxParaformSession(),
 });
 
-const CURRENT_USER_PROBE_INPUT = encodeURIComponent(
-  JSON.stringify({ json: null, meta: { values: {}, v: 1 } }),
-);
+const CURRENT_USER_PROBE_URL = `${BASE}/trpc/user.getCurrentUser?input=`
+  + encodeURIComponent(JSON.stringify({ json: null, meta: { values: {}, v: 1 } }));
+const INBOX_PROBE_DELAY_MS = 1_500;
+const INBOX_PROBE_TIMEOUT_MS = 4_000;
+const INBOX_DEAD_COOKIE_MEMORY = 16;
+let deadInboxCookies = new Set();
+let inboxCookieProbes = new Map();
+
+export function __resetInboxSessionProbesForTests() {
+  deadInboxCookies = new Set();
+  inboxCookieProbes = new Map();
+}
+
+// Two spaced serial probes of the exact refused cookie, shared by every read
+// that got a 401 on it, so a burst of concurrent 401s costs one probe run and
+// a throttle that clears within a few seconds keeps the slot. A cookie proven
+// dead is remembered so later 401s on it skip straight to the fall-through.
+function inboxCookieIsDead(cookie, observedFetch, sleepImpl, randomImpl) {
+  if (deadInboxCookies.has(cookie)) return Promise.resolve(true);
+  let pending = inboxCookieProbes.get(cookie);
+  if (!pending) {
+    pending = (async () => {
+      for (let round = 1; round <= 2; round += 1) {
+        await sleepImpl(INBOX_PROBE_DELAY_MS * round + Math.floor(randomImpl() * 500));
+        const probe = await observedFetch(CURRENT_USER_PROBE_URL, {
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            cookie: `${paraformCookieName(cookie)}=${cookie}`,
+          },
+          signal: AbortSignal.timeout(INBOX_PROBE_TIMEOUT_MS),
+        }).catch(() => null);
+        if (probe?.status !== 401) return false;
+      }
+      deadInboxCookies.add(cookie);
+      if (deadInboxCookies.size > INBOX_DEAD_COOKIE_MEMORY) {
+        deadInboxCookies.delete(deadInboxCookies.values().next().value);
+      }
+      return true;
+    })().catch(() => false).finally(() => inboxCookieProbes.delete(cookie));
+    inboxCookieProbes.set(cookie, pending);
+  }
+  return pending;
+}
 
 // The store resolves slots in order (shared, then the david account, then
 // env) and only moves past one that was reported rejected. Measured
 // 2026-09-28: the shared n8n slot was dead (last renewed Sep 25) while the
 // david slot was live, so an Inbox that never reported a 401 retried the dead
-// slot forever. Reporting every 401 is wrong too: a throttle would park a live
-// slot for 30 minutes. So when the refused session is still this process's
-// session, one serial user.getCurrentUser probe decides: 401 parks the slot
-// and re-resolves before the caller retries; anything else keeps it. When
-// another read already moved the process on, just wait for that resolution.
+// slot forever. Reporting every 401 is wrong too: a burst throttle would park
+// a live slot for 30 minutes. So a 401 on the process's current session is
+// confirmed by inboxCookieIsDead before the slot is parked and re-resolved;
+// when another read already moved the process on, this just waits for that
+// resolution. Returns "moved" when the next read will send a different
+// session, so the caller can retry once on it.
 export async function fallThroughDeadInboxSession(
   sentCookie,
   observedFetch,
-  timeoutMs,
-  session = INBOX_SESSION_HOOKS,
+  {
+    sleepImpl = sleep,
+    randomImpl = Math.random,
+    session = INBOX_SESSION_HOOKS,
+  } = {},
 ) {
   if (sentCookie && session.current() === sentCookie) {
-    const probe = await observedFetch(
-      `${BASE}/trpc/user.getCurrentUser?input=${CURRENT_USER_PROBE_INPUT}`,
-      { headers: headers(), signal: AbortSignal.timeout(timeoutMs) },
-    ).catch(() => null);
-    if (probe?.status !== 401) return "kept";
+    if (!(await inboxCookieIsDead(sentCookie, observedFetch, sleepImpl, randomImpl))) {
+      return "kept";
+    }
     // Re-check after the await: a concurrent read may already have parked
     // this slot and resolved the next one, which must not be parked too.
     if (session.current() === sentCookie) session.reject();
   }
   await Promise.resolve().then(() => session.resolve()).catch(() => {});
-  return "resolved";
+  return session.current() && session.current() !== sentCookie ? "moved" : "resolved";
 }
 
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
@@ -285,6 +329,7 @@ export async function inboxTrpcGet(
   const url = `${BASE}/trpc/${procedure}?input=`
     + encodeURIComponent(JSON.stringify(input));
   const attempts = Math.max(1, Number(tries) || 1);
+  let retriedOnMovedSession = false;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const sentCookie = session.current();
@@ -293,12 +338,18 @@ export async function inboxTrpcGet(
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (response.status === 401) {
-        await fallThroughDeadInboxSession(
-          sentCookie,
-          observedFetch,
-          timeoutMs,
+        const outcome = await fallThroughDeadInboxSession(sentCookie, observedFetch, {
+          sleepImpl,
+          randomImpl,
           session,
-        );
+        });
+        // A dead stored session was replaced: retry once on the new one even
+        // when the caller allowed a single try (the paced manual sweep).
+        if (outcome === "moved" && !retriedOnMovedSession) {
+          retriedOnMovedSession = true;
+          attempt -= 1;
+          continue;
+        }
         // Paraform also uses 401 as a burst-throttle signal. Treating it as a
         // session verdict is what made healthy Inbox runs silently lose most
         // sequences. The health endpoint owns session-expiry classification;

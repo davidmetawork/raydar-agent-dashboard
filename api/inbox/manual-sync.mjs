@@ -206,9 +206,10 @@ export function createManualInboxSyncHandler({
         get: pacedGet,
         concurrency: 1,
         batchSize: INBOX_SYNC_BATCH_SIZE,
-        // 110s from handler start, so time spent resolving the session and
-        // proving the pause cannot push the run past maxDuration (120s).
-        budgetMs: Math.max(1_000, 110_000 - (now().getTime() - nowMs)),
+        // 100s from handler start, so time spent resolving the session,
+        // proving the pause, and one dead-session fall-through (two spaced
+        // probes plus a store read) cannot push the run past maxDuration 120s.
+        budgetMs: Math.max(1_000, 100_000 - (now().getTime() - nowMs)),
         forceRefreshAfterMs: runStartedAtMs,
       });
       const pauseAfterReads = await pauseState()
