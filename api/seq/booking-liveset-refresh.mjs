@@ -39,6 +39,13 @@ export const config = { maxDuration: 280 };
 // leaves about 55 s. The run's durationMs is recorded; retune from that.
 export const LIVESET_REFRESH_BUDGET_MS = 225_000;
 
+// The catalog read has its own, earlier deadline. A catalog read that
+// started later could not leave time to walk anything, and a 401 on it can
+// still cost the pacer's paced probes (about 70 s, ESTIMATED) plus one
+// attempt on the next session: started by this point, even that ends
+// inside maxDuration.
+export const LIVESET_CATALOG_BUDGET_MS = 120_000;
+
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;
 
 function operatorAuthorized(header, key) {
@@ -65,12 +72,15 @@ async function recordAttempt(status, extra = {}) {
  * before the deadline is waited out instead of failing the day's refresh;
  * one that does not still fails it loudly as PARAFORM_PACED_BACKOFF. The
  * catalog read also gets one more attempt after a transient refusal (a
- * throttle 401, 403, 429, 5xx or transport failure), after its backoff.
- * `stats` counts the waits for the attempt record.
+ * throttle 401, 403, 429, 5xx or transport failure), after its backoff, and
+ * only before `catalogDeadlineAt`. A dead session with nowhere to move
+ * (PARAFORM_SESSION_DEAD) fails the run at once instead of costing a
+ * backoff between every walk. `stats` counts the waits for the record.
  */
 export function refreshPacedCalls({
   pace,
   deadlineAt,
+  catalogDeadlineAt = deadlineAt,
   stats = {},
   now,
   sleep,
@@ -96,6 +106,7 @@ export function refreshPacedCalls({
       () => client.get("campaigns.getListOfCampaignsOptimized", {}),
       {
         ...counted,
+        deadlineAt: catalogDeadlineAt,
         retryTransientRefusals: 1,
         label: "the catalog read",
         onRetry: () => { stats.catalogRetries++; },
@@ -105,7 +116,7 @@ export function refreshPacedCalls({
       () => pace(async () => {}),
       { ...counted, label: "the pause between sequence walks" },
     ).catch((error) => {
-      if (error?.code === "PARAFORM_PACED_BACKOFF") throw error;
+      if (error?.code === "PARAFORM_PACED_BACKOFF" || error?.code === "PARAFORM_SESSION_DEAD") throw error;
     }),
   };
 }
@@ -121,6 +132,7 @@ async function runRefresh({ triggeredBy, startedAt = Date.now(), pacingStats = {
   const { listSequences, sleepBetweenSequences } = refreshPacedCalls({
     pace,
     deadlineAt,
+    catalogDeadlineAt: startedAt + LIVESET_CATALOG_BUDGET_MS,
     stats: pacingStats,
   });
   // completeCampaignLeads walks one sequence internally (page reads, and a
@@ -180,6 +192,12 @@ async function handleBookingLivesetRefresh(req, res) {
 
   const startedAt = Date.now();
   const pacingStats = {};
+  // Replaced by the outcome when the run ends. One the platform kills at
+  // maxDuration stays "started", instead of showing the previous result.
+  await recordAttempt("started", {
+    triggeredBy: scheduled ? "cron" : "operator",
+    startedAt: new Date(startedAt).toISOString(),
+  });
   try {
     const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator", startedAt, pacingStats });
     if (!result.ok && (await shouldAlert(`liveset-refresh-${result.error}`, 6 * 3600))) {

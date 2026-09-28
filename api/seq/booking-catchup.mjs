@@ -30,11 +30,11 @@ export const config = { maxDuration: 120 };
 // a match then costs a paced pause and read-back; the rest of maxDuration is
 // left for that and for recording the run. A 401 that the pacer has to
 // confirm (about 70 s of paced probes, ESTIMATED) can still outlast it: the
-// rotor saves its cursor after every read, so a killed run loses only the
-// read in flight, and the attempt record stays "started".
+// rotor saves its cursor after every row, so a killed run loses only the
+// row in flight, and the attempt record stays "started".
 // At the pacer's 6.5 s spacing this allows about 10 profile reads a run
 // (ESTIMATED), well under BOOKING_STOP_LITE_BOOKTIME_DAILY_BUDGET's default
-// of 60, which cannot fit in 120 s. Each run records bookTime.checked and
+// of 60, which cannot fit in 120 s. Each run records bookTime.reads and
 // durationMs; retune from those.
 export const BOOKTIME_START_BUDGET_MS = 80_000;
 
@@ -69,8 +69,10 @@ function indexCounts(result) {
  *   - failure: the index reconciliation threw;
  *   - skipped: there is no usable live set, so nothing was checked;
  *   - partial: it ran, but something it should have checked or paused was
- *     not (an index read error, a pause error, a Book Time error, or a
- *     rotor stopped by a Paraform refusal);
+ *     not: an index read error, a pause error, a Book Time error, a rotor
+ *     stopped by a refusal, a Book Time check skipped for want of a
+ *     Paraform session, or a rotor that reached its deadline before its
+ *     first read;
  *   - success: everything it set out to check was checked.
  */
 export function catchupAttemptStatus(out) {
@@ -86,6 +88,8 @@ export function catchupAttemptStatus(out) {
     || bookTime?.pauseErrors?.length
     || bookTime?.readErrors
     || bookTime?.stoppedBy === "refused"
+    || out.bookTimeSkipped
+    || (bookTime?.stoppedBy === "deadline" && !bookTime.reads && bookTime.rows > 0)
   ) return "partial";
   return "success";
 }
@@ -104,11 +108,13 @@ export function catchupAttemptRecord(out, { startedAt, finishedAt }) {
     calendlyError: out.indexes?.calendlyError ?? null,
     bookTime: bookTime ? {
       rows: bookTime.rows ?? 0,
+      reads: bookTime.reads ?? 0,
       checked: bookTime.checked ?? 0,
       matched: bookTime.matched ?? 0,
       paused: bookTime.paused ?? 0,
       pauseErrors: bookTime.pauseErrors?.length ?? 0,
       readErrors: bookTime.readErrors ?? 0,
+      passedRefused: bookTime.passedRefused ?? 0,
       stoppedBy: bookTime.stoppedBy ?? null,
       stopReason: bookTime.stopReason ?? null,
       cursor: bookTime.cursor ?? null,

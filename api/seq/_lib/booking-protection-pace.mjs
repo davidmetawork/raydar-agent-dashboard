@@ -314,8 +314,11 @@ export function isTransientRefusal(error) {
  *
  * `retryTransientRefusals` (default 0) also allows that many more attempts
  * after a call that WAS sent and refused for a transient reason
- * (isTransientRefusal). The pacer backed off after that refusal, so the next
- * attempt waits the backoff out first; each such retry is one more request.
+ * (isTransientRefusal). Each such retry is one more request, and it waits
+ * max(Retry-After, backoffMs) here first, so the wait holds even when the
+ * pacer's own KV state could not be written or read. If that wait would
+ * pass the deadline, or a later attempt meets a backoff that does, the
+ * refusal itself is thrown, not the backoff, so the record names the cause.
  *
  * Nothing is sent while waiting, so the pacer's contract holds: one call in
  * flight, at least its spacing apart, and a refusal waited out for
@@ -324,6 +327,7 @@ export function isTransientRefusal(error) {
 export async function pacedWithinDeadline(attempt, {
   deadlineAt,
   retryTransientRefusals = 0,
+  backoffMs = PACE_DEFAULT_BACKOFF_MS,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log = (message) => console.warn(message),
@@ -331,25 +335,35 @@ export async function pacedWithinDeadline(attempt, {
   onRetry = () => {},
 } = {}) {
   let retries = 0;
+  let refusal = null;
   for (;;) {
     try {
       return await attempt();
     } catch (error) {
-      if (
-        error?.code === "PARAFORM_PACED_BACKOFF"
-        && Number.isFinite(error.retryAt)
-        && Number.isFinite(deadlineAt)
-        && error.retryAt < deadlineAt
-      ) {
-        const waitMs = Math.max(0, error.retryAt - now());
-        log(`booking-protection pacer: ${label} waits ${Math.ceil(waitMs / 1000)} s for the pacer's backoff`);
-        await sleep(waitMs);
-        continue;
+      if (error?.code === "PARAFORM_PACED_BACKOFF") {
+        if (
+          Number.isFinite(error.retryAt)
+          && Number.isFinite(deadlineAt)
+          && error.retryAt < deadlineAt
+        ) {
+          const waitMs = Math.max(0, error.retryAt - now());
+          log(`booking-protection pacer: ${label} waits ${Math.ceil(waitMs / 1000)} s for the pacer's backoff`);
+          await sleep(waitMs);
+          continue;
+        }
+        throw refusal || error;
       }
       if (retries < retryTransientRefusals && isTransientRefusal(error)) {
+        const waitMs = Math.max(
+          Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0 ? error.retryAfterMs : 0,
+          backoffMs,
+        );
+        if (!Number.isFinite(deadlineAt) || now() + waitMs >= deadlineAt) throw error;
         retries++;
+        refusal = error;
         onRetry(error);
-        log(`booking-protection pacer: ${label} was refused (${error.code}); trying again after the backoff`);
+        log(`booking-protection pacer: ${label} was refused (${error.code}); trying again in ${Math.ceil(waitMs / 1000)} s`);
+        await sleep(waitMs);
         continue;
       }
       throw error;

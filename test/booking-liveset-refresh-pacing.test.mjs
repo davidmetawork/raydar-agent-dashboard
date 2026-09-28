@@ -21,6 +21,8 @@ import {
 import {
   refreshPacedCalls,
   LIVESET_REFRESH_BUDGET_MS,
+  LIVESET_CATALOG_BUDGET_MS,
+  config as refreshConfig,
 } from "../api/seq/booking-liveset-refresh.mjs";
 import { buildLiveSet, liveSetUsable } from "../api/seq/_lib/booking-protection-liveset.mjs";
 
@@ -30,7 +32,7 @@ const ok = (json) => Response.json({ result: { data: { json } } });
 
 // A pacer on in-memory state and a fake clock that sleeping advances, the
 // way separate invocations share it through KV in production.
-function harness({ answer = () => ok([]) } = {}) {
+function harness({ answer = () => ok([]), kvDown = false } = {}) {
   let clockMs = START;
   let state = null;
   const sent = [];
@@ -43,8 +45,10 @@ function harness({ answer = () => ok([]) } = {}) {
   const clock = () => clockMs;
   const sleep = async (ms) => { clockMs += ms; };
   const pace = createPacer({
-    loadState: async () => state,
-    saveState: async (value) => { state = value; },
+    // kvDown: the store answers nothing and keeps nothing, as kvGet/kvSet
+    // do when KV cannot be reached.
+    loadState: async () => (kvDown ? null : state),
+    saveState: async (value) => { if (!kvDown) state = value; },
     incrementCount: async () => {},
     now: clock,
     sleep,
@@ -65,13 +69,19 @@ function harness({ answer = () => ok([]) } = {}) {
   };
 }
 
-function calls(h, { deadlineAt = START + LIVESET_REFRESH_BUDGET_MS, stats = {} } = {}) {
+function calls(h, {
+  deadlineAt = START + LIVESET_REFRESH_BUDGET_MS,
+  catalogDeadlineAt = START + LIVESET_CATALOG_BUDGET_MS,
+  stats = {},
+  sleep = h.sleep,
+} = {}) {
   return refreshPacedCalls({
     pace: h.pace,
     deadlineAt,
+    catalogDeadlineAt,
     stats,
     now: h.clock,
-    sleep: h.sleep,
+    sleep,
     log: () => {},
   });
 }
@@ -234,4 +244,67 @@ test("waiting never pushes a walk start past the refresh deadline", async () => 
   } finally {
     h.restore();
   }
+});
+
+test("the catalog read's retry waits its own 60 s even when the pacer's KV state is unreachable", async () => {
+  // Review finding: the wait lived only in the pacer's KV state, so during a
+  // KV blip the retry went out at once.
+  const h = harness({
+    kvDown: true,
+    answer: (proc, n) => (n === 1 ? new Response(null, { status: 429 }) : ok([])),
+  });
+  try {
+    const { listSequences } = calls(h);
+    await listSequences();
+    assert.equal(h.sent.length, 2);
+    assert.ok(h.sent[1].at - h.sent[0].at >= PACE_DEFAULT_BACKOFF_MS);
+  } finally {
+    h.restore();
+  }
+});
+
+test("the catalog read is not retried past its own deadline, and the refusal is what fails the run", async () => {
+  const h = harness({ answer: () => new Response(null, { status: 429 }) });
+  try {
+    h.advance(LIVESET_CATALOG_BUDGET_MS - 30_000);
+    const { listSequences } = calls(h);
+    await assert.rejects(listSequences(), { code: "PARAFORM_REFUSED", status: 429 });
+    assert.equal(h.sent.length, 1, "a retry 60 s later would start past the catalog deadline");
+  } finally {
+    h.restore();
+  }
+});
+
+test("when the retry meets a backoff that outlasts the deadline, the original refusal is reported", async () => {
+  const h = harness({ answer: () => new Response(null, { status: 429 }) });
+  try {
+    const { listSequences } = calls(h, {
+      // While the catalog read waits, another invocation is refused and
+      // backs everyone off past the deadline.
+      sleep: async (ms) => { h.advance(ms); h.setBackoff(START + LIVESET_REFRESH_BUDGET_MS + 60_000); },
+    });
+    await assert.rejects(listSequences(), { code: "PARAFORM_REFUSED", status: 429 });
+    assert.equal(h.sent.length, 1);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a dead session with nowhere to move fails the walk at once instead of a backoff between every sequence", async () => {
+  const dead = () => Object.assign(new Error("PARAFORM_SESSION_DEAD"), { code: "PARAFORM_SESSION_DEAD", status: 401 });
+  const { sleepBetweenSequences } = refreshPacedCalls({
+    pace: async () => { throw dead(); },
+    deadlineAt: Date.now() + 600_000,
+    log: () => {},
+  });
+  await assert.rejects(sleepBetweenSequences(), { code: "PARAFORM_SESSION_DEAD" });
+});
+
+test("the catalog read's deadline leaves room for a confirmed 401 inside the refresh's maxDuration", () => {
+  // ESTIMATED worst case for a catalog read started at its deadline: 6.5 s of
+  // spacing, a 20 s request, about 70 s of the pacer's paced probes, then one
+  // 26.5 s attempt on the next session.
+  const worstCatalogMs = PACE_MIN_INTERVAL_MS + 20_000 + 70_000 + PACE_MIN_INTERVAL_MS + 20_000;
+  assert.ok(LIVESET_CATALOG_BUDGET_MS < LIVESET_REFRESH_BUDGET_MS);
+  assert.ok(LIVESET_CATALOG_BUDGET_MS + worstCatalogMs < refreshConfig.maxDuration * 1000);
 });

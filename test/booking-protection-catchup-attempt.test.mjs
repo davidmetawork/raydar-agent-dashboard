@@ -9,6 +9,9 @@ const ENV = {
 };
 const ENV_NAMES = [
   ...Object.keys(ENV),
+  "CRON_SECRET",
+  "N8N_BASE_URL",
+  "N8N_API_KEY",
   "PARAFORM_COOKIE",
   "SLACK_BOT_TOKEN",
   "SLACK_WEBHOOK_URL",
@@ -29,7 +32,10 @@ const {
 } = await import("../api/seq/booking-catchup.mjs");
 const { default: healthHandler } = await import("../api/seq/health.mjs");
 const { LITE_KEYS } = await import("../api/seq/_lib/booking-protection-store.mjs");
-const { config: refreshConfig } = await import("../api/seq/booking-liveset-refresh.mjs");
+const {
+  config: refreshConfig,
+  default: refreshHandler,
+} = await import("../api/seq/booking-liveset-refresh.mjs");
 const { config: workerConfig } = await import("../api/seq/booking-worker.mjs");
 
 test.after(() => {
@@ -85,8 +91,8 @@ const READY_INDEXES = {
 };
 
 const BOOKTIME_DONE = {
-  checked: 9, matched: 0, paused: 0, pauseErrors: [], readErrors: 0,
-  rows: 400, cursor: 129, stoppedBy: "deadline", stopReason: null,
+  reads: 9, checked: 9, matched: 0, paused: 0, pauseErrors: [], readErrors: 0,
+  passedRefused: 0, rows: 400, cursor: 129, stoppedBy: "deadline", stopReason: null,
 };
 
 test("the catch-up writes the attempt key health reads, first as started and then with the outcome", async () => {
@@ -119,6 +125,7 @@ test("the catch-up writes the attempt key health reads, first as started and the
     assert.equal(final.durationMs, 70_000);
     assert.deepEqual(final.raydar, { checked: 3, matched: 1, paused: 1, pauseErrors: 0 });
     assert.equal(final.bookTime.checked, 9);
+    assert.equal(final.bookTime.reads, 9);
     assert.equal(final.bookTime.stoppedBy, "deadline");
     assert.equal(final.bookTime.cursor, 129);
 
@@ -168,6 +175,35 @@ test("catchupAttemptStatus names each outcome", () => {
     catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, stoppedBy: "refused" } }),
     "partial",
   );
+  // Review finding: a Book Time check that never ran is not a success.
+  assert.equal(catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTimeSkipped: "no_cookie" }), "partial");
+  assert.equal(
+    catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, reads: 0, checked: 0 } }),
+    "partial",
+    "the reconciliation used the whole time budget, so no profile was read",
+  );
+  assert.equal(
+    catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, stoppedBy: "lap" } }),
+    "success",
+  );
+});
+
+test("a run with no Paraform session records the skipped Book Time check as partial", async () => {
+  await withFakeKv(async ({ writes }) => {
+    let rotorRan = false;
+    const out = await runCatchup({
+      pace: async (fn) => fn(),
+      catchUp: async () => READY_INDEXES,
+      bookTime: async () => { rotorRan = true; return BOOKTIME_DONE; },
+      cookiePresent: () => false,
+      notify: async () => {},
+    });
+    assert.equal(rotorRan, false);
+    assert.equal(out.attemptStatus, "partial");
+    const final = writes.filter((write) => write.key === LITE_KEYS.catchupAttempt).at(-1).value;
+    assert.equal(final.bookTimeSkipped, "no_cookie");
+    assert.equal(final.bookTime, null);
+  });
 });
 
 test("a failed reconciliation is still recorded, and the Book Time rotor still runs", async () => {
@@ -232,5 +268,28 @@ test("no booking-worker tick starts while the live-set refresh or the catch-up c
         );
       }
     }
+  }
+});
+
+test("the live-set refresh records started before it runs, so a killed run does not show the previous result", async () => {
+  // Review finding: a refresh killed at maxDuration wrote nothing, so health
+  // kept showing the day before. Here the run ends at once (no Paraform
+  // session in this process) and replaces "started" with the failure.
+  process.env.CRON_SECRET = "test-cron-secret-that-is-long-enough-000";
+  try {
+    await withFakeKv(async ({ writes }) => {
+      const res = response();
+      await refreshHandler({
+        method: "GET",
+        headers: { authorization: `Bearer ${process.env.CRON_SECRET}` },
+      }, res);
+      assert.equal(res.statusCode, 200);
+      const attempts = writes.filter((write) => write.key === LITE_KEYS.liveSetAttempt);
+      assert.deepEqual(attempts.map((write) => write.value.status), ["started", "failure"]);
+      assert.equal(attempts[0].value.triggeredBy, "cron");
+      assert.equal(attempts[1].value.error, "no_cookie");
+    });
+  } finally {
+    delete process.env.CRON_SECRET;
   }
 });
