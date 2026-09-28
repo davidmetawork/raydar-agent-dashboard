@@ -29,8 +29,9 @@ export function heldAlertAgeMs(env = process.env) {
   return (Number.isFinite(hours) && hours > 0 ? hours : 26) * 3600 * 1000;
 }
 
-export function heldAlertText({ held, oldestHeldAgeMs, unverifiedSequences = [] }) {
-  const names = unverifiedSequences.map((s) => s.name || s.id).filter(Boolean);
+export function heldAlertText({ held, oldestHeldAgeMs, heldSequenceIds = [], unverifiedSequences = [] }) {
+  const nameById = new Map(unverifiedSequences.map((s) => [s.id, s.name]));
+  const names = heldSequenceIds.map((id) => nameById.get(id) || id).filter(Boolean);
   const listed = names.slice(0, 5).join(", ") + (names.length > 5 ? ` and ${names.length - 5} more` : "");
   return `:rotating_light: Booking worker is holding ${held} booking(s), the oldest for ${Math.round(oldestHeldAgeMs / 3600000)}h, because the live-set index could not read ${listed ? `these sequences: ${listed}` : "one or more sequences"}. They stay queued, not dropped, but the daily refresh has not cleared them, so those candidates may still get nudges. Someone needs to find out why those sequences fail to read.`;
 }
@@ -72,8 +73,12 @@ async function handleBookingWorker(req, res) {
       await notifySlack(heldAlertText({
         held: queue.held,
         oldestHeldAgeMs: queue.oldestHeldAgeMs,
+        heldSequenceIds: queue.heldSequenceIds,
         unverifiedSequences: result.unverifiedSequences,
       })).catch(() => {});
+    }
+    if (result.missing > 0 && (await shouldAlert("booking-worker-missing", 6 * 3600))) {
+      await notifySlack(`:warning: Booking worker removed ${result.missing} queued booking(s) whose record was gone: expired after 14 days unmatched (a hold that never cleared), or never written. Those bookings were never cleared against a complete index.`).catch(() => {});
     }
     if (
       result.pending > 0

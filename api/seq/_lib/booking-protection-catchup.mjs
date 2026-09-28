@@ -19,6 +19,7 @@ import {
   calendlyConfigured,
   calendlyBookingIndex,
   normEmail,
+  kvGet as legacyKvGet,
 } from "./booking-stop.mjs";
 import {
   fetchRaydarBookingIndex,
@@ -26,6 +27,7 @@ import {
   raydarSchedulerIndexConfigured,
 } from "./raydar-booking-index.mjs";
 import {
+  dropAlreadyPaused,
   holdAfterMatch,
   loadLiveSet,
   liveSetUsable,
@@ -76,6 +78,7 @@ async function reconcileIndex(index, {
   readMarkerFn,
   markProcessedFn,
   holdMarkerFn,
+  pausedRead,
 }) {
   const out = { checked: 0, matched: 0, paused: 0, held: 0, pauseErrors: [] };
   for (const [email, booking] of index.entries()) {
@@ -104,7 +107,13 @@ async function reconcileIndex(index, {
     // read a sequence is not final, so the booking is held, not marked
     // processed (which would skip it for 60 days).
     const step = holdAfterMatch({ liveSet, hold: priorHold, decisions: matched, now });
-    const decisions = step.apply;
+    // A lead the worker already paused for this booking (after this index
+    // was built) is still "active" in the index; do not pause it twice.
+    const decisions = await dropAlreadyPaused(step.apply, {
+      liveSet,
+      bookedAtMs: booking.bookedAt,
+      read: pausedRead,
+    });
     out.matched += decisions.length;
     if (decisions.length && apply) {
       const applied = await applyDecisionsImpl(decisions);
@@ -134,6 +143,7 @@ export async function catchUpBookingIndexes({
   processedRead = kvGet,
   processedClaim = kvSetNx,
   processedWrite = kvSet,
+  pausedRead = legacyKvGet,
 } = {}) {
   const out = {
     raydar: null,
@@ -160,7 +170,7 @@ export async function catchUpBookingIndexes({
           now, liveSet, source: "raydar_scheduler",
           bookingIdOf: (booking) => `raydar:${booking.bookingId}`,
           applyDecisionsImpl, apply, alsoBeforeJoin,
-          readMarkerFn, markProcessedFn, holdMarkerFn,
+          readMarkerFn, markProcessedFn, holdMarkerFn, pausedRead,
         });
       } else {
         out.raydarError = "incomplete_index";
@@ -178,7 +188,7 @@ export async function catchUpBookingIndexes({
           now, liveSet, source: "calendly",
           bookingIdOf: (booking, email) => `calendly:${normEmail(email)}:${booking.bookedAt}`,
           applyDecisionsImpl, apply, alsoBeforeJoin,
-          readMarkerFn, markProcessedFn, holdMarkerFn,
+          readMarkerFn, markProcessedFn, holdMarkerFn, pausedRead,
         });
       } else {
         out.calendlyError = "incomplete_index";

@@ -83,6 +83,7 @@ export async function pendingQueueSummary(now = Date.now(), options = {}) {
   let oldestHeld = null;
   let held = 0;
   let unreadable = 0;
+  const heldSequenceIds = new Set();
   for (const eventId of ids) {
     let job;
     try {
@@ -95,6 +96,9 @@ export async function pendingQueueSummary(now = Date.now(), options = {}) {
     if (Number.isFinite(at) && (oldest == null || at < oldest)) oldest = at;
     if (job?.hold) {
       held++;
+      for (const id of Array.isArray(job.hold.unverifiedSequenceIds) ? job.hold.unverifiedSequenceIds : []) {
+        heldSequenceIds.add(id);
+      }
       const since = Date.parse(job.hold.heldSince || "");
       if (Number.isFinite(since) && (oldestHeld == null || since < oldestHeld)) oldestHeld = since;
     } else if (Number.isFinite(at) && (oldestUnheld == null || at < oldestUnheld)) {
@@ -106,6 +110,9 @@ export async function pendingQueueSummary(now = Date.now(), options = {}) {
     depth: ids.length,
     held,
     unreadable,
+    // Which sequences the held jobs are waiting on (not just the ones the
+    // current index missed).
+    heldSequenceIds: [...heldSequenceIds],
     oldestPendingAgeMs: age(oldest),
     oldestUnheldAgeMs: age(oldestUnheld),
     oldestHeldAgeMs: age(oldestHeld),

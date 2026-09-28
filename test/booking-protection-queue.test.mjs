@@ -96,7 +96,7 @@ test("pendingQueueSummary keeps held jobs out of the unheld age, and one unreada
   const store = fakeStore();
   const now = Date.parse("2026-09-26T12:00:00.000Z");
   const iso = (msAgo) => new Date(now - msAgo).toISOString();
-  await enqueuePendingBooking({ eventId: "held", enqueuedAt: iso(50 * 3_600_000), hold: { heldSince: iso(30 * 3_600_000) } }, { write: store.write, add: store.add });
+  await enqueuePendingBooking({ eventId: "held", enqueuedAt: iso(50 * 3_600_000), hold: { heldSince: iso(30 * 3_600_000), unverifiedSequenceIds: ["seq_2"] } }, { write: store.write, add: store.add });
   await enqueuePendingBooking({ eventId: "fresh", enqueuedAt: iso(600_000) }, { write: store.write, add: store.add });
   await enqueuePendingBooking({ eventId: "broken", enqueuedAt: iso(99 * 3_600_000) }, { write: store.write, add: store.add });
   const read = async (key) => {
@@ -108,6 +108,7 @@ test("pendingQueueSummary keeps held jobs out of the unheld age, and one unreada
     depth: 3,
     held: 1,
     unreadable: 1,
+    heldSequenceIds: ["seq_2"],
     oldestPendingAgeMs: 50 * 3_600_000,
     oldestUnheldAgeMs: 600_000,
     oldestHeldAgeMs: 30 * 3_600_000,

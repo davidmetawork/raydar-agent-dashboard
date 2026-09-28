@@ -461,6 +461,7 @@ test("a no-match booking checked against an incomplete index is held, not droppe
     checkedAgainst: L1_BUILT,
     unverifiedSequenceIds: ["seq_2"],
     heldSince: new Date(NOW_MS).toISOString(),
+    appliedCcuIds: [],
   });
   assert.deepEqual(result.unverifiedSequences.map((s) => s.id), ["seq_2"]);
 });
@@ -532,6 +533,7 @@ test("a hold narrows to sequences no index has read, and keeps its first heldSin
     checkedAgainst: L2_BUILT,
     unverifiedSequenceIds: ["seq_3"],
     heldSince: L1_BUILT,
+    appliedCcuIds: [],
   }, "seq_2 was read now and seq_4 was read before, so only seq_3 is still unknown");
 
   const cleared = holdingDeps({
@@ -577,4 +579,74 @@ test("a job record KV could not return is left queued, not removed as missing", 
   assert.equal(result.unreadable, 1);
   assert.equal(result.missing, 0);
   assert.deepEqual(deps._removed, []);
+});
+
+test("a re-check against a newer index still catches a lead the earlier index could not see", async () => {
+  // Enrolled in seq_1 after index 1 was built but before booking: index 2
+  // is the first to show it. seq_1 was already read, but the lead is new.
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2"], heldSince: L1_BUILT, appliedCcuIds: ["ccu_1"] };
+  const deps = holdingDeps({
+    readJob: async () => job({ hold }),
+    loadLive: async () => ({
+      schema: LIVESET_SCHEMA,
+      builtAt: L2_BUILT,
+      byEmail: { "candidate@example.com": [entry(), entry({ ccu: "ccu_late", t: "2026-07-29T12:00:00.000Z" })] },
+      unverifiedSequences: [],
+    }),
+    readPausedRecord: async () => null,
+  });
+  await drainPendingBookings(deps);
+  assert.deepEqual(deps._applied, [["seq_1"]]);
+  assert.deepEqual(deps._removed, ["bevt_test_001"]);
+});
+
+test("re-checking a held backlog after a refresh costs no budget unless it sends a pause", async () => {
+  const hold = { checkedAgainst: L1_BUILT, unverifiedSequenceIds: ["seq_2"], heldSince: L1_BUILT, appliedCcuIds: [] };
+  const deps = holdingDeps({
+    listPending: async () => ["h1", "h2", "h3", "new"],
+    readJob: async (id) => (id === "new" ? job({ eventId: id }) : job({ eventId: id, email: `${id}@example.com`, hold })),
+    // A newer index, still missing seq_2: the held jobs are re-checked (they
+    // match nothing), and the new booking behind them matches seq_1.
+    loadLive: async () => incompleteLiveSet({ "candidate@example.com": [entry()] }, ["seq_2"], L2_BUILT),
+    maxJobsPerRun: 1,
+  });
+  const result = await drainPendingBookings(deps);
+  assert.equal(result.processed, 4, "all four were checked");
+  assert.deepEqual(deps._applied, [["seq_1"]], "the new booking was not starved");
+  assert.equal(deps._holds.length, 4);
+});
+
+test("after a failed hold write, the next tick does not re-send a pause the last tick already verified", async () => {
+  // Tick 1 (after the 17:59 booking) paused ccu_1 at 17:59:30 and then failed
+  // to write the hold, so tick 2 sees the job unheld against the same index.
+  const deps = holdingDeps({
+    loadLive: async () => incompleteLiveSet({ "candidate@example.com": [entry()] }, ["seq_2"]),
+    readPausedRecord: async (key) => (key === K.paused("ccu_1") ? { at: new Date(NOW_MS - 30_000).toISOString() } : null),
+  });
+  const result = await drainPendingBookings(deps);
+  assert.deepEqual(deps._applied, [], "no Paraform request");
+  assert.equal(result.held, 1, "still held for seq_2");
+  assert.deepEqual(deps._holds[0].hold.appliedCcuIds, ["ccu_1"]);
+});
+
+test("alert texts name sequences, never candidates, and the held threshold defaults to 26 hours", async () => {
+  const { heldAlertText, heldAlertAgeMs } = await import("../api/seq/booking-worker.mjs");
+  const { incompleteRefreshText } = await import("../api/seq/booking-liveset-refresh.mjs");
+  assert.equal(heldAlertAgeMs({}), 26 * 3600 * 1000);
+  assert.equal(heldAlertAgeMs({ BOOKING_STOP_LITE_HOLD_ALERT_HOURS: "30" }), 30 * 3600 * 1000);
+  assert.equal(heldAlertAgeMs({ BOOKING_STOP_LITE_HOLD_ALERT_HOURS: "nonsense" }), 26 * 3600 * 1000);
+  const held = heldAlertText({
+    held: 3,
+    oldestHeldAgeMs: 27 * 3600 * 1000,
+    heldSequenceIds: ["seq_2", "seq_9"],
+    unverifiedSequences: [{ id: "seq_2", name: "Audio Failed" }],
+  });
+  assert.match(held, /holding 3 booking\(s\), the oldest for 27h/);
+  assert.match(held, /Audio Failed, seq_9/);
+  const refresh = incompleteRefreshText([
+    { id: "a", name: "No Show - Agent Call", reason: "PARAFORM_HTTP_401" },
+    { id: "b", name: null, reason: "short_read:3/5" },
+  ]);
+  assert.match(refresh, /could not fully read 2 sequence\(s\): No Show - Agent Call \(PARAFORM_HTTP_401\), b \(short_read:3\/5\)/);
+  assert.match(refresh, /held in the queue, not dropped/);
 });

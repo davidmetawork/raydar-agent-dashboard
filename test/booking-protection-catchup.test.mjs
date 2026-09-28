@@ -306,3 +306,70 @@ test("catchUpBookingIndexes, driven through the real applyDecisions + pacedApply
     global.fetch = originalFetch;
   }
 });
+
+test("the catch-up does not pause a lead the worker already paused for the same booking from the same index", async () => {
+  const store = markerStore();
+  const applied = [];
+  const out = await catchUpBookingIndexes({
+    now: NOW,
+    loadLive: async () => usableLiveSet({
+      "candidate@example.com": [{ ccu: "ccu_1", cu: "cu_1", n: "Cand", s: "seq_1", sn: "No Show - Agent Call", t: "2026-07-01T00:00:00.000Z" }],
+    }),
+    fetchRaydarIndex: async () => ({
+      complete: true,
+      index: new Map([["candidate@example.com", { bookedAt: Date.parse("2026-08-01T00:00:00.000Z"), status: "active", bookingId: "bk_1" }]]),
+    }),
+    fetchCalendlyIndex: async () => ({ index: new Map() }),
+    applyDecisionsImpl: async (decisions) => { applied.push(decisions); return { paused: decisions.length, pauseErrors: [] }; },
+    processedRead: store.read,
+    processedClaim: store.claim,
+    processedWrite: store.write,
+    // The worker paused it 10 minutes ago, after this index was built.
+    pausedRead: async () => ({ at: new Date(NOW - 600_000).toISOString() }),
+  });
+  assert.deepEqual(applied, [], "no second pause");
+  assert.equal(out.raydar.matched, 0);
+  assert.equal(store.docs.size, 1, "resolved all the same");
+});
+
+test("a catch-up pause error leaves a held marker exactly as it was", async () => {
+  const store = markerStore();
+  const hold = { checkedAgainst: "2026-09-25T05:22:00.000Z", unverifiedSequenceIds: ["seq_2"], heldSince: "2026-09-25T06:00:00.000Z", appliedCcuIds: [] };
+  const booking = { bookedAt: Date.parse("2026-08-01T00:00:00.000Z"), status: "active", bookingId: "bk_1" };
+  const run = (pauseErrors) => catchUpBookingIndexes({
+    now: NOW,
+    loadLive: async () => ({
+      schema: LIVESET_SCHEMA,
+      builtAt: new Date(NOW - 60_000).toISOString(),
+      byEmail: { "candidate@example.com": [{ ccu: "ccu_2", cu: "cu_2", n: "Cand", s: "seq_2", sn: "Audio Failed", t: "2026-07-01T00:00:00.000Z" }] },
+      unverifiedSequences: [],
+    }),
+    fetchRaydarIndex: async () => ({ complete: true, index: new Map([["candidate@example.com", booking]]) }),
+    fetchCalendlyIndex: async () => ({ index: new Map() }),
+    applyDecisionsImpl: async () => ({ paused: 0, pauseErrors }),
+    processedRead: store.read,
+    processedClaim: store.claim,
+    processedWrite: store.write,
+    pausedRead: async () => null,
+  });
+  // Seed the held marker under the key reconcileIndex uses.
+  const seeded = await catchUpBookingIndexes({
+    now: NOW,
+    loadLive: async () => ({ ...usableLiveSet({}), unverifiedSequences: [{ id: "seq_2" }] }),
+    fetchRaydarIndex: async () => ({ complete: true, index: new Map([["candidate@example.com", booking]]) }),
+    fetchCalendlyIndex: async () => ({ index: new Map() }),
+    processedRead: store.read,
+    processedClaim: store.claim,
+    processedWrite: store.write,
+  });
+  assert.equal(seeded.raydar.held, 1);
+  const [key] = store.docs.keys();
+  store.docs.set(key, { at: "seed", hold });
+
+  const failed = await run([{ sequence: "Audio Failed", reason: "still_active_after_pause" }]);
+  assert.equal(failed.raydar.pauseErrors.length, 1);
+  assert.deepEqual(store.docs.get(key), { at: "seed", hold }, "untouched, so the next run retries");
+
+  await run([]);
+  assert.equal(store.docs.get(key).hold, undefined, "resolved once the pause lands");
+});

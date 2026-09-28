@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   buildLiveSet,
+  dropAlreadyPaused,
   holdAfterMatch,
   liveSetUnverifiedSequences,
   liveSetUsable,
@@ -236,15 +237,42 @@ test("liveSetUnverifiedSequences reads old and new index shapes, and fails close
 });
 
 test("holdAfterMatch: a wildcard hold or index never lets a booking resolve early", () => {
-  const decisions = [{ sequenceId: "a" }, { sequenceId: "b" }];
+  const decisions = [{ sequenceId: "a", ccuId: "ccu_a" }, { sequenceId: "b", ccuId: "ccu_b" }];
   const anyIndex = { builtAt: "t2", incomplete: true };
-  const priorHold = { checkedAgainst: "t1", unverifiedSequenceIds: ["a"], heldSince: "t1" };
+  const priorHold = { checkedAgainst: "t1", unverifiedSequenceIds: ["a"], heldSince: "t1", appliedCcuIds: ["ccu_b"] };
   const kept = holdAfterMatch({ liveSet: anyIndex, hold: priorHold, decisions });
-  assert.deepEqual(kept.apply, [{ sequenceId: "a" }]);
+  assert.deepEqual(kept.apply, [{ sequenceId: "a", ccuId: "ccu_a" }], "a lead already handled is not re-sent");
   assert.deepEqual(kept.hold.unverifiedSequenceIds, ["a"], "an index that cannot say what it missed clears nothing");
+  assert.deepEqual(kept.hold.appliedCcuIds, ["ccu_b", "ccu_a"]);
 
-  const anyHold = { checkedAgainst: "t1", unverifiedSequenceIds: [UNVERIFIED_ANY], heldSince: "t1" };
+  const anyHold = { checkedAgainst: "t1", unverifiedSequenceIds: [UNVERIFIED_ANY], heldSince: "t1", appliedCcuIds: [] };
   const reopened = holdAfterMatch({ liveSet: { builtAt: "t2", unverifiedSequences: [] }, hold: anyHold, decisions });
   assert.deepEqual(reopened.apply, decisions, "every decision is still owed");
   assert.equal(reopened.hold, null);
+});
+
+test("dropAlreadyPaused skips a lead verified-paused after both the index build and the booking, and keeps the rest", async () => {
+  const liveSet = { builtAt: "2026-09-29T05:22:00.000Z" };
+  const bookedAtMs = Date.parse("2026-09-28T10:00:00.000Z");
+  const paused = {
+    "seqguard:paused:ccu_worker": { at: "2026-09-29T05:33:00.000Z" }, // paused by the worker after the build
+    "seqguard:paused:ccu_old": { at: "2026-09-28T09:00:00.000Z" }, // paused before this booking
+  };
+  const decisions = [{ ccuId: "ccu_worker" }, { ccuId: "ccu_old" }, { ccuId: "ccu_none" }];
+  const kept = await dropAlreadyPaused(decisions, { liveSet, bookedAtMs, read: async (key) => paused[key] ?? null });
+  assert.deepEqual(kept.map((d) => d.ccuId), ["ccu_old", "ccu_none"]);
+
+  // The pause canary: paused yesterday after yesterday's build, re-armed, and
+  // booked again today while yesterday's index is still in use.
+  const canary = await dropAlreadyPaused([{ ccuId: "ccu_canary" }], {
+    liveSet: { builtAt: "2026-09-28T05:22:00.000Z" },
+    bookedAtMs: Date.parse("2026-09-29T06:30:00.000Z"),
+    read: async () => ({ at: "2026-09-28T06:31:00.000Z" }),
+  });
+  assert.equal(canary.length, 1, "a booking made after the last pause is still paused");
+
+  const failedRead = await dropAlreadyPaused([{ ccuId: "ccu_x" }], {
+    liveSet, bookedAtMs, read: async () => { throw new Error("kv down"); },
+  });
+  assert.equal(failedRead.length, 1, "a failed read keeps the decision");
 });

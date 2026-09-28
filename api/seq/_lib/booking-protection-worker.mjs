@@ -13,6 +13,7 @@ import {
   kvSet as legacyKvSet,
 } from "./booking-stop.mjs";
 import {
+  dropAlreadyPaused,
   holdAfterMatch,
   loadLiveSet,
   liveSetUnverifiedSequences,
@@ -42,10 +43,12 @@ export async function drainPendingBookings({
   applyDecisionsImpl = applyDecisions,
   writeProof = legacyKvSet,
   readCancelRecord = legacyKvGet,
+  readPausedRecord = legacyKvGet,
   pauseCanaryFingerprint = process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
   webhookSecret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
   apply = process.env.BOOKING_STOP_APPLY !== "0",
   maxJobsPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_BUDGET || 25),
+  maxScanPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_SCAN_BUDGET || 500),
   applyDecisionsOverrides = {},
 } = {}) {
   const out = {
@@ -77,13 +80,16 @@ export async function drainPendingBookings({
   if (out.liveSetReady) out.unverifiedSequences = liveSetUnverifiedSequences(liveSet);
   const alsoBeforeJoin = alsoPauseIfBookedBeforeJoining();
 
-  // maxJobsPerRun bounds the jobs that do work this tick. A job already held
-  // against this exact index is skipped without spending it (one KV read,
-  // zero Paraform), so a backlog of held jobs can never starve new bookings
-  // queued behind them.
+  // maxJobsPerRun bounds the jobs that send Paraform requests this tick (and,
+  // as before, deferred and unreadable ones). A match that needs no pause
+  // costs only KV reads and does not spend it, so a backlog of held jobs,
+  // skipped or re-checked, can never starve new bookings queued behind them.
+  // maxScanPerRun bounds the KV reads.
   let budget = 0;
+  let scanned = 0;
   for (const eventId of eventIds) {
-    if (budget >= maxJobsPerRun) break;
+    if (budget >= maxJobsPerRun || scanned >= maxScanPerRun) break;
+    scanned++;
     let job;
     try {
       job = await readJob(eventId);
@@ -98,7 +104,6 @@ export async function drainPendingBookings({
       out.held++;
       continue;
     }
-    budget++;
 
     // The hook durably records a booking.cancelled/rescheduled event under
     // K.raydarCancel(bookingId) (raydar-booking-hook.mjs) but a job for the
@@ -120,14 +125,16 @@ export async function drainPendingBookings({
       // (or republishes) a usable index — never drop a pending booking
       // because the index happened to be stale.
       out.deferred++;
+      budget++;
       continue;
     }
 
     out.processed++;
+    const bookedAtMs = job.effectiveBookedAtMs ?? job.bookedAtMs;
     const matchedDecisions = matchBookingAgainstLiveSet({
       liveSet,
       email: job.email,
-      bookedAtMs: job.effectiveBookedAtMs ?? job.bookedAtMs,
+      bookedAtMs,
       source: job.source,
       eventName: job.eventName,
       startsAt: job.startsAt,
@@ -138,10 +145,11 @@ export async function drainPendingBookings({
     // match" is not final: the booking is held for those sequences instead of
     // being removed. Decisions from the sequences it did read apply now.
     const step = holdAfterMatch({ liveSet, hold: job.hold || null, decisions: matchedDecisions, now });
-    const decisions = step.apply;
+    const decisions = await dropAlreadyPaused(step.apply, { liveSet, bookedAtMs, read: readPausedRecord });
 
     let applied = { paused: 0, pauseErrors: [] };
     if (apply && decisions.length) {
+      budget++;
       applied = await applyDecisionsImpl(decisions, applyDecisionsOverrides);
     }
     out.matched += decisions.length;
