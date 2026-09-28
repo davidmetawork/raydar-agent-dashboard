@@ -1849,3 +1849,126 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
     { maxDuration: 120 },
   );
 });
+
+test("sync endpoint resolves the live Paraform session before its lock and reads", async () => {
+  const order = [];
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => { order.push("session"); },
+    acquireLock: async () => {
+      order.push("lock");
+      return { status: "acquired", token: "sync-token" };
+    },
+    readState: async () => ({ status: "ready", value: emptyInboxSnapshotState() }),
+    buildRefresh: async () => {
+      order.push("read");
+      return { generated_at: "2026-09-28T15:00:00.000Z" };
+    },
+    writeState: async () => ({}),
+    assembleFeed: () => ({ freshness: { state: "ready" } }),
+    releaseLock: async () => true,
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(order, ["session", "lock", "read"]);
+});
+
+test("sync endpoint does not resolve a session while background reads are paused", async () => {
+  let sessions = 0;
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "p" }),
+    ensureSession: async () => { sessions += 1; },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 503);
+  assert.equal(sessions, 0);
+});
+
+test("manual sync resolves the live Paraform session only after proving its pause", async () => {
+  const order = [];
+  const absent = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => { order.push("session"); },
+  });
+  const refused = mockResponse();
+  await absent({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, refused);
+  assert.equal(refused.statusCode, 409);
+  assert.deepEqual(order, []);
+
+  const owned = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "p" }),
+    ensureSession: async () => { order.push("session"); },
+    acquireLock: async () => {
+      order.push("lock");
+      return { status: "busy", token: null };
+    },
+  });
+  const busy = mockResponse();
+  await owned({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, busy);
+  assert.equal(busy.statusCode, 202);
+  assert.deepEqual(order, ["session", "lock"]);
+});
+
+test("Inbox health resolves the live Paraform session before its health read", async () => {
+  const order = [];
+  const res = mockResponse();
+  await createInboxHealthHandler({
+    corsHandler: () => false,
+    ensureSession: async () => { order.push("session"); },
+    healthReader: async () => {
+      order.push("health");
+      return { paraform: "live" };
+    },
+    snapshotReader: async () => ({ status: "ready", value: null }),
+    configured: () => true,
+    auth: () => ({ authRequired: true }),
+    cookieSet: () => true,
+  })({ method: "GET" }, res);
+  assert.equal(res.body.ok, true);
+  assert.deepEqual(order, ["session", "health"]);
+});
+
+test("every Inbox entrypoint that reaches Paraform resolves the live session first", async () => {
+  // A missed entrypoint silently sends the static env seal, which WorkOS has
+  // rotated away, so every read 401s and is reported as a throttle.
+  const paraformReaders = /\b(trpcGet|inboxTrpcGet|buildInboxRefresh|paraformHealth)\b/u;
+  const names = ["feed", "health", "manual-sync", "message", "sync", "triage"];
+  for (const name of names) {
+    const source = await readFile(
+      new URL(`../api/inbox/${name}.mjs`, import.meta.url),
+      "utf8",
+    );
+    if (!paraformReaders.test(source)) continue;
+    assert.match(
+      source,
+      /await ensure(?:ParaformSession|Session)\(/u,
+      `api/inbox/${name}.mjs reaches Paraform without ensureParaformSession()`,
+    );
+  }
+});

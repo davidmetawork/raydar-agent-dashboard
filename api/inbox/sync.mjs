@@ -3,6 +3,7 @@ import {
   assembleInboxSnapshotFeed,
   buildInboxRefresh,
   cors,
+  ensureParaformSession,
   readInboxSnapshotState,
   releaseInboxSyncLock,
   requireInboxAuth,
@@ -20,6 +21,7 @@ export function createInboxSyncHandler({
   releaseLock = releaseInboxSyncLock,
   assembleFeed = assembleInboxSnapshotFeed,
   pauseState = () => paraformBackgroundPauseState("dashboardReaders"),
+  ensureSession = ensureParaformSession,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -51,6 +53,10 @@ export function createInboxSyncHandler({
         retry_after_seconds: 300,
       });
     }
+
+    // Resolve the live n8n-store session before any Paraform read; without
+    // this the sweep sends the dead static env seal and every read 401s.
+    await ensureSession();
 
     const lock = await acquireLock();
     if (lock.status === "busy") {

@@ -1,5 +1,6 @@
 import {
   cors,
+  ensureParaformSession,
   publicMessage,
   requestQuery,
   requireInboxAuth,
@@ -21,6 +22,8 @@ export default async function handler(req, res) {
   if (!validInboxGmailId(gmailId)) {
     return res.status(400).json({ ok: false, error: "invalid_gmail_id" });
   }
+
+  await ensureParaformSession();
 
   try {
     const message = await trpcGet(

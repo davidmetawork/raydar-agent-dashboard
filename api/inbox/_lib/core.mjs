@@ -7,6 +7,7 @@ import {
   BASE,
   authConfig,
   cors,
+  ensureParaformSession,
   hasCookie,
   headers,
   paraformHealth,
@@ -20,7 +21,22 @@ import {
 import { OUTCOME_SEQUENCE_RULES } from "../../roster/_lib/outcome-sequences.mjs";
 import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
-export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
+// headers() is synchronous and sends whatever ensureParaformSession() last
+// resolved in this process, falling back to the static env seal (which
+// WorkOS rotates away within hours) when nothing has been resolved yet. Every
+// Inbox entrypoint that reaches Paraform must await ensureParaformSession()
+// first. inboxTrpcGet deliberately does NOT call
+// notifyParaformSessionRejected() on a 401: Paraform also answers 401 for
+// burst throttling, and demoting the live store session for 30 minutes on a
+// throttle would push the rest of the sweep back onto the dead env seal.
+export {
+  authConfig,
+  cors,
+  ensureParaformSession,
+  hasCookie,
+  paraformHealth,
+  storeConfigured,
+};
 
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
 export const INBOX_SEQUENCE_SNAPSHOTS_KEY = "inbox:v3:sequences";
