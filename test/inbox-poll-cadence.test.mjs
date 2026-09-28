@@ -10,12 +10,16 @@ import { readFile } from "node:fs/promises";
 // passes at 1s could burst ~120 calls in under 10s).
 const inboxHtml = await readFile(new URL("../inbox.html", import.meta.url), "utf8");
 
-test("the steady-state Inbox poll fires every 15 minutes, not 3", () => {
-  assert.match(inboxHtml, /setInterval\(\(\)=>queueInboxSync\(\),900000\)/);
-  assert.doesNotMatch(inboxHtml, /setInterval\(\(\)=>queueInboxSync\(\),180000\)/);
+// 2026-09-28: the page no longer polls Paraform at all. The scheduled
+// refresh (vercel.json, three times a day) and Refresh now are the only
+// Paraform-reading paths; an open page only re-reads the stored snapshot.
+test("an open Inbox page re-reads the stored snapshot and never polls Paraform", () => {
+  assert.match(inboxHtml, /setInterval\(\(\)=>loadFeed\(\),600000\)/);
+  assert.doesNotMatch(inboxHtml, /setInterval\(\(\)=>(?:queueInboxSync|syncFeed)/);
+  assert.doesNotMatch(inboxHtml, /queueInboxSync/);
 });
 
-test("the cold-start reseed burst paces at 12s, still capped at 6 passes", () => {
-  assert.match(inboxHtml, /STATE\.snapshotState==="seeding"&&STATE\.seedPasses<6\)queueInboxSync\(12000\)/);
-  assert.doesNotMatch(inboxHtml, /STATE\.seedPasses<6\)queueInboxSync\(1000\)/);
+test("opening the page starts no cold-start reseed burst", () => {
+  assert.doesNotMatch(inboxHtml, /seedPasses/);
+  assert.match(inboxHtml, /function startApp\(\)\{\n  loadHealth\(\);\n  loadFeed\(\);\n/);
 });
