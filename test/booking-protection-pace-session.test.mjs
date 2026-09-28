@@ -357,6 +357,15 @@ test("a call never moves onto a session already confirmed dead, even when the re
       (error) => error.code === "PARAFORM_SESSION_DEAD",
     );
     assert.equal(harness.sent.length, third, "with every session known dead, nothing is sent");
+    assert.equal(
+      harness.state().backoffUntil,
+      harness.now() + PACE_DEFAULT_BACKOFF_MS,
+      "and the pacer backs off, so the next calls wait instead of re-reading the store",
+    );
+    await assert.rejects(
+      () => pacedTrpcClient(harness.pace).get(CATALOG, {}),
+      (error) => error.code === "PARAFORM_PACED_BACKOFF",
+    );
   });
 });
 

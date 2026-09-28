@@ -25,7 +25,9 @@
 // throttle verdict keeps the old behaviour exactly: nothing is parked and
 // the pacer backs off. Only a confirmed-dead session is parked (by
 // unauthorizedRead itself), and then the request gets ONE attempt on the
-// next store session; a call never moves onto the static env seal. One
+// next store session; a call never MOVES onto the static env seal (a
+// process whose resolver itself falls back to it still sends it, as every
+// other path would, and learns once whether it is dead). One
 // attempt per session, at most two sessions per call, never more than one
 // in flight. A 401 that carries Retry-After is Paraform saying "throttled",
 // so it gets no probes.
@@ -37,7 +39,12 @@
 // pacer's KV state, as a short SHA-256 fingerprint (never the value). A call
 // that holds a remembered-dead session skips it without sending anything.
 // The fingerprint is of the exact value, so a reseeded or renewed session is
-// never skipped.
+// never skipped by it. Two consequences to know: a verdict (even a false
+// one) now reaches every invocation for those 30 minutes, not just the one
+// that reached it, and a warm instance that still caches the dead value
+// parks its whole slot in-process (PR 240's per-slot park), so it can ignore
+// a reseed of that slot until the park lapses. Both fail toward waiting:
+// jobs stay queued.
 import { createHash } from "node:crypto";
 import {
   BASE,
@@ -198,6 +205,10 @@ export function createPacer({
       const next = await moveFrom(held.value);
       if (!next) {
         log(`booking-protection pacer: the ${held.slot} Paraform session was confirmed dead recently and no other store session is available`);
+        // Back off like any refusal, so the calls after this one wait
+        // instead of each re-reading the n8n store to reach the same answer.
+        await persist({ lastRequestAt: state.lastRequestAt ?? null, backoffUntil: now() + defaultBackoffMs })
+          .catch(() => {});
         throw sessionDead();
       }
       log(`booking-protection pacer: skipping the ${held.slot} Paraform session (confirmed dead recently); using the ${next.slot} session`);

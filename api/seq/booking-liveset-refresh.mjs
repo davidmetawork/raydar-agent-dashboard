@@ -33,8 +33,10 @@ export const config = { maxDuration: 280 };
 // recorded and alerted instead of being killed silently. A dead first
 // session costs about 70 s of paced probes before the pacer moves on
 // (ESTIMATED from the configured delays), which is what made this worth
-// guarding.
-export const LIVESET_REFRESH_BUDGET_MS = 240_000;
+// guarding. The last walk started is not bounded: 6.5 s of pacing plus an
+// unpaced throttle ladder (about 36 s) can follow the check, so the budget
+// leaves about 55 s. The run's durationMs is recorded; retune from that.
+export const LIVESET_REFRESH_BUDGET_MS = 225_000;
 
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;
 
