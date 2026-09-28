@@ -814,6 +814,8 @@ test("session resolution spends the broker deadline instead of adding to the wor
   assert.equal(locked, false);
 });
 
+const seqCoreImport = /(?:from|import\()\s*["'][^"']*seq\/_lib\/core\.mjs["']/u;
+
 function withoutComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/^\s*\/\/.*$/gmu, "");
 }
@@ -855,10 +857,22 @@ test("every Submissions V2 route into the Inbox Paraform readers resolves the li
     assert.match(source, /await ensureSession\(\)/u, `api/submissions-v2/${name} never awaits its session resolver`);
   }
   assert.deepEqual(callers, ["_lib/sequence-inbox-broker.mjs"]);
-  const worker = await readdir(new URL("../submissions-v2-worker/", import.meta.url));
-  for (const name of worker.filter((entry) => entry.endsWith(".mjs"))) {
-    const source = withoutComments(await readFile(new URL(`../submissions-v2-worker/${name}`, import.meta.url), "utf8"));
+  // seq core's headers() sends whatever was last resolved, so no V2 module may
+  // import it directly; other V2 Paraform reads use paraai core's trpcGet,
+  // which resolves the session on every call.
+  for (const name of names) {
+    const source = withoutComments(await readFile(new URL(name, root), "utf8"));
+    assert.doesNotMatch(source, seqCoreImport, `api/submissions-v2/${name} imports seq core directly`);
+  }
+  const workerRoot = new URL("../submissions-v2-worker/", import.meta.url);
+  const worker = (await readdir(workerRoot, { recursive: true }))
+    .map((name) => name.split("\\").join("/"))
+    .filter((name) => name.endsWith(".mjs"));
+  assert.ok(worker.includes("sequence-inbox-reader.mjs"));
+  for (const name of worker) {
+    const source = withoutComments(await readFile(new URL(name, workerRoot), "utf8"));
     assert.doesNotMatch(source, readers, `submissions-v2-worker/${name} must read Sequence Inbox through the broker`);
+    assert.doesNotMatch(source, seqCoreImport, `submissions-v2-worker/${name} imports seq core directly`);
   }
 });
 

@@ -20,7 +20,10 @@ import {
 export const SEQUENCE_INBOX_ACTIVATION_AT = SUBMISSIONS_V2_APPROVED_ACTIVATION_AT;
 // The shared Inbox lock has a fixed 120-second TTL. Keep the whole broker
 // well below it: 35s refresh + (8 × 5s point reads) + (7 × 1s pacing) = 82s,
-// preserving 38s for KV/read-state/write-state and runtime overhead.
+// preserving 38s for KV/read-state/write-state and runtime overhead. The 100s
+// deadline also covers the Paraform session resolve (at most 8s) that runs
+// before the lock is taken, so a slow resolve trims deadline slack for KV
+// (18s to 10s) instead of lengthening the worker's 110s call.
 export const SEQUENCE_INBOX_BATCH_LIMIT = 8;
 // Deployed workers may still request the former 12-record page. Accept that
 // wire contract during rollout, but never let it increase broker work.
