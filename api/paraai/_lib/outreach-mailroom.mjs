@@ -105,6 +105,250 @@ async function callMailroom(
   return parsed;
 }
 
+// ── Default transport for NEW conversations (David, 2026-09-28) ──────────────
+// New Para AI interview-request conversations go out through the Mailroom on
+// SendGrid, so they stop filling david@raydar.xyz's Gmail Sent folder.
+// Conversations that are already open in Gmail finish in Gmail. The automatic
+// path shares the relief lane: it is the one Mailroom lane already bound to the
+// SendGrid sender for this copy, and sharing it means no Mailroom migration or
+// release. The two paths never share a dedupe key (`paraai-outreach:<id>` for
+// relief, `paraai-outreach:auto:<actionKey>` here).
+//
+// PARAAI_OUTREACH_TRANSPORT=gmail is the code-side rollback. The Mailroom-side
+// rollback needs no deploy: disable the lane (or its SendGrid threading) in the
+// Hub and new conversations go back to Gmail on the next tick, because
+// mailroomOutreachLaneReady() stops answering true.
+export const PARAAI_OUTREACH_MAILROOM_LANE = PARAAI_OUTREACH_RELIEF_LANE;
+const LANE_READY_CACHE_MS = 60_000;
+const DEFAULT_WAKE_POLL_ATTEMPTS = 6;
+
+export function outreachTransportMode(env = process.env) {
+  return clean(env.PARAAI_OUTREACH_TRANSPORT).toLowerCase() === "gmail" ? "gmail" : "mailroom";
+}
+
+export function mailroomOutreachDedupeKey(actionKey) {
+  const key = clean(actionKey);
+  if (!key) throw new Error("actionKey required");
+  return `paraai-outreach:auto:${key}`;
+}
+
+// The Mailroom's standing dispatch envelope (mailroom/lib/dispatch-window.mjs):
+// 05:00 to 19:30 America/Los_Angeles. Rows enqueued outside it wait for the
+// next opening. A follow-up is only enqueued inside it, so its reply check is
+// fresh at the moment it actually leaves.
+const PT_MINUTE = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Los_Angeles",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+export function mailroomDispatchWindowOpen(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return false;
+  const parts = Object.fromEntries(
+    PT_MINUTE.formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  const minute = Number(parts.hour) * 60 + Number(parts.minute);
+  return minute >= 5 * 60 && minute < 19 * 60 + 30;
+}
+
+let laneReadyCache = null;
+export function resetMailroomOutreachLaneCache() {
+  laneReadyCache = null;
+}
+
+// Ready means the lane can carry BOTH a fresh email and a threaded reply:
+// enabled, on an active SendGrid sender that replies to the mailbox, and with
+// SendGrid threading armed. A threaded row on a lane without threading parks
+// in review (THREADED_UNSUPPORTED_TRANSPORT), so a half-armed lane is not ready.
+// Never throws: an unreadable Mailroom reads as "not ready", which routes new
+// conversations to Gmail exactly as before.
+export async function mailroomOutreachLaneReady({
+  config = mailroomReliefConfig(),
+  fetchImpl = globalThis.fetch,
+  now = Date.now(),
+} = {}) {
+  if (!config.configured) return { ready: false, reason: "not_configured" };
+  if (laneReadyCache && laneReadyCache.lane === config.lane && now - laneReadyCache.at < LANE_READY_CACHE_MS) {
+    return laneReadyCache.value;
+  }
+  let value;
+  try {
+    const body = await callMailroom("/api/lanes", { config, fetchImpl });
+    const lane = (Array.isArray(body?.lanes) ? body.lanes : []).find(
+      (row) => clean(row?.id) === config.lane,
+    );
+    if (!lane) value = { ready: false, reason: "lane_missing" };
+    else if (lane.enabled !== true) value = { ready: false, reason: "lane_disabled" };
+    else if (clean(lane.transport) !== "sendgrid") value = { ready: false, reason: "lane_not_sendgrid" };
+    else if (clean(lane.sender_status) !== "active") value = { ready: false, reason: "sender_inactive" };
+    else if (lane.sendgrid_threading_enabled !== true) value = { ready: false, reason: "threading_disabled" };
+    else value = { ready: true, reason: null, senderId: clean(lane.sender_id) || null };
+  } catch (error) {
+    // A refused key is a definite answer (cached, not transient): retrying
+    // quietly would only run the requests into their expiry pages.
+    if ([401, 403].includes(Number(error?.status))) {
+      value = { ready: false, reason: clean(error?.code) || "lanes_unauthorized" };
+      laneReadyCache = { lane: config.lane, at: now, value };
+      return value;
+    }
+    // Transient and never cached: a blip must not read as a deliberate
+    // switch-off for a whole minute.
+    return { ready: false, reason: clean(error?.code) || "lanes_unreadable", transient: true };
+  }
+  laneReadyCache = { lane: config.lane, at: now, value };
+  return value;
+}
+
+// A SendGrid send leaves nothing in Gmail, so a bounce can only be learned from
+// the Mailroom's signature-verified delivery events. `bounce` is a hard bounce
+// (the Mailroom already splits SendGrid's "blocked" out of it); `dropped` counts
+// only when SendGrid suppressed the address for a bounce or an invalid address.
+export function mailroomBounceFromStatus(status) {
+  const events = Array.isArray(status?.deliveryEvents) ? status.deliveryEvents : [];
+  const hit = events.find((event) => {
+    const type = clean(event?.event_type).toLowerCase();
+    if (type === "bounce") return true;
+    return type === "dropped" && /bounce|invalid/i.test(clean(event?.reason));
+  });
+  if (!hit) return null;
+  return {
+    at: clean(hit.occurred_at) || new Date().toISOString(),
+    subject: `SendGrid ${clean(hit.event_type).toLowerCase()}`,
+    reason: clean(hit.reason).slice(0, 180) || null,
+    source: "mailroom_delivery_event",
+  };
+}
+
+export async function readMailroomOutreachStatus(dedupeKey, {
+  config = mailroomReliefConfig(),
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  return statusFor(dedupeKey, { config, fetchImpl });
+}
+
+function outreachSentResult(status, { dedupeKey, rowId = null } = {}) {
+  const providerMessageId = clean(status?.provider_message_id) || null;
+  return {
+    id: providerMessageId,
+    threadId: null,
+    providerMessageId,
+    rfc822MessageId: clean(status?.rfc822_message_id) || null,
+    mailroomRowId: status?.id ?? rowId,
+    dedupeKey,
+    transport: "mailroom-sendgrid",
+    sentAt: clean(status?.sent_at) || null,
+    delivery: "sent",
+  };
+}
+
+// Status-first, exactly-once delivery through the Mailroom. The dedupe key is
+// deterministic per action, so every retry, crash recovery or lost response
+// converges on the same outbox row: this function can be called again for the
+// same action at any time without risking a second email. It returns either a
+// sent receipt or `{ queued: true }` when the row is accepted but still waiting
+// (the dispatch window is closed, a brake is armed, or the worker is busy). It
+// throws OUTREACH_MAILROOM_PARKED only when the Mailroom parked the row for
+// review, which is the one outcome a human has to reconcile.
+export async function deliverViaMailroomOutreach({
+  message,
+  actionKey,
+  candidateName = null,
+  config = mailroomReliefConfig(),
+  fetchImpl = globalThis.fetch,
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  pollAttempts = DEFAULT_WAKE_POLL_ATTEMPTS,
+} = {}) {
+  if (!message?.to || !message?.subject || !message?.bodyText) {
+    throw new OutreachMailroomError("OUTREACH_MAILROOM_MESSAGE_INVALID");
+  }
+  if (message.inReplyTo && !message.references) {
+    throw new OutreachMailroomError("OUTREACH_MAILROOM_THREADING_INVALID");
+  }
+  const dedupeKey = mailroomOutreachDedupeKey(actionKey || message.actionKey);
+  const options = { config, fetchImpl };
+
+  let status = await statusFor(dedupeKey, options);
+  if (status?.found && clean(status.state).toLowerCase() === "sent") {
+    return outreachSentResult(status, { dedupeKey });
+  }
+  assertRunnableStatus(status);
+
+  let rowId = null;
+  if (!status?.found) {
+    try {
+      const enqueued = await callMailroom("/api/enqueue", {
+        ...options,
+        method: "POST",
+        body: {
+          lane: config.lane,
+          dedupeKey,
+          to: message.to,
+          toName: clean(candidateName) || undefined,
+          subject: message.subject,
+          text: message.bodyText,
+          html: message.bodyHtml || undefined,
+          // RFC headers only. A Gmail thread id means nothing to SendGrid, and
+          // the Mailroom parks a row that carries one on a SendGrid sender.
+          inReplyTo: message.inReplyTo || undefined,
+          references: message.references || undefined,
+        },
+      });
+      rowId = enqueued.id ?? enqueued.outboxId ?? null;
+    } catch (error) {
+      status = await statusFor(dedupeKey, options).catch(() => null);
+      if (!status?.found) {
+        // The Mailroom answered with a definite refusal (lane disabled, bad
+        // recipient, validation) and holds no row under this key: provably
+        // nothing was sent, so the caller may release its claim.
+        if (status?.ok === true && Number(error?.status) >= 400 && Number(error?.status) < 500) {
+          const refused = new OutreachMailroomError(
+            "OUTREACH_MAILROOM_REFUSED",
+            error?.detail || error?.message,
+            error.status,
+          );
+          refused.provablyUnsent = true;
+          throw refused;
+        }
+        throw error;
+      }
+    }
+    status = await statusFor(dedupeKey, options).catch(() => status);
+  }
+
+  // Wake exactly this row rather than waiting for the two-minute cron. The
+  // targeted wake claims only this dedupe key, so a long queue on the same
+  // SendGrid sender (for example CRM invitations) cannot delay it. A failed
+  // wake is harmless: the cron drains the row on its next pass.
+  const senderId = clean(status?.sender_id);
+  if (senderId) {
+    await callMailroom("/api/worker", {
+      ...options,
+      method: "POST",
+      body: { senderId, operationKey: dedupeKey },
+      timeoutMs: 30_000,
+    }).catch(() => null);
+  }
+
+  for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+    status = await statusFor(dedupeKey, options).catch(() => status);
+    if (status?.found && clean(status.state).toLowerCase() === "sent") {
+      return outreachSentResult(status, { dedupeKey, rowId });
+    }
+    assertRunnableStatus(status);
+    if (attempt < pollAttempts - 1) await sleepImpl(POLL_DELAY_MS);
+  }
+  return {
+    queued: true,
+    dedupeKey,
+    mailroomRowId: status?.id ?? rowId,
+    mailroomState: clean(status?.state) || "unknown",
+    transport: "mailroom-sendgrid",
+  };
+}
+
 function sentResult(status, { dedupeKey, rowId = null } = {}) {
   return {
     id: clean(status?.gmail_message_id) || null,
