@@ -507,10 +507,41 @@ test("Refresh now (signed-in POST) runs the same change-driven refresh", async (
     cronCheck: () => { throw new Error("a POST is never a cron run"); },
   });
   const response = mockResponse();
-  await handler({ method: "POST", headers: { "content-type": "application/json" }, body: {} }, response);
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { trigger: "refresh_now" },
+  }, response);
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.trigger, "manual");
   assert.equal(calls.builds[0].mode, "changed");
+});
+
+test("a legacy page poll (POST without the Refresh now trigger) never reads Paraform", async () => {
+  let sessions = 0;
+  const { handler, calls } = scheduledHandler({
+    authHandler: async () => true,
+    ensureSession: async () => { sessions += 1; },
+  });
+  for (const body of [{}, "{}", "", { trigger: "poll" }]) {
+    const response = mockResponse();
+    await handler({ method: "POST", headers: { "content-type": "application/json" }, body }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.status, "scheduled_only");
+  }
+  assert.equal(calls.builds.length, 0);
+  assert.equal(calls.locks, 0);
+  assert.equal(sessions, 0);
+
+  // A JSON string body carrying the trigger (no body parser) still counts.
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ trigger: "refresh_now" }),
+  }, response);
+  assert.equal(response.body.status, "updated");
+  assert.equal(calls.builds.length, 1);
 });
 
 test("a scheduled run waits for a busy lock instead of skipping its slot", async () => {
@@ -566,7 +597,11 @@ test("Slack is told only when a person must act", async () => {
     readState: async () => ({ status: "ready", value: stateWith([], { verified_at: iso(NOW - 40 * HOUR) }) }),
     buildRefresh: async () => { throw new Error("boom"); },
   });
-  await manual.handler({ method: "POST", headers: { "content-type": "application/json" }, body: {} }, mockResponse());
+  await manual.handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: { trigger: "refresh_now" },
+  }, mockResponse());
   assert.deepEqual(manual.calls.alerts, []);
 });
 

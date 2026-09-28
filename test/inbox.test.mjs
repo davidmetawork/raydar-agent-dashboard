@@ -1276,7 +1276,7 @@ test("sync endpoint coalesces overlapping refreshes", async () => {
   await handler({
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: {},
+    body: { trigger: "refresh_now" },
   }, response);
   assert.equal(response.statusCode, 202);
   assert.equal(response.headers["Retry-After"], "15");
@@ -1318,7 +1318,7 @@ test("sync endpoint writes one refresh and always releases its lock", async () =
   await handler({
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: {},
+    body: { trigger: "refresh_now" },
   }, response);
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.status, "updated");
@@ -1829,6 +1829,7 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /\$\("manualRefresh"\)\.addEventListener\("click",refreshNow\)/);
   assert.match(inboxHtml, /if\(STATE\.backgroundPaused\)return manualRefreshFeed\(\)/);
   assert.match(inboxHtml, /updates automatically at 7 AM, 12 PM and 5 PM Pacific/);
+  assert.match(inboxHtml, /body:JSON\.stringify\(\{trigger:"refresh_now"\}\)/);
   // A page loaded while paused falls back to the normal refresh once unpaused.
   assert.match(inboxHtml, /manual_refresh_requires_background_pause[\s\S]*?return await syncFeed\(\)/);
   assert.deepEqual(
@@ -1897,7 +1898,7 @@ test("sync endpoint resolves the live Paraform session before its lock and reads
   await handler({
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: {},
+    body: { trigger: "refresh_now" },
   }, response);
   assert.equal(response.statusCode, 200);
   assert.deepEqual(order, ["session", "lock", "read"]);

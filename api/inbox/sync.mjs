@@ -28,6 +28,20 @@ const SCHEDULED_LOCK_ATTEMPTS = 3;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Only an explicit Refresh now click reads Paraform. Pages loaded before the
+// scheduled refresh shipped still POST `{}` every 15 minutes until they are
+// reloaded; those legacy polls get the stored state's answer instead of a
+// Paraform run.
+export const INBOX_REFRESH_NOW_TRIGGER = "refresh_now";
+
+function requestTrigger(req) {
+  let body = req?.body;
+  if (typeof body === "string") {
+    try { body = JSON.parse(body || "{}"); } catch { body = {}; }
+  }
+  return body && typeof body === "object" ? String(body.trigger || "") : "";
+}
+
 // Slack only when a person has to act: the scheduled refresh has not verified
 // the Inbox for most of a day (two or more runs in a row), or sequences have
 // stayed unconfirmed past the stale window. Deduplicated to once a day.
@@ -110,6 +124,14 @@ export function createInboxSyncHandler({
         error: "paraform_background_paused",
         control_state: backgroundPause.state || "unreadable",
         retry_after_seconds: 300,
+      });
+    }
+
+    if (!scheduled && requestTrigger(req) !== INBOX_REFRESH_NOW_TRIGGER) {
+      return res.status(200).json({
+        ok: true,
+        status: "scheduled_only",
+        detail: "The Inbox refreshes on a schedule; reload the page for the Refresh now button.",
       });
     }
 
