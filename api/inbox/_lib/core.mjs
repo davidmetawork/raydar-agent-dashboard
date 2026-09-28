@@ -7,6 +7,7 @@ import {
   BASE,
   authConfig,
   cors,
+  ensureParaformSession,
   hasCookie,
   headers,
   paraformHealth,
@@ -20,7 +21,26 @@ import {
 import { OUTCOME_SEQUENCE_RULES } from "../../roster/_lib/outcome-sequences.mjs";
 import { telemetryFetch } from "../../_lib/paraform-telemetry-context.mjs";
 
-export { authConfig, cors, hasCookie, paraformHealth, storeConfigured };
+// headers() is synchronous and sends whatever ensureParaformSession() last
+// resolved in this process, falling back to the static env seal (which
+// WorkOS rotates away within hours) when nothing has been resolved yet. Every
+// Inbox entrypoint that reaches Paraform must await ensureParaformSession()
+// first. inboxTrpcGet deliberately does NOT call
+// notifyParaformSessionRejected() on a 401: Paraform also answers 401 for
+// burst throttling, and demoting the live store session for 30 minutes on a
+// throttle would push the rest of the sweep back onto the dead env seal.
+export {
+  authConfig,
+  cors,
+  ensureParaformSession,
+  hasCookie,
+  paraformHealth,
+  storeConfigured,
+};
+
+export function resolveInboxParaformSession() {
+  return ensureParaformSession({ timeoutMs: INBOX_SESSION_TIMEOUT_MS });
+}
 
 export const INBOX_TRIAGE_KEY = "inbox:v1:triage";
 export const INBOX_SEQUENCE_SNAPSHOTS_KEY = "inbox:v3:sequences";
@@ -32,6 +52,10 @@ export const INBOX_FANOUT_CONCURRENCY = 3;
 export const INBOX_VENDOR_TIMEOUT_MS = 6_000;
 export const INBOX_BUILD_BUDGET_MS = 80_000;
 export const INBOX_SYNC_BATCH_SIZE = 18;
+// A hung n8n store must not eat the sync/manual-sync function budget (their
+// build budgets start after this). On timeout this one request falls back to
+// the env seal and the still-running store read warms the cache for the next.
+export const INBOX_SESSION_TIMEOUT_MS = 8_000;
 export const INBOX_SEQUENCE_STALE_MS = 15 * 60 * 1_000;
 // HGETALL can exceed the KV response cap once every Inbox shard is seeded.
 // Keep each HSCAN page small and its complete read inside the broker's 38s KV

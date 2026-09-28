@@ -1,14 +1,21 @@
 import {
   authConfig,
   cors,
+  ensureParaformSession,
   hasCookie,
   paraformHealth,
   readInboxSnapshotState,
   storeConfigured,
 } from "./_lib/core.mjs";
+import { PARAFORM_SESSION_HEALTH_TIMEOUT_MS } from "../_lib/paraform-session-store.mjs";
 
 export function createInboxHealthHandler({
   corsHandler = cors,
+  // Budgeted like /api/seq/health: a store read that hangs falls back to the
+  // env seal for this response only, and still warms the cache for the next.
+  ensureSession = () => ensureParaformSession({
+    timeoutMs: PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+  }),
   healthReader = paraformHealth,
   snapshotReader = readInboxSnapshotState,
   configured = storeConfigured,
@@ -22,6 +29,7 @@ export function createInboxHealthHandler({
       return res.status(405).json({ ok: false, error: "method_not_allowed" });
     }
     try {
+      await ensureSession();
       const [health, snapshot] = await Promise.all([
         healthReader(),
         snapshotReader(),

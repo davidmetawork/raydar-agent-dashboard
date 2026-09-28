@@ -8,6 +8,7 @@ import {
   readInboxSnapshotState,
   releaseInboxSyncLock,
   requireInboxAuth,
+  resolveInboxParaformSession,
   writeInboxRefreshState,
 } from "./_lib/core.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
@@ -137,6 +138,7 @@ export function createManualInboxSyncHandler({
   assembleFeed = assembleInboxSnapshotFeed,
   pacedGetFactory = createPacedManualInboxGet,
   now = () => new Date(),
+  ensureSession = resolveInboxParaformSession,
 } = {}) {
   return async function handler(req, res) {
     if (corsHandler(req, res)) return;
@@ -171,6 +173,10 @@ export function createManualInboxSyncHandler({
       });
     }
 
+    // Resolve the live n8n-store session before any Paraform read; the
+    // static env seal alone is refused, which stops the sweep at once.
+    await ensureSession();
+
     const lock = await acquireLock();
     if (lock.status === "busy") {
       res.setHeader("Retry-After", "15");
@@ -200,7 +206,9 @@ export function createManualInboxSyncHandler({
         get: pacedGet,
         concurrency: 1,
         batchSize: INBOX_SYNC_BATCH_SIZE,
-        budgetMs: 110_000,
+        // 110s from handler start, so time spent resolving the session and
+        // proving the pause cannot push the run past maxDuration (120s).
+        budgetMs: Math.max(1_000, 110_000 - (now().getTime() - nowMs)),
         forceRefreshAfterMs: runStartedAtMs,
       });
       const pauseAfterReads = await pauseState()

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import {
   applyInboxTriage,
   assembleInboxSnapshotFeed,
@@ -42,6 +42,9 @@ import {
 import {
   createInboxHealthHandler,
 } from "../api/inbox/health.mjs";
+import {
+  createInboxMessageHandler,
+} from "../api/inbox/message.mjs";
 import {
   createManualInboxSyncHandler,
   createPacedManualInboxGet,
@@ -195,6 +198,7 @@ test("Inbox health exposes a fixed snapshot failure and is not healthy", async (
   const res = mockResponse();
   await createInboxHealthHandler({
     corsHandler: () => false,
+    ensureSession: async () => {},
     healthReader: async () => ({ paraform: "live" }),
     snapshotReader: async () => ({ status: "error", cause: "pipeline_wrongtype", value: null }),
     configured: () => true,
@@ -1149,6 +1153,7 @@ test("manual sync refreshes one serial batch and proves the pause stayed owned",
     corsHandler: () => false,
     authHandler: async () => true,
     now: () => new Date("2026-09-21T15:00:10.000Z"),
+    ensureSession: async () => {},
     pauseState: async () => {
       pauseReads += 1;
       return { paused: true, state: "configured", pauseId: "owned-pause" };
@@ -1161,6 +1166,7 @@ test("manual sync refreshes one serial batch and proves the pause stayed owned",
       assert.equal(options.get, pacedGet);
       assert.equal(options.concurrency, 1);
       assert.equal(options.batchSize, 18);
+      assert.equal(options.budgetMs, 110_000);
       assert.equal(options.forceRefreshAfterMs, Date.parse(runStartedAt));
       return refresh;
     },
@@ -1258,6 +1264,7 @@ test("sync endpoint coalesces overlapping refreshes", async () => {
     corsHandler: () => false,
     authHandler: async () => true,
     pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "busy", token: null }),
     buildRefresh: async () => {
       builds += 1;
@@ -1284,6 +1291,7 @@ test("sync endpoint writes one refresh and always releases its lock", async () =
     corsHandler: () => false,
     authHandler: async () => true,
     pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => {},
     acquireLock: async () => ({ status: "acquired", token: "sync-token" }),
     readState: async () => ({ status: "ready", value: previous }),
     buildRefresh: async ({ previousState }) => {
@@ -1848,4 +1856,169 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
     vercel.functions["api/inbox/*.mjs"],
     { maxDuration: 120 },
   );
+});
+
+test("sync endpoint resolves the live Paraform session before its lock and reads", async () => {
+  const order = [];
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => { order.push("session"); },
+    acquireLock: async () => {
+      order.push("lock");
+      return { status: "acquired", token: "sync-token" };
+    },
+    readState: async () => ({ status: "ready", value: emptyInboxSnapshotState() }),
+    buildRefresh: async () => {
+      order.push("read");
+      return { generated_at: "2026-09-28T15:00:00.000Z" };
+    },
+    writeState: async () => ({}),
+    assembleFeed: () => ({ freshness: { state: "ready" } }),
+    releaseLock: async () => true,
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(order, ["session", "lock", "read"]);
+});
+
+test("sync endpoint does not resolve a session while background reads are paused", async () => {
+  let sessions = 0;
+  const handler = createInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "p" }),
+    ensureSession: async () => { sessions += 1; },
+  });
+  const response = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 503);
+  assert.equal(sessions, 0);
+});
+
+test("manual sync resolves the live Paraform session only after proving its pause", async () => {
+  const order = [];
+  const absent = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: false, state: "absent" }),
+    ensureSession: async () => { order.push("session"); },
+  });
+  const refused = mockResponse();
+  await absent({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, refused);
+  assert.equal(refused.statusCode, 409);
+  assert.deepEqual(order, []);
+
+  const owned = createManualInboxSyncHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    pauseState: async () => ({ paused: true, state: "configured", pauseId: "p" }),
+    ensureSession: async () => { order.push("session"); },
+    acquireLock: async () => {
+      order.push("lock");
+      return { status: "busy", token: null };
+    },
+  });
+  const busy = mockResponse();
+  await owned({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: {},
+  }, busy);
+  assert.equal(busy.statusCode, 202);
+  assert.deepEqual(order, ["session", "lock"]);
+});
+
+test("Inbox health resolves the live Paraform session before its health read", async () => {
+  const order = [];
+  const res = mockResponse();
+  await createInboxHealthHandler({
+    corsHandler: () => false,
+    ensureSession: async () => { order.push("session"); },
+    healthReader: async () => {
+      order.push("health");
+      return { paraform: "live" };
+    },
+    snapshotReader: async () => ({ status: "ready", value: null }),
+    configured: () => true,
+    auth: () => ({ authRequired: true }),
+    cookieSet: () => true,
+  })({ method: "GET" }, res);
+  assert.equal(res.body.ok, true);
+  assert.deepEqual(order, ["session", "health"]);
+});
+
+test("message read resolves the session first and never uses seq's rejecting reader", async () => {
+  const order = [];
+  const handler = createInboxMessageHandler({
+    corsHandler: () => false,
+    authHandler: async () => true,
+    ensureSession: async () => { order.push("session"); },
+    get: async (procedure, input, tries) => {
+      order.push(`read:${procedure}:${input.gmail_id}:${tries}`);
+      return { gmail_id: input.gmail_id, body: "hello" };
+    },
+  });
+  const ok = mockResponse();
+  await handler({ method: "GET", query: { gmail_id: "18f0a1b2c3d4e5f6" } }, ok);
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(order, [
+    "session",
+    "read:campaigns.getCampaignEmail:18f0a1b2c3d4e5f6:2",
+  ]);
+
+  order.length = 0;
+  const invalid = mockResponse();
+  await handler({ method: "GET", query: { gmail_id: "../x" } }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.deepEqual(order, []);
+
+  const source = await readFile(
+    new URL("../api/inbox/message.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /seq\/_lib\/core\.mjs/u);
+});
+
+test("every Inbox entrypoint that reaches Paraform resolves the live session first", async () => {
+  // A missed entrypoint silently sends the static env seal, which WorkOS has
+  // rotated away, so every read 401s and is reported as a throttle. Scans the
+  // whole directory so a new entrypoint is covered without editing this test.
+  const paraformReaders = /\b(trpcGet|trpcPost|inboxTrpcGet|buildInboxRefresh|buildInboxFeed|paraformHealth|readCompleteSequenceInboxMessage)\b/u;
+  const names = (await readdir(new URL("../api/inbox/", import.meta.url)))
+    .filter((name) => name.endsWith(".mjs"));
+  assert.ok(names.includes("sync.mjs"));
+  for (const name of names) {
+    const source = (await readFile(
+      new URL(`../api/inbox/${name}`, import.meta.url),
+      "utf8",
+    ))
+      .replace(/\/\*[\s\S]*?\*\//gu, "")
+      .replace(/^\s*\/\/.*$/gmu, "");
+    if (!paraformReaders.test(source)) continue;
+    assert.match(
+      source,
+      /ensureSession = (?:resolveInboxParaformSession|\(\) => ensureParaformSession\()/u,
+      `api/inbox/${name} reaches Paraform without a session resolver default`,
+    );
+    assert.match(
+      source,
+      /await ensureSession\(\)/u,
+      `api/inbox/${name} never awaits its session resolver`,
+    );
+  }
 });

@@ -3,7 +3,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 107,
-  "digest": "b37d812b32900e1ad11b798b2a2bd85ae844b497ea5d2f3dbc814974e860058f",
+  "digest": "1369b39d130f613001b1b5de04dd57c4f377f0df72672972753c17c93f7d887a",
   "vercel_json_canonical_sha256": "ab148cb972a9b01608f881fdc14d64e736fe754aa938fc6070955112dc8d388e",
   "files": [
     {
@@ -24,11 +24,11 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/inbox/_lib/core.mjs",
-      "sha256": "3fe2c640eea739e56fbbb3682412df1ddfc8665782eaafc23291a4a3e3f661d7"
+      "sha256": "8cfcb5bba3f8407862c8e090c61b0caaacc95a8c0a37180682e69cd9854e7ea7"
     },
     {
       "path": "api/inbox/health.mjs",
-      "sha256": "9e8065d1ee3b602e23239571ab898fd67ddff05ad3f97a3347d181f4c00b4fbf"
+      "sha256": "46a2238e16d5bde4c0b72d590b670251c8ccd485e64d7a27c0084eeeaca16838"
     },
     {
       "path": "api/paraai/_lib/core.mjs",
