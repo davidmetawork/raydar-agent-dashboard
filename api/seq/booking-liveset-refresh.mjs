@@ -43,7 +43,9 @@ export const LIVESET_REFRESH_BUDGET_MS = 225_000;
 // started later could not leave time to walk anything, and a 401 on it can
 // still cost the pacer's paced probes (about 70 s, ESTIMATED) plus one
 // attempt on the next session: started by this point, even that ends
-// inside maxDuration.
+// inside maxDuration. One consequence: a throttle 401 on the catalog read
+// is not retried (its probes and the 60 s wait end past this deadline); the
+// retry covers the quick refusals, a 403, 429, 5xx or transport failure.
 export const LIVESET_CATALOG_BUDGET_MS = 120_000;
 
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;

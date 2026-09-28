@@ -61,6 +61,7 @@ function indexCounts(result) {
     matched: result.matched ?? 0,
     paused: result.paused ?? 0,
     pauseErrors: result.pauseErrors?.length ?? 0,
+    held: result.held ?? 0,
   };
 }
 
@@ -69,10 +70,11 @@ function indexCounts(result) {
  *   - failure: the index reconciliation threw;
  *   - skipped: there is no usable live set, so nothing was checked;
  *   - partial: it ran, but something it should have checked or paused was
- *     not: an index read error, a pause error, a Book Time error, a rotor
+ *     not: an index read error, a pause error, a booking held for a later
+ *     index (one that could not read every sequence), a Book Time error, a rotor
  *     stopped by a refusal, a Book Time check skipped for want of a
- *     Paraform session, or a rotor that reached its deadline before its
- *     first read;
+ *     Paraform session, a rotor that reached its deadline before its first
+ *     read, or a budget setting that is not a number;
  *   - success: everything it set out to check was checked.
  */
 export function catchupAttemptStatus(out) {
@@ -84,10 +86,13 @@ export function catchupAttemptStatus(out) {
     || out.indexes.calendlyError
     || out.indexes.raydar?.pauseErrors?.length
     || out.indexes.calendly?.pauseErrors?.length
+    || out.indexes.raydar?.held
+    || out.indexes.calendly?.held
     || out.bookTimeError
     || bookTime?.pauseErrors?.length
     || bookTime?.readErrors
     || bookTime?.stoppedBy === "refused"
+    || bookTime?.stoppedBy === "budget_invalid"
     || out.bookTimeSkipped
     || (bookTime?.stoppedBy === "deadline" && !bookTime.reads && bookTime.rows > 0)
   ) return "partial";
@@ -115,6 +120,7 @@ export function catchupAttemptRecord(out, { startedAt, finishedAt }) {
       pauseErrors: bookTime.pauseErrors?.length ?? 0,
       readErrors: bookTime.readErrors ?? 0,
       passedRefused: bookTime.passedRefused ?? 0,
+      passedPauseFailures: bookTime.passedPauseFailures ?? 0,
       stoppedBy: bookTime.stoppedBy ?? null,
       stopReason: bookTime.stopReason ?? null,
       cursor: bookTime.cursor ?? null,
@@ -176,8 +182,13 @@ export async function runCatchup({
         deadlineAt: startedAt + BOOKTIME_START_BUDGET_MS,
         clock,
       });
-      if (out.bookTime.pauseErrors?.length && (await alert("booking-catchup-booktime-errors", 6 * 3600))) {
-        await notify(`:warning: Booking catch-up's Book Time check failed to pause ${out.bookTime.pauseErrors.length} lead(s); retried next run.`);
+      // A failed pause stops the rotor on that lead, so the next run retries
+      // it; after a second failed run the rotor moves past it instead.
+      const passedPauses = out.bookTime.passedPauseFailures || 0;
+      if (passedPauses && (await alert("booking-catchup-booktime-passed", 6 * 3600))) {
+        await notify(`:rotating_light: Booking catch-up's Book Time check could not pause ${passedPauses} booked lead(s) on two runs in a row and moved past them; they come round again only after a full rotor lap. See /api/seq/health.`);
+      } else if (out.bookTime.pauseErrors?.length && (await alert("booking-catchup-booktime-errors", 6 * 3600))) {
+        await notify(`:warning: Booking catch-up's Book Time check failed to pause ${out.bookTime.pauseErrors.length} lead(s); the next run retries.`);
       }
       if (out.bookTime.paused > 0) {
         await notify(`:pause_button: Booking catch-up's Book Time check paused ${out.bookTime.paused} candidate(s) who booked on Paraform's own page.`);

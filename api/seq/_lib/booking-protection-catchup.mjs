@@ -165,6 +165,10 @@ export async function catchUpBookingIndexes({
 // refuses cannot hold the rotor for good.
 export const ROTOR_ROW_REFUSAL_LIMIT = 2;
 
+// Errors the pacer raises without sending anything. They say nothing about
+// the row, so they never count toward passing it over.
+const UNSENT_CODES = new Set(["PARAFORM_PACED_BACKOFF", "PARAFORM_SESSION_DEAD", "KV_UNAVAILABLE"]);
+
 /**
  * Paraform's own "Book Time" page sets relationship_status = SCHEDULED_CALL
  * and emits no webhook at all ("David's gap" — docs/research/
@@ -174,13 +178,17 @@ export const ROTOR_ROW_REFUSAL_LIMIT = 2;
  * advances across the whole live-set population over multiple days, rather
  * than the old 10-minute, ~100-reads-per-pass profile rotor.
  *
- * The cursor is the position of the next live-set row to look at, and it is
- * saved after every row, so a run the platform kills part-way keeps what it
- * checked. `deadlineAt` (epoch ms, optional) stops the run starting new rows
- * past it; the catch-up route sets it from its own maxDuration, which fits
- * far fewer reads than the default budget. One profile read serves every
- * row of that candidate in the run (one candidate can be in several
- * sequences), so `budget` counts reads, not rows.
+ * Rows are sorted by ccu, and the cursor is saved as the ccu of the next row
+ * to look at (`next`), so it survives the live set being rebuilt between
+ * runs: leads added or removed overnight do not move it. A cursor saved
+ * before this change (only a position) is still read once. It is saved
+ * before every profile read and at the end, so a run the platform kills
+ * part-way keeps what it checked. `deadlineAt` (epoch ms, optional) stops
+ * the run starting new rows past it; the catch-up route sets it from its
+ * own maxDuration, which fits far fewer reads than the default budget. One
+ * profile read serves every row of that candidate in the run (one candidate
+ * can be in several sequences), so `budget` counts reads (started, including
+ * any the pacer refused), not rows.
  *
  * The run stops, leaving the cursor on the row, when:
  *   - a read is refused by the pacer or Paraform (a backoff in force, a
@@ -188,11 +196,12 @@ export const ROTOR_ROW_REFUSAL_LIMIT = 2;
  *     later read in the same run would be refused too;
  *   - a pause fails: the next run retries it, instead of a lap later.
  * A row that stops the run on ROTOR_ROW_REFUSAL_LIMIT runs in a row, with
- * a request actually sent each time, is then passed over; the count is
- * saved with the cursor as `refused`. A read that fails for that row alone
- * (a tRPC error, a 400 or 404) is counted in `readErrors` and passed over at
- * once. The pacer backs off after any failed call, so the read after it
- * usually stops the run with `PARAFORM_PACED_BACKOFF`.
+ * a request actually sent each time, is then passed over (`passedRefused`,
+ * or `passedPauseFailures` for a booked lead that could not be paused); the
+ * count is saved with the cursor as `refused`. A read that fails for that
+ * row alone (a tRPC error, a 400 or 404) is counted in `readErrors` and
+ * passed over at once. The pacer backs off after any failed call, so the
+ * read after it usually stops the run with `PARAFORM_PACED_BACKOFF`.
  */
 export async function bookTimeRotorCheck({
   now = Date.now(),
@@ -215,8 +224,10 @@ export async function bookTimeRotorCheck({
     pauseErrors: [],
     readErrors: 0,
     passedRefused: 0,
+    passedPauseFailures: 0,
     rows: 0,
     cursor: null,
+    next: null,
     stoppedBy: null,
     stopReason: null,
   };
@@ -228,77 +239,84 @@ export async function bookTimeRotorCheck({
     for (const entry of entries) rows.push({ email, ...entry });
   }
   out.rows = rows.length;
-  // A setting that is not a number reads nothing, as it always has.
-  const readLimit = Number.isFinite(budget) ? budget : 0;
   if (!rows.length) return out;
-  if (readLimit <= 0) { out.stoppedBy = "budget"; return out; }
-  // Stable order so the rotor cursor means the same thing across ticks even
-  // though Object.entries() iteration order is not itself a contract here.
-  rows.sort((a, b) => (a.ccu < b.ccu ? -1 : a.ccu > b.ccu ? 1 : 0));
+  // A setting that is not a number reads nothing, as it always has, and is
+  // reported so the run is not recorded as a success.
+  if (!Number.isFinite(budget)) { out.stoppedBy = "budget_invalid"; return out; }
+  if (budget <= 0) { out.stoppedBy = "budget"; return out; }
+  const byCcu = (a, b) => (String(a.ccu) < String(b.ccu) ? -1 : String(a.ccu) > String(b.ccu) ? 1 : 0);
+  rows.sort(byCcu);
 
   const rotorState = await loadRotor();
-  const cursor = Number.isInteger(rotorState?.cursor) ? rotorState.cursor : 0;
-  const startAt = ((cursor % rows.length) + rows.length) % rows.length;
-  // The row the cursor stopped on last run, and on how many runs in a row.
-  // It only ever describes the row AT the cursor: any advance clears it.
+  let startAt = 0;
+  if (typeof rotorState?.next === "string") {
+    // The first row at or after the saved one; past the end, wrap to 0.
+    const at = rows.findIndex((row) => String(row.ccu) >= rotorState.next);
+    startAt = at < 0 ? 0 : at;
+  } else if (Number.isInteger(rotorState?.cursor)) {
+    startAt = ((rotorState.cursor % rows.length) + rows.length) % rows.length;
+  }
+  // The row a previous run stopped on, and on how many runs in a row. Kept
+  // only while that row is still in the live set.
   let refused = typeof rotorState?.refused?.ccu === "string"
     && Number.isInteger(rotorState.refused.count)
+    && rows.some((row) => row.ccu === rotorState.refused.ccu)
     ? { ccu: rotorState.refused.ccu, count: rotorState.refused.count }
     : null;
   // `scanned` counts rows passed over in rotor order, including rows with no
   // candidate user id, so a run of those can never hold the cursor in place.
   let scanned = 0;
   let saved = { scanned: 0, refused };
+  const rowAt = (offset) => rows[(startAt + offset) % rows.length];
   async function saveProgress() {
     if (scanned === saved.scanned && refused === saved.refused) return;
-    const next = (startAt + scanned) % rows.length;
+    const position = (startAt + scanned) % rows.length;
     try {
-      await saveRotor(next, { refused });
+      await saveRotor(position, { next: String(rows[position].ccu), refused });
       saved = { scanned, refused };
     } catch {
       // Best effort: the next save, or tomorrow's run, covers it.
     }
   }
-  function advance() {
+  function advance(row) {
     scanned++;
-    refused = null;
+    if (refused?.ccu === row.ccu) refused = null;
   }
   // Stop on `row`, or pass it over once it has stopped the rotor on
-  // ROTOR_ROW_REFUSAL_LIMIT runs in a row. Returns true to stop.
-  function stopOrPass(row, reason) {
+  // ROTOR_ROW_REFUSAL_LIMIT runs in a row. `sent` is false when nothing
+  // reached Paraform: the run stops, and the count does not move. Returns
+  // true to stop.
+  function stopOrPass(row, reason, { sent }) {
+    out.stopReason = reason;
+    if (!sent) { out.stoppedBy = "refused"; return true; }
     const count = (refused?.ccu === row.ccu ? refused.count : 0) + 1;
     if (count >= ROTOR_ROW_REFUSAL_LIMIT) {
-      out.passedRefused++;
+      out.stopReason = null;
       return false;
     }
     refused = { ccu: row.ccu, count };
     out.stoppedBy = "refused";
-    out.stopReason = reason;
     return true;
   }
 
   // cu -> { profile } or { error }: one read per candidate per run.
   const profiles = new Map();
   while (scanned < rows.length) {
-    const row = rows[(startAt + scanned) % rows.length];
-    if (!row.cu) { advance(); await saveProgress(); continue; }
+    const row = rowAt(scanned);
+    if (!row.cu) { advance(row); continue; }
     if (Number.isFinite(deadlineAt) && clock() >= deadlineAt) { out.stoppedBy = "deadline"; break; }
     let entry = profiles.get(row.cu);
     if (!entry) {
-      if (out.reads >= readLimit) { out.stoppedBy = "budget"; break; }
+      if (out.reads >= budget) { out.stoppedBy = "budget"; break; }
+      await saveProgress();
       out.reads++;
       try {
         entry = { profile: await relationshipStatusLoader(row.cu) };
       } catch (error) {
         const reason = String(error?.code || error?.message || "error").slice(0, 60);
         if (stopsTheRotor(error)) {
-          // Nothing was sent for these, so they say nothing about this row.
-          if (!isTransientRefusal(error)) {
-            out.stoppedBy = "refused";
-            out.stopReason = reason;
-            break;
-          }
-          if (stopOrPass(row, reason)) break;
+          if (stopOrPass(row, reason, { sent: isTransientRefusal(error) })) break;
+          out.passedRefused++;
         }
         entry = { error: reason };
       }
@@ -306,8 +324,7 @@ export async function bookTimeRotorCheck({
     }
     if (entry.error) {
       out.readErrors++;
-      advance();
-      await saveProgress();
+      advance(row);
       continue;
     }
     out.checked++;
@@ -335,16 +352,19 @@ export async function bookTimeRotorCheck({
         out.paused += applied.paused || 0;
         if (applied.pauseErrors?.length) {
           out.pauseErrors.push(...applied.pauseErrors);
-          if (stopOrPass(row, "PAUSE_FAILED")) break;
+          const sent = applied.pauseErrors.some((e) => !UNSENT_CODES.has(String(e?.reason || "")));
+          if (stopOrPass(row, "PAUSE_FAILED", { sent })) break;
+          out.passedPauseFailures++;
         }
       }
     }
-    advance();
-    await saveProgress();
+    advance(row);
   }
   if (!out.stoppedBy) out.stoppedBy = "lap";
   await saveProgress();
-  out.cursor = (startAt + saved.scanned) % rows.length;
+  const position = (startAt + saved.scanned) % rows.length;
+  out.cursor = position;
+  out.next = String(rows[position].ccu);
   return out;
 }
 
@@ -354,9 +374,5 @@ export async function bookTimeRotorCheck({
 // Anything else is this row's own problem; the pacer backs off after any
 // failed call, so if it was really an outage the next read stops the run.
 function stopsTheRotor(error) {
-  const code = error?.code;
-  return code === "PARAFORM_PACED_BACKOFF"
-    || code === "PARAFORM_SESSION_DEAD"
-    || code === "KV_UNAVAILABLE"
-    || isTransientRefusal(error);
+  return UNSENT_CODES.has(error?.code) || isTransientRefusal(error);
 }

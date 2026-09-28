@@ -13,6 +13,8 @@ const ENV_NAMES = [
   "N8N_BASE_URL",
   "N8N_API_KEY",
   "PARAFORM_COOKIE",
+  "PARAFORM_SESSION_COOKIE",
+  "PARAFORM_SESSION_ACCOUNT",
   "SLACK_BOT_TOKEN",
   "SLACK_WEBHOOK_URL",
 ];
@@ -123,7 +125,7 @@ test("the catch-up writes the attempt key health reads, first as started and the
     assert.deepEqual(attemptWrites[1].rest, ["EX", String(3 * 24 * 3600)]);
     const final = attemptWrites[1].value;
     assert.equal(final.durationMs, 70_000);
-    assert.deepEqual(final.raydar, { checked: 3, matched: 1, paused: 1, pauseErrors: 0 });
+    assert.deepEqual(final.raydar, { checked: 3, matched: 1, paused: 1, pauseErrors: 0, held: 0 });
     assert.equal(final.bookTime.checked, 9);
     assert.equal(final.bookTime.reads, 9);
     assert.equal(final.bookTime.stoppedBy, "deadline");
@@ -175,6 +177,12 @@ test("catchupAttemptStatus names each outcome", () => {
     catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, stoppedBy: "refused" } }),
     "partial",
   );
+  // Bookings held for a later index (reconcileIndex's `held`, when the live
+  // set could not read every sequence) were not resolved this run.
+  assert.equal(
+    catchupAttemptStatus({ ok: true, indexes: { ...READY_INDEXES, calendly: { ...READY_INDEXES.calendly, held: 2 } }, bookTime: BOOKTIME_DONE }),
+    "partial",
+  );
   // Review finding: a Book Time check that never ran is not a success.
   assert.equal(catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTimeSkipped: "no_cookie" }), "partial");
   assert.equal(
@@ -186,6 +194,32 @@ test("catchupAttemptStatus names each outcome", () => {
     catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, stoppedBy: "lap" } }),
     "success",
   );
+  assert.equal(
+    catchupAttemptStatus({ ok: true, indexes: READY_INDEXES, bookTime: { ...BOOKTIME_DONE, reads: 0, stoppedBy: "budget_invalid" } }),
+    "partial",
+  );
+});
+
+test("a booked lead the rotor moved past after two failed pauses is alerted as such, not as retried", async () => {
+  await withFakeKv(async () => {
+    const sent = [];
+    await runCatchup({
+      pace: async (fn) => fn(),
+      catchUp: async () => READY_INDEXES,
+      bookTime: async () => ({
+        ...BOOKTIME_DONE,
+        stoppedBy: "lap",
+        passedPauseFailures: 1,
+        pauseErrors: [{ sequence: "seq_1", reason: "PARAFORM_HTTP_429" }],
+      }),
+      cookiePresent: () => true,
+      notify: async (text) => { sent.push(text); },
+    });
+    const bookTimeAlerts = sent.filter((text) => text.includes("Book Time"));
+    assert.equal(bookTimeAlerts.length, 1);
+    assert.match(bookTimeAlerts[0], /moved past them/);
+    assert.doesNotMatch(bookTimeAlerts[0], /retr/);
+  });
 });
 
 test("a run with no Paraform session records the skipped Book Time check as partial", async () => {
