@@ -8,10 +8,14 @@ import assert from "node:assert/strict";
 
 import {
   buildLiveSet,
+  dropAlreadyPaused,
+  holdAfterMatch,
+  liveSetUnverifiedSequences,
   liveSetUsable,
   matchBookingAgainstLiveSet,
   LIVESET_SCHEMA,
   LIVESET_MAX_AGE_MS,
+  UNVERIFIED_ANY,
 } from "../api/seq/_lib/booking-protection-liveset.mjs";
 
 const CATALOG = [
@@ -89,6 +93,29 @@ test("buildLiveSet paces between sequences but not before the first one", async 
     sleepBetweenSequences: async () => { sleeps++; },
   });
   assert.equal(sleeps, 1, "two candidate sequences -> one gap between them");
+});
+
+test("buildLiveSet stops starting sequences past its deadline and fails loudly instead of returning a partial index", async () => {
+  let clockMs = 1_000;
+  const walked = [];
+  await assert.rejects(
+    () => buildLiveSet({
+      listSequences: async () => CATALOG,
+      membershipLoader: async (id) => { walked.push(id); clockMs += 5_000; return { leads: [lead()] }; },
+      deadlineAt: 4_000,
+      clock: () => clockMs,
+    }),
+    (error) => error.code === "BOOKING_LIVESET_DEADLINE" && /walked 1 of 2 sequences/.test(error.message),
+  );
+  assert.equal(walked.length, 1, "the second walk was never started");
+
+  const liveSet = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async () => ({ leads: [lead()] }),
+    deadlineAt: 10_000,
+    clock: () => 1_000,
+  });
+  assert.equal(liveSet.candidateSequences, 2, "inside the deadline nothing changes");
 });
 
 test("liveSetUsable enforces schema, shape, and the max-age ceiling", () => {
@@ -170,4 +197,82 @@ test("matchBookingAgainstLiveSet is a pure lookup against unknown emails/entries
   const liveSet = liveSetWith({});
   assert.deepEqual(matchBookingAgainstLiveSet({ liveSet, email: "nobody@example.com", bookedAtMs: Date.now(), source: "calendly" }), []);
   assert.deepEqual(matchBookingAgainstLiveSet({ liveSet: null, email: "nobody@example.com", bookedAtMs: Date.now(), source: "calendly" }), []);
+});
+
+test("buildLiveSet lists a failed walk and a short read as unverified, even a short read that returned nobody", async () => {
+  const liveSet = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async (id) => (id === "seq_interview"
+      ? { leads: [], complete: false, unique: 0, totalCount: 5 }
+      : Promise.reject(Object.assign(new Error("nope"), { code: "PARAFORM_HTTP_401" }))),
+  });
+  assert.equal(liveSet.incomplete, true);
+  assert.deepEqual(liveSet.unverifiedSequences, [
+    { id: "seq_interview", name: CATALOG[0].name, reason: "short_read:0/5" },
+    { id: "seq_no_show", name: "No Show - Agent Call", reason: "PARAFORM_HTTP_401" },
+  ]);
+  assert.equal(liveSet.errors.length, 1, "errors keeps its old meaning: walks that threw");
+
+  const complete = await buildLiveSet({
+    listSequences: async () => CATALOG,
+    membershipLoader: async () => ({ leads: [lead()], complete: true }),
+  });
+  assert.equal(complete.incomplete, false);
+  assert.deepEqual(complete.unverifiedSequences, []);
+});
+
+test("liveSetUnverifiedSequences reads old and new index shapes, and fails closed on an unspecified gap", () => {
+  assert.deepEqual(liveSetUnverifiedSequences({ unverifiedSequences: [], errors: [] }), []);
+  assert.deepEqual(
+    liveSetUnverifiedSequences({
+      errors: [{ sequenceId: "a", name: "A", reason: "x" }],
+      sequences: [{ id: "b", name: "B", complete: false }, { id: "c", name: "C", complete: true }],
+    }).map((s) => s.id),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    liveSetUnverifiedSequences({ incomplete: true, errors: [] }).map((s) => s.id),
+    [UNVERIFIED_ANY],
+  );
+});
+
+test("holdAfterMatch: a wildcard hold or index never lets a booking resolve early", () => {
+  const decisions = [{ sequenceId: "a", ccuId: "ccu_a" }, { sequenceId: "b", ccuId: "ccu_b" }];
+  const anyIndex = { builtAt: "t2", incomplete: true };
+  const priorHold = { checkedAgainst: "t1", unverifiedSequenceIds: ["a"], heldSince: "t1", appliedCcuIds: ["ccu_b"] };
+  const kept = holdAfterMatch({ liveSet: anyIndex, hold: priorHold, decisions });
+  assert.deepEqual(kept.apply, [{ sequenceId: "a", ccuId: "ccu_a" }], "a lead already handled is not re-sent");
+  assert.deepEqual(kept.hold.unverifiedSequenceIds, ["a"], "an index that cannot say what it missed clears nothing");
+  assert.deepEqual(kept.hold.appliedCcuIds, ["ccu_b", "ccu_a"]);
+
+  const anyHold = { checkedAgainst: "t1", unverifiedSequenceIds: [UNVERIFIED_ANY], heldSince: "t1", appliedCcuIds: [] };
+  const reopened = holdAfterMatch({ liveSet: { builtAt: "t2", unverifiedSequences: [] }, hold: anyHold, decisions });
+  assert.deepEqual(reopened.apply, decisions, "every decision is still owed");
+  assert.equal(reopened.hold, null);
+});
+
+test("dropAlreadyPaused skips a lead verified-paused after both the index build and the booking, and keeps the rest", async () => {
+  const liveSet = { builtAt: "2026-09-29T05:22:00.000Z" };
+  const bookedAtMs = Date.parse("2026-09-28T10:00:00.000Z");
+  const paused = {
+    "seqguard:paused:ccu_worker": { at: "2026-09-29T05:33:00.000Z" }, // paused by the worker after the build
+    "seqguard:paused:ccu_old": { at: "2026-09-28T09:00:00.000Z" }, // paused before this booking
+  };
+  const decisions = [{ ccuId: "ccu_worker" }, { ccuId: "ccu_old" }, { ccuId: "ccu_none" }];
+  const kept = await dropAlreadyPaused(decisions, { liveSet, bookedAtMs, read: async (key) => paused[key] ?? null });
+  assert.deepEqual(kept.map((d) => d.ccuId), ["ccu_old", "ccu_none"]);
+
+  // The pause canary: paused yesterday after yesterday's build, re-armed, and
+  // booked again today while yesterday's index is still in use.
+  const canary = await dropAlreadyPaused([{ ccuId: "ccu_canary" }], {
+    liveSet: { builtAt: "2026-09-28T05:22:00.000Z" },
+    bookedAtMs: Date.parse("2026-09-29T06:30:00.000Z"),
+    read: async () => ({ at: "2026-09-28T06:31:00.000Z" }),
+  });
+  assert.equal(canary.length, 1, "a booking made after the last pause is still paused");
+
+  const failedRead = await dropAlreadyPaused([{ ccuId: "ccu_x" }], {
+    liveSet, bookedAtMs, read: async () => { throw new Error("kv down"); },
+  });
+  assert.equal(failedRead.length, 1, "a failed read keeps the decision");
 });

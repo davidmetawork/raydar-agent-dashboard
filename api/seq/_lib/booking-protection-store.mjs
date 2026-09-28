@@ -23,7 +23,7 @@ const KV_TOKEN = process.env.KV_REST_API_TOKEN || "";
 
 export const kvConfigured = () => Boolean(KV_URL && KV_TOKEN);
 
-async function kv(command, { throwOnTransport = false } = {}) {
+async function kv(command, { throwOnTransport = false, requireResult = false } = {}) {
   if (!kvConfigured()) return null;
   try {
     const r = await fetch(KV_URL, {
@@ -37,6 +37,9 @@ async function kv(command, { throwOnTransport = false } = {}) {
     });
     if (!r.ok) throw new Error(`kv ${r.status}`);
     const b = await r.json().catch(() => null);
+    if (requireResult && !(b && typeof b === "object" && Object.hasOwn(b, "result"))) {
+      throw new Error("kv response without result");
+    }
     return b?.result ?? null;
   } catch {
     if (throwOnTransport) {
@@ -50,6 +53,15 @@ async function kv(command, { throwOnTransport = false } = {}) {
 
 export const kvGet = async (key) => {
   const raw = await kv(["GET", key]);
+  if (raw == null) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
+};
+// A GET that tells "no such key" (null) apart from "KV did not answer"
+// (throws KV_UNAVAILABLE, including a 200 whose body carries no `result`).
+// The worker needs the difference: it removes a queue entry whose record is
+// gone, and a transport blip must never read as gone.
+export const kvGetStrict = async (key) => {
+  const raw = await kv(["GET", key], { throwOnTransport: true, requireResult: true });
   if (raw == null) return null;
   try { return JSON.parse(raw); } catch { return raw; }
 };

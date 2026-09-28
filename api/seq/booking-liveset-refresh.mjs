@@ -29,7 +29,22 @@ import { withParaformTelemetrySource } from "../_lib/paraform-telemetry-context.
 
 export const config = { maxDuration: 280 };
 
+// Stop starting new sequence walks well before maxDuration, so an overrun is
+// recorded and alerted instead of being killed silently. A dead first
+// session costs about 70 s of paced probes before the pacer moves on
+// (ESTIMATED from the configured delays), which is what made this worth
+// guarding. The last walk started is not bounded: 6.5 s of pacing plus an
+// unpaced throttle ladder (about 36 s) can follow the check, so the budget
+// leaves about 55 s. The run's durationMs is recorded; retune from that.
+export const LIVESET_REFRESH_BUDGET_MS = 225_000;
+
 const OPERATOR_KEY_PATTERN = /^\S{32,}$/u;
+
+export function incompleteRefreshText(unverifiedSequences = []) {
+  const parts = unverifiedSequences.map((s) => `${s.name || s.id} (${s.reason || "unread"})`);
+  const listed = parts.slice(0, 5).join(", ") + (parts.length > 5 ? ` and ${parts.length - 5} more` : "");
+  return `:warning: Booking live-set refresh published, but could not fully read ${unverifiedSequences.length} sequence(s): ${listed || "unnamed"}. Bookings checked against this index are held in the queue, not dropped, until a later refresh reads those sequences.`;
+}
 
 function operatorAuthorized(header, key) {
   if (!OPERATOR_KEY_PATTERN.test(String(key ?? "")) || typeof header !== "string") return false;
@@ -47,7 +62,7 @@ async function recordAttempt(status, extra = {}) {
   }, 3 * 24 * 3600).catch(() => {});
 }
 
-async function runRefresh({ triggeredBy }) {
+async function runRefresh({ triggeredBy, startedAt = Date.now() }) {
   await ensureParaformSession();
   if (!hasCookie()) {
     await recordAttempt("failure", { error: "no_cookie" });
@@ -73,16 +88,19 @@ async function runRefresh({ triggeredBy }) {
     listSequences,
     membershipLoader,
     sleepBetweenSequences,
+    deadlineAt: startedAt + LIVESET_REFRESH_BUDGET_MS,
   });
   await publishLiveSet(liveSet);
   await recordAttempt("success", {
     triggeredBy,
+    durationMs: Date.now() - startedAt,
     catalogSequences: liveSet.catalogSequences,
     candidateSequences: liveSet.candidateSequences,
     sequencesWithActiveLeads: liveSet.sequencesWithActiveLeads,
     leadsIndexed: liveSet.leadsIndexed,
     indexedEmails: liveSet.indexedEmails,
     incomplete: liveSet.incomplete,
+    unverifiedSequences: liveSet.unverifiedSequences.length,
   });
   return {
     ok: true,
@@ -93,6 +111,7 @@ async function runRefresh({ triggeredBy }) {
     leadsIndexed: liveSet.leadsIndexed,
     indexedEmails: liveSet.indexedEmails,
     incomplete: liveSet.incomplete,
+    unverifiedSequences: liveSet.unverifiedSequences,
     errors: liveSet.errors,
   };
 }
@@ -111,18 +130,23 @@ async function handleBookingLivesetRefresh(req, res) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
 
+  const startedAt = Date.now();
   try {
-    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator" });
+    const result = await runRefresh({ triggeredBy: scheduled ? "cron" : "operator", startedAt });
     if (!result.ok && (await shouldAlert(`liveset-refresh-${result.error}`, 6 * 3600))) {
       await notifySlack(`:rotating_light: Booking live-set refresh could not run (${result.error}). The worker will keep serving the last published index until it ages past ${Math.round((36 * 3600))}s.`).catch(() => {});
     }
     if (result.ok && result.incomplete && (await shouldAlert("liveset-refresh-incomplete", 6 * 3600))) {
-      await notifySlack(`:warning: Booking live-set refresh published with ${result.errors?.length || 0} sequence read error(s) — see /api/seq/health.`).catch(() => {});
+      await notifySlack(incompleteRefreshText(result.unverifiedSequences)).catch(() => {});
     }
     return res.status(200).json({ ...result, ranAt: new Date().toISOString() });
   } catch (error) {
     const code = error?.code === "PARAFORM_PACED_BACKOFF" ? "paced_backoff" : "error";
-    await recordAttempt("failure", { error: code });
+    await recordAttempt("failure", {
+      error: code,
+      reason: String(error?.code || "").slice(0, 60) || null,
+      durationMs: Date.now() - startedAt,
+    });
     if (await shouldAlert(`liveset-refresh-${code}`, 6 * 3600)) {
       await notifySlack(`:rotating_light: Booking live-set refresh failed: ${String(error?.message || error).slice(0, 160)}`).catch(() => {});
     }

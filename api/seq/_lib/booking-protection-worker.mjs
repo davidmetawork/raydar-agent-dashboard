@@ -13,12 +13,16 @@ import {
   kvSet as legacyKvSet,
 } from "./booking-stop.mjs";
 import {
+  dropAlreadyPaused,
+  holdAfterMatch,
   loadLiveSet,
+  liveSetUnverifiedSequences,
   liveSetUsable,
   matchBookingAgainstLiveSet,
 } from "./booking-protection-liveset.mjs";
 import { alsoPauseIfBookedBeforeJoining } from "./booking-protection-policy.mjs";
 import {
+  holdPendingBooking,
   pendingBookingIds,
   readPendingBooking,
   removePendingBooking,
@@ -34,14 +38,21 @@ export async function drainPendingBookings({
   listPending = pendingBookingIds,
   readJob = readPendingBooking,
   removeJob = removePendingBooking,
+  holdJob = (eventId, job, hold) => holdPendingBooking(eventId, job, hold, { now }),
   loadLive = loadLiveSet,
   applyDecisionsImpl = applyDecisions,
   writeProof = legacyKvSet,
   readCancelRecord = legacyKvGet,
+  readPausedRecord = legacyKvGet,
   pauseCanaryFingerprint = process.env.RAYDAR_BOOKING_PAUSE_CANARY_FINGERPRINT,
   webhookSecret = process.env.RAYDAR_SCHEDULER_WEBHOOK_SECRET,
   apply = process.env.BOOKING_STOP_APPLY !== "0",
   maxJobsPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_BUDGET || 25),
+  maxScanPerRun = Number(process.env.BOOKING_STOP_LITE_WORKER_SCAN_BUDGET || 500),
+  // Stop starting jobs well inside the route's 120 s maxDuration, so the
+  // alert pass after the drain always runs.
+  stopAfterMs = 80_000,
+  clock = () => Date.now(),
   applyDecisionsOverrides = {},
 } = {}) {
   const out = {
@@ -51,8 +62,18 @@ export async function drainPendingBookings({
     paused: 0,
     deferred: 0,
     cancelled: 0,
+    // Jobs kept because the index could not read a sequence they might be
+    // in (holdAfterMatch). Counted whether held this tick or already held
+    // against this same index.
+    held: 0,
+    // Queue entries whose record had expired or was never written: removed,
+    // as before, but counted.
+    missing: 0,
+    // Records KV did not return this tick: left queued.
+    unreadable: 0,
     pauseErrors: [],
     liveSetReady: false,
+    unverifiedSequences: [],
   };
   const eventIds = await listPending();
   out.pending = eventIds.length;
@@ -60,11 +81,41 @@ export async function drainPendingBookings({
 
   const liveSet = await loadLive();
   out.liveSetReady = liveSetUsable(liveSet, now);
+  if (out.liveSetReady) out.unverifiedSequences = liveSetUnverifiedSequences(liveSet);
   const alsoBeforeJoin = alsoPauseIfBookedBeforeJoining();
 
-  for (const eventId of eventIds.slice(0, maxJobsPerRun)) {
-    const job = await readJob(eventId);
-    if (!job) { await removeJob(eventId); continue; }
+  // maxJobsPerRun bounds the jobs that send Paraform requests this tick (and,
+  // as before, deferred and unreadable ones). A match that needs no pause
+  // costs only KV reads and does not spend it, so a backlog of held jobs,
+  // skipped or re-checked, can never starve new bookings queued behind them.
+  // maxScanPerRun bounds the KV reads.
+  // A garbage cap must not lift the limit: a non-number job cap processes
+  // nothing (as slice(0, NaN) did before), and the scan cap falls back.
+  const jobCap = Number.isFinite(maxJobsPerRun) ? maxJobsPerRun : 0;
+  const scanCap = Number.isFinite(maxScanPerRun) && maxScanPerRun > 0 ? maxScanPerRun : 500;
+  const startedAt = clock();
+  let budget = 0;
+  let scanned = 0;
+  for (const eventId of eventIds) {
+    if (budget >= jobCap || scanned >= scanCap || clock() - startedAt >= stopAfterMs) break;
+    let job;
+    try {
+      job = await readJob(eventId);
+    } catch {
+      out.unreadable++;
+      budget++;
+      continue;
+    }
+    if (!job) { out.missing++; await removeJob(eventId); continue; }
+
+    if (out.liveSetReady && job.hold && job.hold.checkedAgainst === liveSet.builtAt) {
+      // Not counted against the scan cap either (only the clock bounds these
+      // one-read skips), so a held backlog larger than the cap cannot hide a
+      // new booking behind it.
+      out.held++;
+      continue;
+    }
+    scanned++;
 
     // The hook durably records a booking.cancelled/rescheduled event under
     // K.raydarCancel(bookingId) (raydar-booking-hook.mjs) but a job for the
@@ -86,23 +137,37 @@ export async function drainPendingBookings({
       // (or republishes) a usable index — never drop a pending booking
       // because the index happened to be stale.
       out.deferred++;
+      budget++;
       continue;
     }
 
     out.processed++;
-    const decisions = matchBookingAgainstLiveSet({
+    const bookedAtMs = job.effectiveBookedAtMs ?? job.bookedAtMs;
+    const matchedDecisions = matchBookingAgainstLiveSet({
       liveSet,
       email: job.email,
-      bookedAtMs: job.effectiveBookedAtMs ?? job.bookedAtMs,
+      bookedAtMs,
       source: job.source,
       eventName: job.eventName,
       startsAt: job.startsAt,
       alsoPauseBeforeJoiningInterviewChase: alsoBeforeJoin,
       now,
     });
+    // Against an index that could not read every protected sequence, "no
+    // match" is not final: the booking is held for those sequences instead of
+    // being removed. Decisions from the sequences it did read apply now.
+    const step = holdAfterMatch({
+      liveSet,
+      hold: job.hold || null,
+      decisions: matchedDecisions,
+      now,
+      recordApplied: Boolean(apply),
+    });
+    const decisions = await dropAlreadyPaused(step.apply, { liveSet, bookedAtMs, read: readPausedRecord });
 
     let applied = { paused: 0, pauseErrors: [] };
     if (apply && decisions.length) {
+      budget++;
       applied = await applyDecisionsImpl(decisions, applyDecisionsOverrides);
     }
     out.matched += decisions.length;
@@ -114,7 +179,12 @@ export async function drainPendingBookings({
       continue;
     }
 
-    await removeJob(eventId);
+    if (step.hold) {
+      await holdJob(eventId, job, step.hold);
+      out.held++;
+    } else {
+      await removeJob(eventId);
+    }
 
     try {
       const proof = {
@@ -147,7 +217,7 @@ export async function drainPendingBookings({
     } catch {
       // Proof-writing is observability, not correctness: the pause itself
       // already passed read-back verification above and the job is removed
-      // from the queue either way.
+      // (or held) either way.
     }
   }
   return out;
