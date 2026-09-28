@@ -13,13 +13,17 @@ import {
   inboxSubmissionsProjectionCoverage,
   readInboxSnapshotState,
   releaseInboxSyncLock,
+  resolveInboxParaformSession,
   writeInboxRefreshState,
 } from "../../inbox/_lib/core.mjs";
 
 export const SEQUENCE_INBOX_ACTIVATION_AT = SUBMISSIONS_V2_APPROVED_ACTIVATION_AT;
 // The shared Inbox lock has a fixed 120-second TTL. Keep the whole broker
 // well below it: 35s refresh + (8 × 5s point reads) + (7 × 1s pacing) = 82s,
-// preserving 38s for KV/read-state/write-state and runtime overhead.
+// preserving 38s for KV/read-state/write-state and runtime overhead. The 100s
+// deadline also covers the Paraform session resolve (at most 8s) that runs
+// before the lock is taken, so a slow resolve trims deadline slack for KV
+// (18s to 10s) instead of lengthening the worker's 110s call.
 export const SEQUENCE_INBOX_BATCH_LIMIT = 8;
 // Deployed workers may still request the former 12-record page. Accept that
 // wire contract during rollout, but never let it increase broker work.
@@ -115,6 +119,7 @@ export async function readSequenceInboxBrokerBatch(input, {
   sleepImpl = wait,
   clock = () => Date.now(),
   readRoleMappings = readSourcingSequenceRoleMappings,
+  ensureSession = resolveInboxParaformSession,
 } = {}) {
   const request = validateSequenceInboxBatchRequest(input);
   const activationAt = sequenceInboxActivation({ env, now: now().getTime() });
@@ -140,14 +145,6 @@ export async function readSequenceInboxBrokerBatch(input, {
       digest: sourcingRoleMappingInternals.UNAVAILABLE_DIGEST,
     };
   }
-  const lock = await acquireLock();
-  if (lock?.status !== "acquired") {
-    if (lock?.status === "busy") {
-      throw fail("sequence_inbox_refresh_busy", "The bounded Sequence Inbox cache refresh is unavailable.", 503);
-    }
-    throw cacheUnavailable("lock_unavailable");
-  }
-  let batch;
   const deadline = clock() + SEQUENCE_INBOX_BROKER_DEADLINE_MS;
   const remaining = () => deadline - clock();
   const requireBudget = (minimumMs = 0) => {
@@ -159,6 +156,21 @@ export async function readSequenceInboxBrokerBatch(input, {
       );
     }
   };
+  // Resolve the live n8n-store Paraform session before any Paraform read;
+  // without it the refresh and point reads send the dead static env seal and
+  // every read 401s (reported as PARAFORM_THROTTLED). Bounded at 8s, outside
+  // the shared lock, and inside the broker deadline so the worker's 110s call
+  // budget does not grow. A 401 is never reported as a rejection here:
+  // inboxTrpcGet only parks a slot after its own spaced probes confirm it dead.
+  await ensureSession();
+  const lock = await acquireLock();
+  if (lock?.status !== "acquired") {
+    if (lock?.status === "busy") {
+      throw fail("sequence_inbox_refresh_busy", "The bounded Sequence Inbox cache refresh is unavailable.", 503);
+    }
+    throw cacheUnavailable("lock_unavailable");
+  }
+  let batch;
   try {
     const loaded = await readState();
     if (loaded?.status !== "ready" || !loaded.value) {
