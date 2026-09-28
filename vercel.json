@@ -178,7 +178,7 @@
     },
     {
       "path": "/api/seq/booking-liveset-refresh",
-      "schedule": "22 5 * * *"
+      "schedule": "26 5 * * *"
     },
     {
       "path": "/api/seq/booking-catchup",

@@ -290,6 +290,88 @@ export function createPacer({
 }
 
 /**
+ * A refusal that says "not now" rather than "this request is wrong": a 401
+ * the pacer did not confirm as a dead session, a 403 or 429, a 5xx, or a
+ * transport failure. The pacer has written a backoff for each.
+ */
+export function isTransientRefusal(error) {
+  const code = error?.code;
+  if (code === "PARAFORM_REFUSED_AUTH" || code === "PARAFORM_TRANSPORT_ERROR") return true;
+  if (code === "PARAFORM_REFUSED") {
+    const status = Number(error?.status);
+    return status === 403 || status === 429 || status >= 500;
+  }
+  return false;
+}
+
+/**
+ * Run `attempt` (one call through a pacer) for a caller that has a deadline
+ * of its own, such as the daily live-set refresh. When the pacer answers
+ * PARAFORM_PACED_BACKOFF (nothing was sent: an earlier refusal, here or in
+ * another invocation, set a backoff), wait until the backoff ends and call
+ * again, as long as it ends before `deadlineAt`. Otherwise the error is
+ * thrown, so a missed deadline still fails loudly.
+ *
+ * `retryTransientRefusals` (default 0) also allows that many more attempts
+ * after a call that WAS sent and refused for a transient reason
+ * (isTransientRefusal). Each such retry is one more request, and it waits
+ * max(Retry-After, backoffMs) here first, so the wait holds even when the
+ * pacer's own KV state could not be written or read. If that wait would
+ * pass the deadline, or a later attempt meets a backoff that does, the
+ * refusal itself is thrown, not the backoff, so the record names the cause.
+ *
+ * Nothing is sent while waiting, so the pacer's contract holds: one call in
+ * flight, at least its spacing apart, and a refusal waited out for
+ * max(Retry-After, 60 s) rather than retried hard.
+ */
+export async function pacedWithinDeadline(attempt, {
+  deadlineAt,
+  retryTransientRefusals = 0,
+  backoffMs = PACE_DEFAULT_BACKOFF_MS,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  log = (message) => console.warn(message),
+  label = "paced call",
+  onRetry = () => {},
+} = {}) {
+  let retries = 0;
+  let refusal = null;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (error?.code === "PARAFORM_PACED_BACKOFF") {
+        if (
+          Number.isFinite(error.retryAt)
+          && Number.isFinite(deadlineAt)
+          && error.retryAt < deadlineAt
+        ) {
+          const waitMs = Math.max(0, error.retryAt - now());
+          log(`booking-protection pacer: ${label} waits ${Math.ceil(waitMs / 1000)} s for the pacer's backoff`);
+          await sleep(waitMs);
+          continue;
+        }
+        throw refusal || error;
+      }
+      if (retries < retryTransientRefusals && isTransientRefusal(error)) {
+        const waitMs = Math.max(
+          Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0 ? error.retryAfterMs : 0,
+          backoffMs,
+        );
+        if (!Number.isFinite(deadlineAt) || now() + waitMs >= deadlineAt) throw error;
+        retries++;
+        refusal = error;
+        onRetry(error);
+        log(`booking-protection pacer: ${label} was refused (${error.code}); trying again in ${Math.ceil(waitMs / 1000)} s`);
+        await sleep(waitMs);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/**
  * One Paraform tRPC call, exactly one attempt, no retry ladder — the pacer
  * (above) decides what happens on refusal, not this function. Throws a
  * classified error carrying `retryAfterMs` (from the `Retry-After` header,
