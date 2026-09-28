@@ -176,7 +176,7 @@ export const INBOX_SETTLE_MS = 2 * 60 * 60 * 1_000;
 // longer reaches back to the last run that read it (meta.recent_watermark),
 // every sequence with any stored reply is re-read. Measured 2026-09-28 the
 // 20-item window spanned about 45 hours, so this is rare.
-export const INBOX_SEEN_GMAIL_IDS_MAX = 5_000;
+export const INBOX_SNAPSHOT_WRITE_CHUNK_BYTES = 512 * 1_024;
 // A target whose counts could not be read is re-read once its snapshot is this old.
 export const INBOX_UNMETERED_READ_AFTER_MS = 8 * 60 * 60 * 1_000;
 // A few of the longest-unread snapshots are re-read every run as a drift check.
@@ -803,12 +803,12 @@ function inboundGmailIds(inboxData) {
     const gmailId = stringValue(email.gmail_id);
     if (gmailId) ids.add(gmailId);
   }
-  return [...ids].sort().slice(0, INBOX_SEEN_GMAIL_IDS_MAX);
+  return [...ids].sort();
 }
 
 function normalizeSeenGmailIds(value) {
   if (!Array.isArray(value)) return null;
-  return value.map(stringValue).filter(Boolean).slice(0, INBOX_SEEN_GMAIL_IDS_MAX);
+  return value.map(stringValue).filter(Boolean);
 }
 
 function createSequenceSnapshot(campaign, inboxData, recentByGmail, refreshedAt, replyMetrics = null) {
@@ -1050,9 +1050,13 @@ export function selectChangedInboxCampaigns(
   const watermarkMs = Date.parse(previousState?.meta?.recent_watermark || "");
   const recentTimes = recentRaw.map(recentReplyTime).filter((value) => value > 0);
   const oldestRecentMs = recentTimes.length ? Math.min(...recentTimes) : Infinity;
-  const windowSaturated = !recentAvailable
-    || !Number.isFinite(watermarkMs)
-    || (recentRaw.length >= RECENT_WINDOW_TRUNCATED_AT && oldestRecentMs > watermarkMs);
+  // A failed recent read holds the watermark, so the next successful window
+  // still covers everything since; only when the window has been unreadable
+  // for the whole stale period does every replied sequence get re-read.
+  const windowSaturated = !Number.isFinite(watermarkMs)
+    || (recentAvailable
+      ? recentRaw.length >= RECENT_WINDOW_TRUNCATED_AT && oldestRecentMs > watermarkMs
+      : nowMs - watermarkMs >= INBOX_SCHEDULED_STALE_MS);
   const recentBySequence = new Map();
   for (const reply of recentRaw) {
     const id = stringValue(reply?.sequence_id);
@@ -1812,20 +1816,40 @@ export async function writeInboxRefreshState(
     throw error;
   }
   const merged = mergeInboxRefreshState(previousState, refresh);
-  const commands = [];
   const targetIds = new Set(arrayValue(refresh?.target_sequence_ids));
-  const snapshotArgs = arrayValue(refresh?.snapshots)
+  const snapshotPairs = arrayValue(refresh?.snapshots)
     .map((snapshot) => normalizeSequenceSnapshot(
       snapshot,
       snapshot?.sequence_id,
     ))
     .filter((snapshot) => snapshot && targetIds.has(snapshot.sequence_id))
-    .flatMap((snapshot) => [
-      stringValue(snapshot.sequence_id),
-      JSON.stringify(snapshot),
-    ]);
-  if (snapshotArgs.length) {
-    commands.push(["HSET", INBOX_SEQUENCE_SNAPSHOTS_KEY, ...snapshotArgs]);
+    .map((snapshot) => [stringValue(snapshot.sequence_id), JSON.stringify(snapshot)]);
+  // A change-driven run can read every sequence at once (first run, a
+  // saturated window), far more than fits one KV request. Snapshots go in
+  // byte-bounded HSET chunks; the last chunk rides with the catalog, recent
+  // window and metadata, so a write that fits one request is unchanged and
+  // the metadata is always written last. A failed chunk throws before the
+  // metadata moves; the chunks already written are correct, complete reads.
+  const chunks = [];
+  let chunk = [];
+  let chunkBytes = 0;
+  for (const [sequenceId, serialized] of snapshotPairs) {
+    const bytes = sequenceId.length + serialized.length;
+    if (chunk.length && chunkBytes + bytes > INBOX_SNAPSHOT_WRITE_CHUNK_BYTES) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 0;
+    }
+    chunk.push(sequenceId, serialized);
+    chunkBytes += bytes;
+  }
+  if (chunk.length) chunks.push(chunk);
+  for (const earlier of chunks.slice(0, -1)) {
+    await pipelineImpl([["HSET", INBOX_SEQUENCE_SNAPSHOTS_KEY, ...earlier]]);
+  }
+  const commands = [];
+  if (chunks.length) {
+    commands.push(["HSET", INBOX_SEQUENCE_SNAPSHOTS_KEY, ...chunks[chunks.length - 1]]);
   }
   const retainedIds = new Set(merged.snapshots.keys());
   const prunedIds = [...(previousState?.snapshots || new Map()).keys()]

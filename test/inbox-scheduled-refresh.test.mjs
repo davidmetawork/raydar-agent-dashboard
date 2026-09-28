@@ -9,9 +9,11 @@ import {
   INBOX_SETTLE_MS,
   INBOX_UNMETERED_READ_AFTER_MS,
   INBOX_VENDOR_TIMEOUT_MS,
+  INBOX_SNAPSHOT_WRITE_CHUNK_BYTES,
   mergeInboxRefreshState,
   readInboxReplyMetrics,
   selectChangedInboxCampaigns,
+  writeInboxRefreshState,
 } from "../api/inbox/_lib/core.mjs";
 import { createInboxSyncHandler } from "../api/inbox/sync.mjs";
 
@@ -169,10 +171,61 @@ test("a window that no longer reaches the watermark re-reads every sequence with
   assert.equal(covered.window_saturated, false);
   assert.deepEqual(covered.selected, []);
 
+  // A failed recent read holds the watermark: no fallback yet, the next
+  // successful window still reaches back to it.
   const recentDown = selectChangedInboxCampaigns(campaigns, previous, [], metrics, {
     nowMs: NOW, rotation: 0, recentAvailable: false,
   });
-  assert.deepEqual(recentDown.selected.map((item) => item.id).sort(), ["cold", "hot"]);
+  assert.equal(recentDown.window_saturated, false);
+  assert.deepEqual(recentDown.selected, []);
+
+  // Unreadable for the whole stale period: re-read every replied sequence.
+  const longDown = selectChangedInboxCampaigns(campaigns, stateWith(
+    [...previous.snapshots.values()],
+    { recent_watermark: iso(NOW - INBOX_SCHEDULED_STALE_MS - HOUR) },
+  ), [], metrics, { nowMs: NOW, rotation: 0, recentAvailable: false });
+  assert.deepEqual(longDown.selected.map((item) => item.id).sort(), ["cold", "hot"]);
+});
+
+test("a large refresh is written in byte-bounded chunks with the metadata last", async () => {
+  const big = "x".repeat(Math.ceil(INBOX_SNAPSHOT_WRITE_CHUNK_BYTES / 3));
+  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
+  const refresh = {
+    generated_at: iso(NOW),
+    target_sequence_ids: ids,
+    selected_sequence_ids: ids,
+    catalog: { version: 3, refreshed_at: iso(NOW), campaigns_total: 7, targets: ids.map(campaign) },
+    snapshots: ids.map((id) => snapshot(id, {
+      refreshedMs: NOW,
+      replies: [{ gmail_id: `${id}-g1`, date: iso(NOW - HOUR), snippet: big }],
+    })),
+    recent: { version: 3, refreshed_at: iso(NOW), replies: [] },
+    scan: { failures: [] },
+  };
+  const calls = [];
+  await writeInboxRefreshState(stateWith([]), refresh, {
+    configured: true,
+    pipelineImpl: async (commands) => { calls.push(commands); return commands.map(() => "OK"); },
+  });
+  assert.ok(calls.length >= 3, `expected several requests, got ${calls.length}`);
+  const hsetFields = calls.flat().filter((command) => command[0] === "HSET")
+    .flatMap((command) => command.slice(2).filter((_, index) => index % 2 === 0));
+  assert.deepEqual(hsetFields, ids);
+  for (const request of calls) {
+    const bytes = JSON.stringify(request).length;
+    assert.ok(bytes < 2 * INBOX_SNAPSHOT_WRITE_CHUNK_BYTES, `request of ${bytes} bytes`);
+  }
+  const last = calls[calls.length - 1].map((command) => command[1]);
+  assert.ok(last.includes("inbox:v3:refresh"), "metadata goes in the final request");
+  assert.ok(calls.slice(0, -1).every((request) => request.every((command) => command[0] === "HSET")));
+
+  // A small refresh is still exactly one request.
+  const small = [];
+  await writeInboxRefreshState(stateWith([]), { ...refresh, snapshots: [snapshot("s1")] }, {
+    configured: true,
+    pipelineImpl: async (commands) => { small.push(commands); return commands.map(() => "OK"); },
+  });
+  assert.equal(small.length, 1);
 });
 
 test("reads that failed or were cut off last run are retried first", () => {
@@ -444,7 +497,7 @@ test("the cron GET needs the cron secret and runs the change-driven refresh", as
   assert.equal(response.body.trigger, "schedule");
   assert.equal(calls.builds[0].mode, "changed");
   assert.equal(calls.builds[0].batchSize, 150);
-  assert.equal(calls.builds[0].budgetMs, 90_000);
+  assert.equal(calls.builds[0].budgetMs, 85_000);
   assert.deepEqual(calls.alerts, []);
 });
 
@@ -498,6 +551,14 @@ test("Slack is told only when a person must act", async () => {
   });
   await stuck.handler({ method: "GET", headers: {} }, mockResponse());
   assert.equal(stuck.calls.alerts.length, 1);
+
+  // Paraform shrinking the recent window: its own alert.
+  const shortWindow = scheduledHandler({
+    buildRefresh: async () => ({ generated_at: iso(NOW), scan: { recent_window_size: 4 } }),
+  });
+  await shortWindow.handler({ method: "GET", headers: {} }, mockResponse());
+  assert.equal(shortWindow.calls.alerts.length, 1);
+  assert.match(shortWindow.calls.alerts[0], /returned only 4 item/);
 
   // Refresh now never alerts, even when it fails.
   const manual = scheduledHandler({

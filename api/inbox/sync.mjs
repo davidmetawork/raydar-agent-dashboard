@@ -22,7 +22,7 @@ export const INBOX_SCHEDULED_ALERT_AFTER_MS = 20 * 60 * 60 * 1_000;
 // Refresh budget measured from the start of the request, so lock waits, the
 // session read and the state scan cannot push a run past maxDuration 120s
 // (vercel.json), which would lose the run silently.
-export const INBOX_SYNC_TOTAL_BUDGET_MS = 90_000;
+export const INBOX_SYNC_TOTAL_BUDGET_MS = 85_000;
 const SCHEDULED_LOCK_WAIT_MS = 15_000;
 const SCHEDULED_LOCK_ATTEMPTS = 3;
 
@@ -32,6 +32,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // the Inbox for most of a day (two or more runs in a row), or sequences have
 // stayed unconfirmed past the stale window. Deduplicated to once a day.
 export async function alertInboxRefreshNeedsAttention(detail, {
+  key = "inbox-scheduled-refresh-attention",
   shouldAlertImpl,
   notifySlackImpl,
 } = {}) {
@@ -39,7 +40,7 @@ export async function alertInboxRefreshNeedsAttention(detail, {
     || (await import("../seq/_lib/booking-stop.mjs")).shouldAlert;
   const notifySlack = notifySlackImpl
     || (await import("../paraai/_lib/core.mjs")).notifySlack;
-  if (!(await shouldAlert("inbox-scheduled-refresh-attention", 24 * 3600))) return false;
+  if (!(await shouldAlert(key, 24 * 3600))) return false;
   await notifySlack(
     `:warning: The Monitor Sequence Inbox needs attention: ${detail} `
       + "New Paraform replies may be missing from monitor.raydar.xyz/inbox. "
@@ -146,6 +147,7 @@ export function createInboxSyncHandler({
     let status;
     let body;
     let staleAfterRun = 0;
+    let recentWindowSize = null;
     let failureCode = null;
     try {
       const state = await readState();
@@ -166,6 +168,7 @@ export function createInboxSyncHandler({
         const nextState = await writeState(state.value, refresh);
         const feed = assembleFeed(nextState);
         staleAfterRun = Number(feed.freshness?.campaigns_stale) || 0;
+        recentWindowSize = refresh.scan?.recent_window_size ?? null;
         status = 200;
         body = {
           ok: true,
@@ -194,6 +197,14 @@ export function createInboxSyncHandler({
     // may be frozen by the platform.
     if (scheduled) {
       try {
+        if (body.ok && Number.isFinite(recentWindowSize) && recentWindowSize < 10) {
+          // Paraform returned 20 recent replies when this was built; a short
+          // window can no longer prove follow-up coverage.
+          await alert(
+            `Paraform's recent-replies window returned only ${recentWindowSize} item(s) (it returned 20 when this refresh was built), so follow-up emails may be missed. The window handling in api/inbox/_lib/core.mjs needs a look.`,
+            { key: "inbox-recent-window-short" },
+          );
+        }
         if (body.ok && staleAfterRun > 0) {
           await alert(`${staleAfterRun} sequence(s) have not been confirmed for over 16 hours.`);
         } else if (!body.ok && longUnverified(previousMeta, now())) {
