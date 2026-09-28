@@ -29,10 +29,12 @@ import {
   clearCookieCache,
   ensureParaformSession as paraaiEnsureParaformSession,
   paraformCookie,
+  candidateProfileInfo,
   trpcGet as paraaiTrpcGet,
   trpcGetRaw as paraaiTrpcGetRaw,
 } from "../api/paraai/_lib/core.mjs";
 import { requestLaneAuthStatus } from "../api/paraai/_lib/request-lane-throttle.mjs";
+import { probeParaformAuth } from "../api/paraai/_lib/auth-probe.mjs";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -923,7 +925,14 @@ test("paraai: a dead store session is parked only after confirmation reads of th
   );
 });
 
-test("paraai request lanes: a lane 401 parks nothing; the identity check's 401 parks its own cookie", async () => {
+const identityStatus = () => requestLaneAuthStatus({
+  now: 3_000_000,
+  kvImpl: async () => 1,
+  recordImpl: async () => {},
+  reportFailureImpl: async () => {},
+});
+
+test("paraai request lanes: a lane 401 parks nothing; a confirmed identity-check 401 parks its own cookie", async () => {
   await withParaaiStoreSession(
     () => paraform401(),
     async ({ seen, storeReads }) => {
@@ -933,17 +942,71 @@ test("paraai request lanes: a lane 401 parks nothing; the identity check's 401 p
       );
       assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "a bare lane 401 leaves the session alone");
 
-      const result = await requestLaneAuthStatus({
-        now: 3_000_000,
-        kvImpl: async () => 1,
-        recordImpl: async () => {},
-        reportFailureImpl: async () => {},
-      });
-      assert.deepEqual(result, { checked: true, authExpired: true });
-      assert.equal(seen.at(-1).cookie, SHARED_GEN_COOKIE);
-      assert.match(seen.at(-1).href, /user\.getCurrentUser/u);
+      const before = seen.length;
+      assert.deepEqual(await identityStatus(), { checked: true, authExpired: true });
+      const identityReads = seen.slice(before);
+      assert.equal(identityReads.length, 5, "the identity read, then two confirmation rounds of two reads");
+      assert.ok(identityReads.every((row) => row.cookie === SHARED_GEN_COOKIE));
       assert.equal(storeReads(), 1);
       assert.equal((await paraaiEnsureParaformSession()).slot, "account", "the identity check moved off the dead slot");
+    },
+  );
+});
+
+test("paraai request lanes: an identity-check 401 during a throttle is reported but parks nothing", async () => {
+  let identityCalls = 0;
+  await withParaaiStoreSession(
+    (href) => {
+      if (href.includes("user.getCurrentUser") && ++identityCalls === 1) return paraform401();
+      return paraformOk({ id: "me" });
+    },
+    async () => {
+      assert.deepEqual(await identityStatus(), { checked: true, authExpired: true });
+      assert.equal(paraformCookieValue(), SHARED_GEN_COOKIE, "the confirmation read answered, so the slot stays");
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
+});
+
+test("paraai auth probe: a dead first slot is parked and the probe answers from the next slot", async () => {
+  await withParaaiStoreSession(
+    (href, cookie) => (cookie === ACCOUNT_COOKIE ? paraformOk({ id: "me" }) : paraform401()),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, true);
+      assert.equal(result.movedOffDeadSlot, true);
+      assert.deepEqual(seen.map((row) => row.cookie), [
+        SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, SHARED_GEN_COOKIE, ACCOUNT_COOKIE,
+      ], "two passes of two reads on the shared cookie, then the account slot");
+      assert.equal(paraformCookieValue(), ACCOUNT_COOKIE);
+    },
+  );
+});
+
+test("paraai auth probe: a 401 that clears on the retry pass parks nothing", async () => {
+  let calls = 0;
+  await withParaaiStoreSession(
+    () => (++calls <= 2 ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      const result = await probeParaformAuth({}, { sleepImpl: async () => {} });
+      assert.equal(result.healthy, true);
+      assert.equal(result.reason, "recovered_on_retry");
+      assert.ok(seen.every((row) => row.cookie === SHARED_GEN_COOKIE));
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
+    },
+  );
+});
+
+test("paraai profile read: a 401 that clears on the confirmation read is PARAFORM_THROTTLED, not a park", async () => {
+  await withParaaiStoreSession(
+    (href) => (href.includes("/candidates/profile/") ? paraform401() : paraformOk({ id: "me" })),
+    async ({ seen }) => {
+      await assert.rejects(
+        () => candidateProfileInfo("candidate-user-7"),
+        (error) => error?.code === "PARAFORM_THROTTLED",
+      );
+      assert.deepEqual(seen.map((row) => row.cookie), [SHARED_GEN_COOKIE, SHARED_GEN_COOKIE]);
+      assert.equal((await paraaiEnsureParaformSession()).cached, true);
     },
   );
 });

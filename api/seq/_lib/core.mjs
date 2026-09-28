@@ -15,6 +15,7 @@ import {
   notifyParaformSessionRejected,
   paraformCookieValue,
   PARAFORM_SESSION_HEALTH_TIMEOUT_MS,
+  resolvedParaformCookie,
 } from "../../_lib/paraform-session-store.mjs";
 import {
   AGENT_SCHEDULING_URL,
@@ -188,9 +189,9 @@ const authExpired = (cookie) => {
 };
 
 async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
-  // One session for the whole ladder: every retry and every expiry probe
-  // sends the cookie this call started with.
-  const cookie = paraformCookieValue();
+  // Every attempt sends one known cookie, and the expiry probes test the
+  // cookie that got the last 401.
+  let cookie = paraformCookieValue();
   for (let attempt = 0; ; attempt++) {
     try { return await fn(cookie); }
     catch (e) {
@@ -198,6 +199,12 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
       if (attempt < delays.length) {
         // Jitter so a fleet of workers does not retry in lockstep.
         await sleep(delays[attempt] + Math.floor(Math.random() * 400));
+        // A cold instance can start on the static env seal because the store
+        // read outran the caller's budget (health's 3s); retry on the store
+        // session once it lands. An emptied cache (after a park) is not a
+        // session to move to.
+        const resolved = resolvedParaformCookie();
+        if (resolved !== null && resolved !== cookie) cookie = resolved;
         continue;
       }
       throw (await confirmSessionExpired(cookie)) ? authExpired(cookie) : e;
@@ -205,14 +212,18 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
   }
 }
 
-// Concurrent callers that reach a verdict on the same cookie share one serial
-// probe run, so a burst of 401s across parallel workers costs one
-// confirmation instead of one per worker.
-let expiryChecks = new Map(); // cookie -> in-flight isSessionActuallyExpired
-function confirmSessionExpired(cookie, fetchImpl = fetch) {
+// Concurrent callers that reach a verdict on the same cookie share one run,
+// so a burst of 401s across parallel workers costs one confirmation instead
+// of one per worker. A run started by a raw read also rides the ladder's
+// waits (see unauthorizedRead); a caller joining either kind gets its verdict.
+let expiryChecks = new Map(); // cookie -> in-flight verdict
+function confirmSessionExpired(cookie, fetchImpl = fetch, { ladder = false } = {}) {
   let pending = expiryChecks.get(cookie);
   if (!pending) {
-    pending = isSessionActuallyExpired({ cookie, fetchImpl }).finally(() => {
+    pending = (ladder
+      ? rawReadSessionExpired(cookie, fetchImpl)
+      : isSessionActuallyExpired({ cookie, fetchImpl })
+    ).finally(() => {
       if (expiryChecks.get(cookie) === pending) expiryChecks.delete(cookie);
     });
     expiryChecks.set(cookie, pending);
@@ -220,15 +231,26 @@ function confirmSessionExpired(cookie, fetchImpl = fetch) {
   return pending;
 }
 
+// A raw read got one 401 and no retries, so before the serial probes this
+// spends the same waits the ladder would have, probing once after each. A
+// throttle that clears at any step is not an expiry.
+async function rawReadSessionExpired(cookie, fetchImpl) {
+  for (const delay of authRetryDelays()) {
+    await sleep(delay + Math.floor(Math.random() * 400));
+    if (!(await isSessionActuallyExpired({ probes: 1, cookie, fetchImpl }))) return false;
+  }
+  return isSessionActuallyExpired({ cookie, fetchImpl });
+}
+
 export function __resetSessionExpiryChecksForTests() {
   expiryChecks = new Map();
 }
 
 /** A 401 on a read that does not ride the ladder (the paged CRM walk, profile
- *  reads). Serial probes of the same cookie decide: dead parks the session and
- *  reports AUTH_EXPIRED, anything else was throttling. */
+ *  reads). The same evidence as the ladder decides, on the same cookie: dead
+ *  parks the session and reports AUTH_EXPIRED, anything else was throttling. */
 export async function unauthorizedRead(cookie, { fetchImpl = fetch } = {}) {
-  return (await confirmSessionExpired(cookie, fetchImpl))
+  return (await confirmSessionExpired(cookie, fetchImpl, { ladder: true }))
     ? authExpired(cookie)
     : throttled();
 }
@@ -769,7 +791,7 @@ export async function isSessionActuallyExpired({
     try { await trpcGetRaw("campaigns.getListOfCampaignsOptimized", {}, 1, { cookie, fetchImpl }); return false; }
     catch (e) {
       if (e?.code !== "PARAFORM_THROTTLED") return false; // reached it, so auth is fine
-      await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
+      if (i < probes - 1) await sleep(probeDelayMs() * (i + 1) + Math.floor(Math.random() * 600));
     }
   }
   return true;

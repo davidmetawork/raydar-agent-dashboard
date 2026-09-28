@@ -9,6 +9,7 @@ import {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
+  resolvedParaformCookie,
 } from "../../_lib/paraform-session-store.mjs";
 
 export { authConfig, cors, ensureParaformSession, requireAuth };
@@ -169,8 +170,8 @@ function authExpired(cookie) {
   // Only a CONFIRMED expiry reaches here. It parks the store slot that
   // produced `cookie` (30 min) and invalidates the cache, so the NEXT
   // resolution tries the next candidate in order, but only while the process
-  // still holds that exact cookie.
-  notifyParaformSessionRejected({ cookie });
+  // still holds that exact cookie. With no known cookie nothing is parked.
+  if (cookie !== undefined) notifyParaformSessionRejected({ cookie });
   const error = new Error("AUTH_EXPIRED");
   error.code = "AUTH_EXPIRED";
   return error;
@@ -227,10 +228,10 @@ const authProbeDelayMs = () => {
 };
 
 async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) {
-  // One session for the whole ladder: every retry and every confirmation read
-  // sends the cookie this call started with. If nothing resolves, the raw call
-  // resolves (and fails) itself, after its own input validation, as before.
-  const cookie = await paraformCookie().catch(() => undefined);
+  // Every attempt sends one known cookie, and the confirmation reads test the
+  // cookie that got the last 401. If nothing resolves, the raw call resolves
+  // (and fails) itself, after its own input validation, as before.
+  let cookie = await paraformCookie().catch(() => undefined);
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await fn(cookie);
@@ -238,6 +239,10 @@ async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) 
       if (error?.code !== "PARAFORM_THROTTLED") throw error;
       if (attempt < delays.length) {
         await sleep(delays[attempt] + Math.floor(Math.random() * 250));
+        // Retry on a newer resolved session if one has landed meanwhile; an
+        // emptied cache (after a park) is not a session to move to.
+        const resolved = resolvedParaformCookie();
+        if (resolved !== null && resolved !== cookie) cookie = resolved;
         continue;
       }
       throw (await isParaformSessionActuallyExpired({ cookie }))
@@ -245,6 +250,22 @@ async function classifyThrottle(fn, { delays = paraformThrottleDelays() } = {}) 
         : error;
     }
   }
+}
+
+// A raw read got one 401 and no retries, so before the confirmation rounds
+// this spends the same waits the ladder would have, reading the identity
+// once after each. A throttle that clears at any step is not an expiry.
+async function rawReadSessionExpired(cookie, fetchImpl = fetch) {
+  for (const delay of paraformThrottleDelays()) {
+    await sleep(delay + Math.floor(Math.random() * 250));
+    try {
+      await trpcGetRaw("user.getCurrentUser", {}, 1, { cookie, fetchImpl });
+      return false;
+    } catch (error) {
+      if (error?.code !== "PARAFORM_THROTTLED") return false;
+    }
+  }
+  return isParaformSessionActuallyExpired({ cookie, fetchImpl });
 }
 
 // `cookie`: the session under test (the one that got the 401); defaults to
@@ -797,11 +818,11 @@ export async function candidateProfileInfo(
       signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
     },
   );
-  // This read does not ride the ladder, so serial reads of the same cookie
-  // decide: dead is AUTH_EXPIRED (and parks the session), anything else was
-  // throttling.
+  // This read does not ride the ladder, so the ladder's evidence is gathered
+  // on the same cookie: dead is AUTH_EXPIRED (and parks the session),
+  // anything else was throttling.
   if (response.status === 401) {
-    throw (await isParaformSessionActuallyExpired({ cookie, fetchImpl }))
+    throw (await rawReadSessionExpired(cookie, fetchImpl))
       ? authExpired(cookie)
       : throttled();
   }

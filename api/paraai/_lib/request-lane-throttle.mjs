@@ -37,7 +37,12 @@ import {
   requestLaneKv,
   requestLaneStoreConfigured,
 } from "./request-lane-store.mjs";
-import { paraformCookie, trpcGetRaw, trpcPostRaw } from "./core.mjs";
+import {
+  isParaformSessionActuallyExpired,
+  paraformCookie,
+  trpcGetRaw,
+  trpcPostRaw,
+} from "./core.mjs";
 import { reportParaformReadAuthFailure } from "./auth-probe.mjs";
 import { notifyParaformSessionRejected } from "../../_lib/paraform-session-store.mjs";
 
@@ -343,14 +348,19 @@ async function claimRequestLaneIdentityCheck({
 // cooldown armed by an earlier 401 blocks lane traffic, at most once per
 // interval. A lane call's own 401 no longer parks the store slot (a burst
 // throttle would drop the process onto the next candidate, eventually the
-// static env seal), so a 401 here is what moves the process off a dead slot,
-// and only while it still holds the exact cookie this read sent.
+// static env seal). A 401 here parks it only after two confirmation rounds
+// on the same cookie (at most four more reads) agree it is dead, and only
+// while the process still holds that cookie. That is what moves the lanes
+// off a dead slot. The check's own result is unchanged: its 401 is reported.
 async function identityRead() {
   const cookie = await paraformCookie();
   try {
     return await trpcGetRaw("user.getCurrentUser", {}, 1, { cookie });
   } catch (error) {
-    if (String(error?.code || "") === "PARAFORM_THROTTLED") {
+    if (
+      String(error?.code || "") === "PARAFORM_THROTTLED"
+      && (await isParaformSessionActuallyExpired({ cookie, rounds: 2 }))
+    ) {
       notifyParaformSessionRejected({ cookie });
     }
     throw error;
