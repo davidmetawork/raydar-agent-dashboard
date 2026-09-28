@@ -2,13 +2,17 @@
 export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
   "schema_version": 2,
   "algorithm": "sha256",
-  "file_count": 107,
-  "digest": "088ded91913c79b5972178c0b530e00b07e1c8d7f0c2bd1ac542c5098a5ca4a1",
+  "file_count": 108,
+  "digest": "8a6d71253bff2e028c0ef710a25502bc902b892ba0ab286a891a5829b917976d",
   "vercel_json_canonical_sha256": "ab148cb972a9b01608f881fdc14d64e736fe754aa938fc6070955112dc8d388e",
   "files": [
     {
       "path": ".vercelignore",
       "sha256": "e8189a6e58b3035f98b39daab3448c36a1bdb92884f55cd2a005472ebb907c20"
+    },
+    {
+      "path": "api/_lib/paraform-session-store.mjs",
+      "sha256": "9c7f7faa5c38734e04314fdc561c5ab98194328c708a503f5b48c07777fb1bab"
     },
     {
       "path": "api/_lib/paraform-telemetry-context.mjs",
@@ -208,7 +212,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-broker.mjs",
-      "sha256": "6256fc861b1e0dcb013c0fab56ef6e1c78565552fd36457a6b80fb39adc80548"
+      "sha256": "d2022991ed935237a4241a1cf49e088cd7a09ed86a75eb2ef8522dc9a2084b5b"
     },
     {
       "path": "api/submissions-v2/_lib/sequence-inbox-source.mjs",
@@ -348,7 +352,7 @@ export const SUBMISSIONS_V2_RELEASE_MANIFEST = Object.freeze({
     },
     {
       "path": "scripts/submissions-release.mjs",
-      "sha256": "c2193a2196530436894a1a7c3d1f0530efc87a14448a9aa4bcfc533ce9bfd200"
+      "sha256": "3819962f9258b8e4bef7a36800974844abfa6cc29ef7e487187975e9f9d78128"
     },
     {
       "path": "submissions-v2-purge/Dockerfile",
