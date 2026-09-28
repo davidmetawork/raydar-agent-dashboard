@@ -433,8 +433,16 @@ export async function inboxTrpcGet(
     } catch (error) {
       if (error?.code === "AUTH_EXPIRED") throw error;
       if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-        error.code = "PARAFORM_TIMEOUT";
-        error.retryable = true;
+        // AbortSignal.timeout() rejects with a DOMException whose `code` is a
+        // getter-only property: assigning it throws in strict mode, which
+        // turned every timed-out read into an unclassified, unretried failure
+        // ("Cannot set property code ... which has only a getter", seen
+        // 2026-09-28). Wrap it instead.
+        const timeout = new Error(`Paraform read timed out (${procedure})`);
+        timeout.code = "PARAFORM_TIMEOUT";
+        timeout.retryable = true;
+        timeout.cause = error;
+        error = timeout;
       }
       if (
         !error?.code

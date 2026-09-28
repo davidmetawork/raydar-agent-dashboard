@@ -569,3 +569,27 @@ test("Slack is told only when a person must act", async () => {
   await manual.handler({ method: "POST", headers: { "content-type": "application/json" }, body: {} }, mockResponse());
   assert.deepEqual(manual.calls.alerts, []);
 });
+
+test("a timed-out Paraform read is classified and retried, not a getter error", async () => {
+  const { inboxTrpcGet } = await import("../api/inbox/_lib/core.mjs");
+  const hooks = { current: () => "", reject: () => {}, resolve: async () => {} };
+  let calls = 0;
+  const flaky = async () => {
+    calls += 1;
+    if (calls === 1) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    return { status: 200, ok: true, json: async () => ({ result: { data: { json: ["ok"] } } }) };
+  };
+  assert.deepEqual(
+    await inboxTrpcGet("campaigns.getCampaignInboxData", {}, 2, 1_000, flaky, async () => {}, () => 0, hooks),
+    ["ok"],
+  );
+  assert.equal(calls, 2);
+
+  const alwaysSlow = async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+  await assert.rejects(
+    inboxTrpcGet("campaigns.getCampaignInboxData", {}, 1, 1_000, alwaysSlow, async () => {}, () => 0, hooks),
+    (error) => error.code === "PARAFORM_TIMEOUT" && error.retryable === true && error.cause?.name === "TimeoutError",
+  );
+});
