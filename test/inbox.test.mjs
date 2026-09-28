@@ -15,6 +15,8 @@ import {
   inboxReplyBucket,
   inboxSubmissionsProjectionCoverage,
   INBOX_SNAPSHOT_SCAN_COUNT,
+  __resetInboxSessionProbesForTests,
+  fallThroughDeadInboxSession,
   inboxTrpcGet,
   isInboxCuratedListCampaign,
   isInboxRoleOutreachCampaign,
@@ -1166,7 +1168,7 @@ test("manual sync refreshes one serial batch and proves the pause stayed owned",
       assert.equal(options.get, pacedGet);
       assert.equal(options.concurrency, 1);
       assert.equal(options.batchSize, 18);
-      assert.equal(options.budgetMs, 110_000);
+      assert.equal(options.budgetMs, 100_000);
       assert.equal(options.forceRefreshAfterMs, Date.parse(runStartedAt));
       return refresh;
     },
@@ -2020,5 +2022,205 @@ test("every Inbox entrypoint that reaches Paraform resolves the live session fir
       /await ensureSession\(\)/u,
       `api/inbox/${name} never awaits its session resolver`,
     );
+  }
+});
+
+function sessionHooks(initial) {
+  const state = { cookie: initial, rejects: 0, resolves: 0, next: "" };
+  return {
+    state,
+    hooks: {
+      current: () => state.cookie,
+      reject: () => { state.rejects += 1; state.cookie = ""; },
+      resolve: async () => {
+        state.resolves += 1;
+        if (!state.cookie) state.cookie = state.next;
+      },
+    },
+  };
+}
+
+const okJson = (json) => ({
+  status: 200,
+  ok: true,
+  json: async () => ({ result: { data: { json } } }),
+});
+const unauthorized = () => ({ status: 401, ok: false, json: async () => ({}) });
+const trpcName = (url) => String(url).split("?")[0].split("/trpc/")[1];
+
+test("a dead stored session is confirmed by two probes, parked, and retried on the next slot", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("dead-shared-seal");
+  state.next = "live-account-seal";
+  const calls = [];
+  const result = await inboxTrpcGet(
+    "campaigns.getListOfCampaignsOptimized",
+    {},
+    1,
+    1_000,
+    async (url, init) => {
+      if (trpcName(url) === "user.getCurrentUser") {
+        // Probes carry the exact refused cookie, never whatever is current.
+        calls.push([trpcName(url), init.headers.cookie.includes("dead-shared-seal")]);
+        return unauthorized();
+      }
+      calls.push([trpcName(url)]);
+      return calls.length === 1 ? unauthorized() : okJson(["catalog"]);
+    },
+    async () => {},
+    () => 0,
+    hooks,
+  );
+  // tries=1 (the paced manual sweep) still gets its one retry on the new slot.
+  assert.deepEqual(result, ["catalog"]);
+  assert.deepEqual(calls, [
+    ["campaigns.getListOfCampaignsOptimized"],
+    ["user.getCurrentUser", true],
+    ["user.getCurrentUser", true],
+    ["campaigns.getListOfCampaignsOptimized"],
+  ]);
+  assert.equal(state.rejects, 1);
+  assert.equal(state.resolves, 1);
+  assert.equal(state.cookie, "live-account-seal");
+});
+
+test("a 401 that either probe does not confirm is a throttle and keeps the live slot", async () => {
+  for (const probeStatuses of [[200], [401, 200]]) {
+    __resetInboxSessionProbesForTests();
+    const { state, hooks } = sessionHooks("live-shared-seal");
+    const probes = [...probeStatuses];
+    let dataCalls = 0;
+    let probeCalls = 0;
+    const result = await inboxTrpcGet(
+      "campaigns.example",
+      {},
+      2,
+      1_000,
+      async (url) => {
+        if (trpcName(url) === "user.getCurrentUser") {
+          probeCalls += 1;
+          return probes.shift() === 401 ? unauthorized() : okJson({ id: "u" });
+        }
+        dataCalls += 1;
+        return dataCalls === 1 ? unauthorized() : okJson(["complete"]);
+      },
+      async () => {},
+      () => 0,
+      hooks,
+    );
+    assert.deepEqual(result, ["complete"]);
+    assert.equal(probeCalls, probeStatuses.length);
+    assert.equal(state.rejects, 0);
+    assert.equal(state.resolves, 0);
+    assert.equal(state.cookie, "live-shared-seal");
+  }
+});
+
+test("a 401 after another read already moved the session retries on it without probing", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("dead-shared-seal");
+  const urls = [];
+  const result = await inboxTrpcGet(
+    "campaigns.getRecentReplies",
+    undefined,
+    1,
+    1_000,
+    async (url) => {
+      urls.push(trpcName(url));
+      if (urls.length === 1) {
+        // A concurrent read parked the dead slot while this one was in flight.
+        state.cookie = "live-account-seal";
+        return unauthorized();
+      }
+      return okJson([]);
+    },
+    async () => {},
+    () => 0,
+    hooks,
+  );
+  assert.deepEqual(result, []);
+  assert.deepEqual(urls, ["campaigns.getRecentReplies", "campaigns.getRecentReplies"]);
+  assert.equal(state.rejects, 0);
+  assert.equal(state.resolves, 1);
+});
+
+test("concurrent 401s on one cookie share a single probe run and park one slot", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("dead-shared-seal");
+  state.next = "live-account-seal";
+  let probes = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const probeFetch = async (url, init) => {
+    probes += 1;
+    assert.match(init.headers.cookie, /dead-shared-seal/u);
+    await gate;
+    return unauthorized();
+  };
+  const both = Promise.all([
+    fallThroughDeadInboxSession("dead-shared-seal", probeFetch, {
+      sleepImpl: async () => {}, randomImpl: () => 0, session: hooks,
+    }),
+    fallThroughDeadInboxSession("dead-shared-seal", probeFetch, {
+      sleepImpl: async () => {}, randomImpl: () => 0, session: hooks,
+    }),
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const outcomes = await both;
+  assert.equal(probes, 2); // two spaced rounds, once, not once per caller
+  assert.deepEqual(outcomes, ["moved", "moved"]);
+  assert.equal(state.rejects, 1);
+  assert.equal(state.cookie, "live-account-seal");
+
+  // Proven dead: a later 401 on the same cookie skips the probe entirely.
+  state.cookie = "dead-shared-seal";
+  const again = await fallThroughDeadInboxSession("dead-shared-seal", async () => {
+    throw new Error("must not probe a cookie already proven dead");
+  }, { sleepImpl: async () => {}, randomImpl: () => 0, session: hooks });
+  assert.equal(again, "moved");
+  assert.equal(state.rejects, 2);
+});
+
+test("a slot another read moved on during the probe is never parked", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("dead-shared-seal");
+  const outcome = await fallThroughDeadInboxSession(
+    "dead-shared-seal",
+    async (url, init) => {
+      assert.match(init.headers.cookie, /dead-shared-seal/u);
+      state.cookie = "live-account-seal";
+      return unauthorized();
+    },
+    { sleepImpl: async () => {}, randomImpl: () => 0, session: hooks },
+  );
+  assert.equal(outcome, "moved");
+  assert.equal(state.rejects, 0);
+  assert.equal(state.cookie, "live-account-seal");
+});
+
+test("a dead-cookie verdict expires after 30 minutes and the cookie is probed again", async () => {
+  __resetInboxSessionProbesForTests();
+  const { state, hooks } = sessionHooks("throttled-seal");
+  const opts = { sleepImpl: async () => {}, randomImpl: () => 0, session: hooks };
+  assert.equal(
+    await fallThroughDeadInboxSession("throttled-seal", async () => unauthorized(), opts),
+    "resolved",
+  );
+  assert.equal(state.rejects, 1);
+  const realNow = Date.now;
+  try {
+    state.cookie = "throttled-seal";
+    Date.now = () => realNow() + 31 * 60 * 1_000;
+    let probes = 0;
+    const outcome = await fallThroughDeadInboxSession("throttled-seal", async () => {
+      probes += 1;
+      return okJson({ id: "u" });
+    }, opts);
+    assert.equal(outcome, "kept");
+    assert.equal(probes, 1);
+    assert.equal(state.rejects, 1);
+  } finally {
+    Date.now = realNow;
   }
 });
