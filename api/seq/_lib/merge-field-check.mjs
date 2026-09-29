@@ -57,7 +57,7 @@ const PATTERNS = [
   ["typed_braces", /\{\{[^{}]{0,80}\}\}|\{[^{}]{0,80}\}/g],
   // `[First Name]`, `[Company]`, `[XX]`. Only brackets naming a fill-in
   // word, so ordinary copy such as `[Hybrid]` is left alone.
-  ["typed_brackets", /\[[^[\]]{0,40}\b(?:names?|first|last|company|role|title|position|job|link|candidate|recruiter|manager|insert|x+|tbd|todo)\b[^[\]]{0,40}\]/gi],
+  ["typed_brackets", /\[[^[\]]{0,40}\b(?:(?:first|last|full)[ _]?name|[fl]name|names?|company|title|position|link|candidate|recruiter|manager|salary|location|date|placeholder|insert|x+|tbd|todo)\b[^[\]]{0,40}\]/gi],
   // `<<First Name>>` (stored as &lt;&lt;...&gt;&gt;).
   ["typed_angles", /<<[^<>]{1,60}>>/g],
   // `*INSERT ROLE*`: the launcher template's fill-in marker, left unfilled.
@@ -72,9 +72,11 @@ const MAX_FINDINGS_PER_SEQUENCE = 40;
 const ATTRS = `(?:"[^"]*"|'[^']*'|[^'">])*`;
 const ANY_TAG = new RegExp(`<${ATTRS}>`, "g");
 // A token span, allowing one level of spans inside it (the editor can leave
-// an empty <span></span> before the name).
+// an empty <span></span> before the name). Plain text never consumes a span
+// tag, which keeps unclosed markup linear instead of cubic.
+const NOT_SPAN_TAG = "(?:(?!<\\/?span\\b)[\\s\\S])";
 const TOKEN_SPAN = new RegExp(
-  `<span\\b(?=${ATTRS}\\bdata-type\\s*=\\s*["']token["'])${ATTRS}>(?:<span\\b${ATTRS}>[\\s\\S]*?<\\/span>|[\\s\\S])*?<\\/span>`,
+  `<span\\b(?=${ATTRS}\\bdata-type\\s*=\\s*["']token["'])${ATTRS}>(?:${NOT_SPAN_TAG}|<span\\b${ATTRS}>${NOT_SPAN_TAG}*<\\/span>)*<\\/span>`,
   "gi",
 );
 const OPEN_TAG = new RegExp(`^<span\\b${ATTRS}>`, "i");
@@ -205,9 +207,9 @@ export function problemDigest(problems) {
 //   6. enabled sequences whose last check is older than the recheck window,
 //      because a step edit on a live sequence is invisible in the catalog
 // A switched-off, clean sequence is not re-read until it changes or is
-// switched on: it cannot send while it is off. Inside a bucket, a sequence
-// whose last read failed goes to the back, so one bad read cannot hold up
-// every pass.
+// switched on: it cannot send while it is off. A sequence whose last read
+// failed goes after all of these, oldest failure first, so a sequence that
+// always fails cannot hold up every pass.
 
 const DEFAULT_PLAN = Object.freeze({
   maxReads: 30,
@@ -226,6 +228,7 @@ export function planReads(catalog, records = {}, {
   failures = {},
 } = {}) {
   const buckets = [[], [], [], [], [], []];
+  const retries = [];
   for (const sequence of catalog) {
     const record = records[sequence.id];
     const checkedAt = Date.parse(record?.checkedAt ?? "");
@@ -240,16 +243,14 @@ export function planReads(catalog, records = {}, {
     else if (nameOf(record.name) !== nameOf(sequence.name)) { bucket = 3; reason = "renamed"; }
     else if (record.problems?.length && age >= recheckFlaggedMs) { bucket = 4; reason = "flagged_recheck"; }
     else if (live && age >= recheckEnabledMs) { bucket = 5; reason = "live_recheck"; }
-    if (bucket !== null) {
-      buckets[bucket].push({ id: sequence.id, reason, age, failedAt: Number.isFinite(failedAt) ? failedAt : -Infinity });
-    }
+    if (bucket === null) continue;
+    if (Number.isFinite(failedAt)) retries.push({ id: sequence.id, reason, failedAt });
+    else buckets[bucket].push({ id: sequence.id, reason, age });
   }
-  // Never-failed first, then oldest check first; ties keep catalog order.
-  for (const bucket of buckets) {
-    bucket.sort((a, b) => (a.failedAt === b.failedAt ? 0 : a.failedAt - b.failedAt)
-      || (b.age === a.age ? 0 : b.age - a.age));
-  }
-  const all = buckets.flat();
+  // Oldest check first; never-checked ones keep catalog order.
+  for (const bucket of buckets) bucket.sort((a, b) => (b.age === a.age ? 0 : b.age - a.age));
+  retries.sort((a, b) => a.failedAt - b.failedAt);
+  const all = [...buckets.flat(), ...retries];
   const cap = Math.max(0, Math.floor(Number(maxReads) || 0));
   return {
     reads: all.slice(0, cap).map(({ id, reason }) => ({ id, reason })),
@@ -346,6 +347,8 @@ function usableState(state) {
 }
 
 // Read failures that end the pass at once; the rest wait for the next one.
+// A tRPC FORBIDDEN is left out: it is more likely about one sequence than
+// the account, and a real refusal storm trips the three-in-a-row rule.
 const STOP_CODES = {
   AUTH_EXPIRED: "paraform_expired",
   PARAFORM_THROTTLED: "paraform_throttled",
@@ -354,10 +357,7 @@ const STOP_CODES = {
 const MAX_CONSECUTIVE_READ_ERRORS = 3;
 
 function stopCode(error) {
-  if (STOP_CODES[error?.code]) return STOP_CODES[error.code];
-  // A 403 arrives as a tRPC error body, not a status code.
-  if (/\b(?:FORBIDDEN|UNAUTHORIZED)\b/.test(String(error?.message ?? ""))) return "paraform_forbidden";
-  return null;
+  return STOP_CODES[error?.code] ?? null;
 }
 
 function flaggedCounts(catalog, records) {
@@ -393,7 +393,7 @@ export function flaggedDetail(state) {
 /**
  * One pass. Every dependency is injected; api/seq/merge-field-check.mjs
  * supplies the real ones. Reads are serial and spaced, and stop at the
- * soft deadline, at maxReads, at the first throttle, 403 or dead session,
+ * soft deadline, at maxReads, at the first throttle or dead session,
  * or after 3 failed reads in a row (the rest wait for the next pass). Only
  * the state and the Slack post are written; Paraform is only read.
  *

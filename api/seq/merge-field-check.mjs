@@ -22,7 +22,6 @@ import {
   requireAuth,
   trpcGet,
 } from "./_lib/core.mjs";
-import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import {
@@ -92,9 +91,12 @@ function publicSummary(state) {
 }
 
 // A scheduled tick that cannot authenticate would otherwise just read the
-// public counts, and the tile would take 3 h to notice.
+// public counts, and the tile would take 3 h to notice. Anyone can send the
+// cron header, so this posts at most hourly and never without KV.
 async function warnOnCronRejection(cron) {
-  if (await shouldAlert(`merge-field-check-cron-auth-${cron.reason}`, 3600)) {
+  const slot = await kv(["SET", `seq:v1:merge-field-check:cron-auth-alert:${cron.reason}`, "1", "NX", "EX", "3600"])
+    .catch(() => null);
+  if (slot === "OK") {
     await notifySlack(`:warning: A request to /api/seq/merge-field-check carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). Sequences are not being checked for typed merge fields while scheduled ticks cannot authenticate.`).catch(() => {});
   }
 }

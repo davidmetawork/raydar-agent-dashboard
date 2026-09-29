@@ -42,6 +42,7 @@ test("every placeholder shape the check promises to catch", () => {
   assert.deepEqual(kinds("<p>Hi {{first_name}}</p>"), ["typed_braces:{{first_name}}"]);
   assert.deepEqual(kinds("<p>Hi [First Name],</p>"), ["typed_brackets:[First Name]"]);
   assert.deepEqual(kinds("<p>[XX] years at [Company 2]</p>"), ["typed_brackets:[XX]", "typed_brackets:[Company 2]"]);
+  assert.deepEqual(kinds("<p>[FirstName] [first_name] [FNAME]</p>").length, 3);
   assert.deepEqual(kinds("<p>Hi &lt;&lt;First Name&gt;&gt;,</p>"), ["typed_angles:<<First Name>>"]);
   assert.deepEqual(kinds("<p>*INSERT ROLE* at Acme</p>"), ["insert_marker:*INSERT ROLE*"]);
   assert.deepEqual(kinds("<p>Hi &#123;First&#125;</p>"), ["typed_braces:{First}"]);
@@ -60,7 +61,11 @@ test("markup, styles and attribute order do not cause false alarms", () => {
   const reversed = '<span data-type="token" data-value="Candidate First Name">Candidate First Name</span>';
   assert.deepEqual(lintStepField(`<p>Hi ${reversed}</p>`), []);
   assert.deepEqual(lintStepField("<p>$3.1M Seed - Founding Engineer (remote) - 50% equity</p>"), []);
-  assert.deepEqual(lintStepField("<p>[Hybrid] role, [plus equity]; our Referral Link and Schedule Link</p>"), []);
+  assert.deepEqual(lintStepField("<p>[Hybrid] role, [plus equity], [First round], [see the job here]; our Referral Link and Schedule Link</p>"), []);
+  // Unclosed markup stays fast (the first version took over a minute on this).
+  const started = Date.now();
+  lintStepField(`<p>${'<span data-type="token">x '.repeat(4000)}</p>`);
+  assert.ok(Date.now() - started < 1000);
   // An empty span left inside a real field, and a ">" inside a style value.
   const nested = '<span data-value="Candidate First Name" data-type="token"><span></span>Candidate First Name</span>';
   assert.deepEqual(lintStepField(`<p>Hi ${nested}</p>`), []);
@@ -364,22 +369,38 @@ test("a pass where every read fails is not a good pass", async () => {
   assert.equal(h.state().lastOkAt, null);
 });
 
-test("429, 403 and three failed reads in a row each stop the pass", async () => {
+test("a 429 stops the pass at once; three failed reads in a row stop it too", async () => {
   const ids = ["a", "b", "c", "d", "e"];
   const catalog = () => ids.map((id) => ({ id, name: id, enabled: true }));
-  for (const [error, code] of [
-    [Object.assign(new Error("PARAFORM_HTTP_429"), { code: "PARAFORM_HTTP_429" }), "paraform_throttled"],
-    [new Error("FORBIDDEN"), "paraform_forbidden"],
-  ]) {
+  const throttled = Object.assign(new Error("PARAFORM_HTTP_429"), { code: "PARAFORM_HTTP_429" });
+  const h429 = harness({ catalog, campaigns: () => Object.fromEntries(ids.map((id) => [id, throttled])) });
+  assert.equal((await h429.run()).error, "paraform_throttled");
+  assert.equal(h429.calls.reads.length, 1);
+  for (const error of [new Error("FORBIDDEN"), new Error("HTTP 502")]) {
     const h = harness({ catalog, campaigns: () => Object.fromEntries(ids.map((id) => [id, error])) });
     const result = await h.run();
-    assert.equal(result.error, code);
-    assert.equal(h.calls.reads.length, 1, `${code} stops at once`);
+    assert.equal(result.error, "read_errors");
+    assert.equal(h.calls.reads.length, 3, `${error.message}: a storm stops after three`);
   }
-  const h = harness({ catalog, campaigns: () => Object.fromEntries(ids.map((id) => [id, new Error("HTTP 502")])) });
-  const result = await h.run();
-  assert.equal(result.error, "read_errors");
-  assert.equal(h.calls.reads.length, 3);
+});
+
+test("sequences that keep failing cannot starve the live rechecks", async () => {
+  const forbidden = new Error("FORBIDDEN");
+  const campaigns = { p1: forbidden, p2: forbidden, p3: forbidden, live: campaign("live", [step(1, GOOD_BODY)]) };
+  const catalog = () => [
+    ...["p1", "p2", "p3"].map((id) => ({ id, name: id, enabled: true })),
+    { id: "live", name: "live", enabled: true },
+  ];
+  const h = harness({ catalog, campaigns: () => campaigns, initialState: {
+    schema: STATE_SCHEMA,
+    records: { live: { name: "live", enabled: true, checkedAt: ago(7 * HOUR), problems: [] } },
+  } });
+  const first = await h.run();
+  assert.equal(first.error, "read_errors");
+  assert.deepEqual(h.calls.reads, ["p1", "p2", "p3"]);
+  h.advance(30 * 60 * 1000);
+  await h.run();
+  assert.equal(h.calls.reads[3], "live", "failed sequences now wait behind every other read");
 });
 
 test("a sequence whose read keeps failing goes to the back instead of blocking every pass", async () => {
