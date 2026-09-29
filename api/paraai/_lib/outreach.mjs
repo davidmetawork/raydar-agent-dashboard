@@ -86,6 +86,7 @@ import {
   readMailroomOutreachStatus,
   resetMailroomOutreachLaneCache,
 } from "./outreach-mailroom.mjs";
+import { replyPassConfig, runReplyPassStep } from "./outreach-reply-pass.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
@@ -3764,6 +3765,7 @@ export async function runOutreachTick({
   now = Date.now(),
   pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
   historyImpl = readSubmissionRequestHistory,
+  replyPassImpl = runReplyPassStep,
 } = {}) {
   if (!outreachExecutionEnabled(config)) {
     return {
@@ -3902,10 +3904,27 @@ export async function runOutreachTick({
       now,
       config,
     }).catch(() => ({ escalated: [] }));
+    // Reply auto-pass (David, 2026-09-29): pass the pending requests whose
+    // candidate said no, is off the market, or asked not to be contacted. It
+    // runs last, under this tick's brake, cadence and Gmail breaker, and its
+    // own failure never fails the tick (outreach-reply-pass.mjs).
+    const replyPass = await replyPassImpl({
+      history,
+      states: await listOutreachStates().catch(() => states),
+      config,
+      now,
+      assessImpl: assessOutreachThread,
+      assessmentPatchImpl: assessmentPatch,
+      historyImpl,
+    }).catch((error) => ({
+      enabled: true,
+      error: clean(error?.code || error?.message).slice(0, 120) || "reply_pass_failed",
+    }));
     return {
       enabled: true,
       processed: results.filter((result) => result.action === "sent").length,
       results,
+      replyPass,
       expiredUnsent: sweep.expiredUnsent,
       closedStaleExceptions: sweep.closed,
       expiryEscalations: expiry.escalated,
@@ -4187,6 +4206,13 @@ export async function outreachHealth({
     // Where new conversations start (2026-09-28). "mailroom" only takes effect
     // while the lane reads ready; otherwise they start in Gmail.
     newConversationTransport: config.transport,
+    // Reply auto-pass (2026-09-29): on unless PARAAI_REPLY_PASS=off.
+    replyPass: (({ enabled, recheckMs, assessLimit, passLimit }) => ({
+      enabled,
+      recheckMinutes: Math.round(recheckMs / 60_000),
+      assessLimit,
+      passLimit,
+    }))(replyPassConfig()),
     mailroomLane,
     // The last ENQUEUE_RECIPIENT_OUT_OF_SCOPE refusal (2026-09-29 incident).
     // `current` while it is recent and the lane still has the revision it was
