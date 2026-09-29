@@ -187,6 +187,46 @@ export function paraaiLane({ body }) {
   return OK(null, metrics);
 }
 
+/**
+ * The sequence merge-field check (api/seq/merge-field-check.mjs): typed
+ * placeholders such as {Candidate First Name} in Paraform sequence steps.
+ * Tier 2: the check's own cron posts the named Slack alert, so this tile
+ * only shows the state. A live sequence with a typed placeholder is DOWN
+ * (candidates are receiving it); a switched-off one is DEGRADED.
+ */
+export const MERGE_FIELD_CHECK_STALE_MIN = 180;
+export function sequenceMergeFields({ body, status }) {
+  if (!body || typeof body !== "object") return UNK(`unparseable body (HTTP ${status})`);
+  if (body.ok !== true) return UNK(String(body.error || `ok:false (HTTP ${status})`));
+  if (body.schema !== "raydar-seq-merge-field-check-v1") {
+    return UNK("response is not a merge-field check payload");
+  }
+  const pass = body.lastPass;
+  if (!pass) return UNK("the check has not run yet");
+  const metrics = {
+    lastPassAt: pass.at,
+    lastPassStatus: pass.status,
+    lastOkAt: body.lastOkAt,
+    flaggedLive: pass.flaggedLive,
+    flaggedOff: pass.flaggedOff,
+    neverChecked: pass.neverChecked,
+  };
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (Number(pass.flaggedLive) > 0) {
+    return DOWN(`${plural(pass.flaggedLive, "live sequence")} sending a typed placeholder`, metrics);
+  }
+  if (pass.status === "paused") return UNK("paused by the dashboard-readers brake", metrics);
+  const okAge = ageMin(body.lastOkAt);
+  if (okAge == null || okAge > MERGE_FIELD_CHECK_STALE_MIN) {
+    return DEG(`no good pass for ${okAge == null ? "ever" : `${okAge} min`}${pass.error ? ` (${pass.error})` : ""}`, metrics);
+  }
+  if (Number(pass.flaggedOff) > 0) {
+    return DEG(`${plural(pass.flaggedOff, "switched-off sequence")} holding a typed placeholder`, metrics);
+  }
+  if (pass.alertFailed) return DEG("found a problem but the Slack alert failed", metrics);
+  return OK(Number(pass.neverChecked) > 0 ? `${pass.neverChecked} not yet checked` : null, metrics);
+}
+
 export function seqHealth({ body }) {
   if (!body || typeof body !== "object") return UNK("unparseable body");
   // Assert this is actually the seq-health payload. An object that merely
@@ -631,7 +671,7 @@ export function gmailInboxDavid({ results, beats, gmailBackoffUntil, kvOk, probe
 export const EVALUATORS = {
   bookingDoorHold,
   bookingDoor, bridge, webviewStatus, paraformSession, okTrue, reachable, authGated,
-  schedulerDetail, reminderHealth, paraaiLane, seqHealth, bridgeMachine,
+  schedulerDetail, reminderHealth, paraaiLane, seqHealth, sequenceMergeFields, bridgeMachine,
   n8nWatchdog, beatLane, desktopRunner,
   vendorApi, googleWorkspace, neonDb, nativeReminders, upstashKv, slackTransport,
   n8nCloud,

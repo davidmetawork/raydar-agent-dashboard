@@ -173,6 +173,10 @@
       "schedule": "17 * * * *"
     },
     {
+      "path": "/api/seq/merge-field-check",
+      "schedule": "11,41 * * * *"
+    },
+    {
       "path": "/api/seq/booking-worker",
       "schedule": "3,13,23,33,43,53 * * * *"
     },
