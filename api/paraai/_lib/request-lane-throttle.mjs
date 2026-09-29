@@ -261,7 +261,7 @@ export async function recordRequestLaneRequest({
 
 export async function requestLaneCounters({
   now = Date.now(),
-  lanes = ["outreach", "expired"],
+  lanes = ["outreach", "expired", "reply"],
   kinds = ["job", "status"],
   kvImpl = requestLaneKv,
 } = {}) {

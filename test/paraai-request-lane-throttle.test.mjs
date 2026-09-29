@@ -117,6 +117,7 @@ function command([name, ...args]) {
       return next;
     }
     case "EXPIRE": return kv.has(args[0]) ? 1 : 0;
+    case "ZADD": zadd(args[0], args[args.length - 1]); return 1;
     case "ZREVRANGE": return [...(zsets.get(args[0]) || [])].reverse();
     case "EVAL": return evalScript(args);
     default: throw new Error(`unexpected KV command in test: ${name}`);
@@ -740,4 +741,89 @@ test("outreachHealth exposes the cooldown and the durable per-lane counters", as
   assert.ok(health.requestLaneThrottle.counters.byLane.outreach.status >= 1);
   assert.equal(health.requestLaneThrottle.cadenceSeconds, 120);
   assert.equal(health.requestLaneThrottle.ratePerMinute, 10);
+});
+
+// ── reply auto-pass rides the same tick, throttle and claims (2026-09-29) ──
+test("runOutreachTick passes a held off-market request through the real throttle and claim, and the next tick confirms it", async () => {
+  const { getOutreachState, saveOutreachState, recordOutreachException, listOutreachExceptions } =
+    await import("../api/paraai/_lib/outreach-store.mjs");
+  const { readSubmissionRequestClaim } = await import("../api/paraai/_lib/request-claim.mjs");
+  const now = Date.parse("2026-09-29T18:00:00.000Z");
+  const row = {
+    id: "req-held",
+    status: "pending",
+    candidateUserId: "cu-held",
+    candidateName: "Held Candidate",
+    roleId: "role-held",
+    roleName: "Software Engineer",
+    companyName: "Garage",
+    createdAtMs: now - 24 * 60 * 60 * 1000,
+  };
+  const created = await createOutreachState("cu-held", { candidateName: "Held Candidate" });
+  await saveOutreachState({
+    ...created,
+    threadId: "thread-held",
+    // Read within the recheck window, so these ticks make no Gmail call.
+    replyPassCheckedAt: new Date(now - 60_000).toISOString(),
+    offMarket: {
+      verdict: "OFF_MARKET",
+      detectedAt: "2026-09-14T15:54:12.000Z",
+      expiresAt: "2027-03-16T15:54:12.000Z",
+      reason: "test",
+      source: "model",
+    },
+  }, created.revision);
+  await recordOutreachException({ request: row, code: "OUTREACH_CANDIDATE_OFF_MARKET", stage: "candidate_safety" });
+
+  const paraformCalls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).startsWith(PARAFORM_BASE)) {
+      paraformCalls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+    }
+    return realFetch(url, init);
+  };
+  try {
+    const first = await runOutreachTick({
+      config: openOutreachConfig(),
+      now,
+      pauseState: async () => ({ paused: false }),
+      historyImpl: async () => [row],
+    });
+    assert.deepEqual(first.replyPass.attempted, [{ requestId: "req-held", cause: "off_market" }]);
+    assert.deepEqual(first.replyPass.confirmed, []);
+    // The next tick, after the lane's cadence window, reads Paraform's history
+    // as it always does and finds the request dismissed. (The fake KV ignores
+    // EX, so the cadence slot's expiry is simulated here.)
+    for (const key of [...kv.keys()]) if (/cadence/i.test(key)) kv.delete(key);
+    const second = await runOutreachTick({
+      config: openOutreachConfig(),
+      now: now + 5 * 60 * 1000,
+      pauseState: async () => ({ paused: false }),
+      historyImpl: async () => [{ ...row, status: "dismissed" }],
+    });
+    assert.deepEqual(second.replyPass.confirmed, [{ requestId: "req-held", cause: "off_market" }]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(paraformCalls.length, 1, "one mutation; confirmation rides the next tick's own history read");
+  assert.match(paraformCalls[0].url, /submissionRequest\.dismissSubmissionRequest/);
+  assert.deepEqual(paraformCalls[0].body.json, {
+    id: "req-held",
+    dismissReason: "Candidate is no longer looking for a new role.",
+  });
+  const claim = await readSubmissionRequestClaim("req-held");
+  assert.equal(claim.lane, "reply-pass");
+  assert.equal(claim.action, "pass");
+  const state = await getOutreachState("cu-held");
+  assert.equal(state.passedRequests["req-held"].cause, "off_market");
+  assert.deepEqual(state.pendingPasses, {});
+  const exception = (await listOutreachExceptions(50, { includeResolved: true }))
+    .find((item) => item.requestId === "req-held");
+  // The tick's stale-exception sweep runs first and closes it as no longer
+  // pending; the pass step's own resolve is then a no-op. Either way it is closed.
+  assert.equal(exception.status, "resolved");
+  assert.match(exception.resolution, /^(no_longer_pending_dismissed|passed_on_paraform:off_market)$/);
+  const counters = await requestLaneCounters({ now });
+  assert.equal(counters.byLane.reply.job, 1, "the pass is counted under its own lane");
 });
