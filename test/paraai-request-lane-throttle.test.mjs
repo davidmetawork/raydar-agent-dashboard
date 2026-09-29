@@ -744,7 +744,7 @@ test("outreachHealth exposes the cooldown and the durable per-lane counters", as
 });
 
 // ── reply auto-pass rides the same tick, throttle and claims (2026-09-29) ──
-test("runOutreachTick passes a held off-market request through the real throttle, claim and read-back", async () => {
+test("runOutreachTick passes a held off-market request through the real throttle and claim, and the next tick confirms it", async () => {
   const { getOutreachState, saveOutreachState, recordOutreachException, listOutreachExceptions } =
     await import("../api/paraai/_lib/outreach-store.mjs");
   const { readSubmissionRequestClaim } = await import("../api/paraai/_lib/request-claim.mjs");
@@ -763,7 +763,7 @@ test("runOutreachTick passes a held off-market request through the real throttle
   await saveOutreachState({
     ...created,
     threadId: "thread-held",
-    // Read within the recheck window, so this tick makes no Gmail call.
+    // Read within the recheck window, so these ticks make no Gmail call.
     replyPassCheckedAt: new Date(now - 60_000).toISOString(),
     offMarket: {
       verdict: "OFF_MARKET",
@@ -783,37 +783,47 @@ test("runOutreachTick passes a held off-market request through the real throttle
     }
     return realFetch(url, init);
   };
-  let reads = 0;
   try {
-    const result = await runOutreachTick({
+    const first = await runOutreachTick({
       config: openOutreachConfig(),
       now,
       pauseState: async () => ({ paused: false }),
-      historyImpl: async () => {
-        reads += 1;
-        return [{ ...row, status: paraformCalls.length ? "dismissed" : "pending" }];
-      },
+      historyImpl: async () => [row],
     });
-    assert.deepEqual(result.replyPass.passed, [{ requestId: "req-held", cause: "off_market", status: "dismissed" }]);
+    assert.deepEqual(first.replyPass.attempted, [{ requestId: "req-held", cause: "off_market" }]);
+    assert.deepEqual(first.replyPass.confirmed, []);
+    // The next tick, after the lane's cadence window, reads Paraform's history
+    // as it always does and finds the request dismissed. (The fake KV ignores
+    // EX, so the cadence slot's expiry is simulated here.)
+    for (const key of [...kv.keys()]) if (/cadence/i.test(key)) kv.delete(key);
+    const second = await runOutreachTick({
+      config: openOutreachConfig(),
+      now: now + 5 * 60 * 1000,
+      pauseState: async () => ({ paused: false }),
+      historyImpl: async () => [{ ...row, status: "dismissed" }],
+    });
+    assert.deepEqual(second.replyPass.confirmed, [{ requestId: "req-held", cause: "off_market" }]);
   } finally {
     globalThis.fetch = realFetch;
   }
-  assert.equal(paraformCalls.length, 1, "one mutation; the tick's history read and the read-back are injected");
+  assert.equal(paraformCalls.length, 1, "one mutation; confirmation rides the next tick's own history read");
   assert.match(paraformCalls[0].url, /submissionRequest\.dismissSubmissionRequest/);
   assert.deepEqual(paraformCalls[0].body.json, {
     id: "req-held",
     dismissReason: "Candidate is no longer looking for a new role.",
   });
-  assert.equal(reads, 2, "the tick's own read plus one read-back for the batch");
   const claim = await readSubmissionRequestClaim("req-held");
   assert.equal(claim.lane, "reply-pass");
   assert.equal(claim.action, "pass");
   const state = await getOutreachState("cu-held");
   assert.equal(state.passedRequests["req-held"].cause, "off_market");
+  assert.deepEqual(state.pendingPasses, {});
   const exception = (await listOutreachExceptions(50, { includeResolved: true }))
     .find((item) => item.requestId === "req-held");
+  // The tick's stale-exception sweep runs first and closes it as no longer
+  // pending; the pass step's own resolve is then a no-op. Either way it is closed.
   assert.equal(exception.status, "resolved");
-  assert.equal(exception.resolution, "passed_on_paraform:off_market");
+  assert.match(exception.resolution, /^(no_longer_pending_dismissed|passed_on_paraform:off_market)$/);
   const counters = await requestLaneCounters({ now });
   assert.equal(counters.byLane.reply.job, 1, "the pass is counted under its own lane");
 });

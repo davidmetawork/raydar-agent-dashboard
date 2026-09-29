@@ -3915,7 +3915,6 @@ export async function runOutreachTick({
       now,
       assessImpl: assessOutreachThread,
       assessmentPatchImpl: assessmentPatch,
-      historyImpl,
     }).catch((error) => ({
       enabled: true,
       error: clean(error?.code || error?.message).slice(0, 120) || "reply_pass_failed",
