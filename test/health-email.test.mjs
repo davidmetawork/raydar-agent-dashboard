@@ -229,6 +229,12 @@ test("paraai outreach: a Mailroom lane whose recipient pattern is not % is DEGRA
     mailroomLane: { ready: true, reason: null, laneRevision: 64 },
     mailroomScopeRefusal: { lane: "paraai-outreach-relief", laneRevision: 63, refusals: 9, current: false },
   })).state, "OK");
+
+  // Outreach switched off: the lane's scope is not this tile's concern.
+  assert.equal(paraaiOutreachEmail(payload({
+    approved: false,
+    mailroomLane: { ready: false, reason: "recipient_scope_narrowed", laneRevision: 62 },
+  })).state, "OK");
 });
 
 test("scheduler sender: reads the booking-door fetch — gmail:false is DOWN, no payload UNKNOWN", () => {

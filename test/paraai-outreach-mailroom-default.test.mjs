@@ -42,12 +42,14 @@ let gmail;
 let mailroom;
 let paraform;
 let slack;
+let slackFailing;
 
 function reset() {
   kv = new Map();
   zsets = new Map();
   calls = [];
   slack = [];
+  slackFailing = false;
   gmail = {
     searches: [],
     searchResults: [],
@@ -278,7 +280,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (href.startsWith(MAILROOM_BASE)) return mailroomRoute(href, init);
   if (href === SLACK_WEBHOOK) {
     slack.push(JSON.parse(init.body).text);
-    return new Response("ok", { status: 200 });
+    return new Response(slackFailing ? "down" : "ok", { status: slackFailing ? 500 : 200 });
   }
   throw new Error(`unexpected fetch in test: ${href}`);
 };
@@ -1276,17 +1278,24 @@ test("an out-of-scope refusal of a nudge stops its ladder and pages the lane onc
   const state = await getOutreachState("cu-fs");
   await saveOutreachState({ ...state, followup: { ...state.followup, dueAt: "2026-09-30T17:00:00.000Z" } }, state.revision);
   mailroom.lane.recipient_pattern = "__disabled__";
-  const staleReady = async () => ({ ready: true, reason: null, senderId: "david-sg", laneRevision: 63 });
+  // Stale for the routing read only; the page then reads the real lane.
+  let routed = false;
+  const staleOnce = async () => {
+    if (routed) return mailroomOutreachLaneReady();
+    routed = true;
+    return { ready: true, reason: null, senderId: "david-sg", laneRevision: 63 };
+  };
   const result = await withSlack(() => processDueFollowup("cu-fs", {
     config,
     // 10:00 Pacific, inside the dispatch window.
     now: Date.parse("2026-09-30T17:00:00Z"),
-    mailroomReadyImpl: staleReady,
+    mailroomReadyImpl: staleOnce,
     mailroomDeliveryImpl: instantDelivery,
   }));
   assert.equal(result.action, "canceled_mailroom_refused");
   assert.equal(slack.length, 1);
-  assert.match(slack[0], /outside the recipient scope/);
+  assert.match(slack[0], /outside the recipient scope of lane paraai-outreach-relief \(revision 63\)/);
+  assert.match(slack[0], /through Gmail until the lane's recipient pattern is set back to "%"/);
 });
 
 test("the scope detector and page copy cover every lane answer", async () => {
@@ -1319,4 +1328,103 @@ test("the scope detector and page copy cover every lane answer", async () => {
     mailroomScopeAlertCopy({ laneId, refused: false, lane: { ready: false, reason: "recipient_scope_unknown", laneRevision: 63 } }),
     /did not report its recipient pattern/,
   );
+});
+
+test("a live Mailroom conversation waits on a narrowed lane instead of moving to Gmail, then continues threaded", async () => {
+  await processMatchRequest(seedRequest("req-lv1", "cu-lv"), history(), sendOptions());
+  assert.equal(mailroom.enqueued.length, 1);
+  mailroom.lane.recipient_pattern = "__disabled__";
+  mailroom.lane.revision = 64;
+  resetMailroomOutreachLaneCache();
+  const second = seedRequest("req-lv2", "cu-lv", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  await withSlack(async () => {
+    await assert.rejects(
+      processMatchRequest(second, history(), sendOptions()),
+      (error) => error.code === "OUTREACH_MAILROOM_RETRY" && /recipient scope is not open/.test(error.message),
+    );
+  });
+  assert.equal(gmail.sent.length, 0, "replies on the SendGrid thread stay watched");
+  assert.equal(mailroom.enqueued.length, 1);
+  assert.equal(slack.length, 1, "the lane still pages");
+  let state = await getOutreachState("cu-lv");
+  assert.ok(state.mailroomConversation, "the Mailroom conversation is kept");
+  // Fixed: the waiting role continues on the same Mailroom conversation.
+  mailroom.lane.recipient_pattern = "%";
+  mailroom.lane.revision = 65;
+  resetMailroomOutreachLaneCache();
+  await processMatchRequest(second, history(), sendOptions());
+  assert.equal(gmail.sent.length, 0);
+  assert.equal(mailroom.enqueued.length, 2);
+  assert.ok(mailroom.enqueued[1].inReplyTo, "threaded onto the earlier Mailroom email");
+});
+
+test("a failing Slack is tried at most once per 15 minutes, and the page is not lost", async () => {
+  mailroom.lane.recipient_pattern = "__disabled__";
+  slackFailing = true;
+  await withSlack(async () => {
+    await processMatchRequest(seedRequest("req-sf1", "cu-sf1"), history(), sendOptions());
+    await processMatchRequest(seedRequest("req-sf2", "cu-sf2"), history(), sendOptions());
+  });
+  assert.equal(gmail.sent.length, 2, "both still go out through Gmail");
+  assert.equal(slack.length, 1, "one attempt, not one per request");
+  const alertKeys = () => [...kv.keys()].filter((key) => key.startsWith("paraai:outreach:exception-alert:"));
+  assert.equal(alertKeys().length, 1, "only the 15-minute attempt key is held; the page itself was released");
+  // Fifteen minutes later (the attempt key expires) with Slack back: it pages.
+  for (const key of alertKeys()) kv.delete(key);
+  slackFailing = false;
+  await withSlack(() => processMatchRequest(seedRequest("req-sf3", "cu-sf3"), history(), sendOptions()));
+  assert.equal(slack.length, 2);
+  assert.match(slack[1], /recipient pattern is not "%"/);
+});
+
+test("a nudge on a narrowed lane waits, and the lane pages", async () => {
+  await processMatchRequest(seedRequest("req-nw", "cu-nw"), history(), sendOptions());
+  const state = await getOutreachState("cu-nw");
+  await saveOutreachState({ ...state, followup: { ...state.followup, dueAt: "2026-09-30T17:00:00.000Z" } }, state.revision);
+  mailroom.lane.recipient_pattern = "__disabled__";
+  resetMailroomOutreachLaneCache();
+  const result = await withSlack(() => processDueFollowup("cu-nw", {
+    config: { ...config, transport: "gmail" },
+    now: Date.parse("2026-09-30T17:00:00Z"),
+    mailroomDeliveryImpl: instantDelivery,
+  }));
+  assert.equal(result.action, "mailroom_unavailable");
+  assert.equal(result.reason, "recipient_scope_narrowed");
+  assert.equal(mailroom.enqueued.length, 1);
+  assert.equal(slack.length, 1);
+  assert.match(slack[0], /is switched on, but its recipient pattern is not "%"/);
+});
+
+test("a refusal whose lane was reconfigured and reopened since routing is not charged to the new revision", async () => {
+  const { noteMailroomRecipientScope } = await import("../api/paraai/_lib/outreach.mjs");
+  const { getMailroomScopeRefusal } = await import("../api/paraai/_lib/outreach-store.mjs");
+  mailroom.lane.revision = 64; // routed under 62; narrowed at 63; reopened at 64
+  const result = await withSlack(() => noteMailroomRecipientScope({ source: "match", requestId: "req-sup", routedRevision: 62 }));
+  assert.equal(result.superseded, true);
+  assert.equal(slack.length, 0);
+  assert.equal(await getMailroomScopeRefusal(), null);
+});
+
+test("outreach health: a refusal stops being current after 30 minutes, and without the Mailroom transport it is judged by age alone", async () => {
+  const { outreachHealth } = await import("../api/paraai/_lib/outreach.mjs");
+  const key = "paraai:outreach:mailroom-scope-refusal";
+  const write = (minutesAgo) => kv.set(key, JSON.stringify({
+    version: 1,
+    lane: "paraai-outreach-relief",
+    laneRevision: 63,
+    firstAt: new Date(Date.now() - 60 * 60_000).toISOString(),
+    lastAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    refusals: 3,
+    lastSource: "match",
+    lastRequestId: "req-h",
+    laneReasonAfter: "ready",
+  }));
+  write(5);
+  assert.equal((await outreachHealth({ config })).mailroomScopeRefusal.current, true);
+  write(31);
+  assert.equal((await outreachHealth({ config })).mailroomScopeRefusal.current, false);
+  write(5);
+  const gmailOnly = await outreachHealth({ config: { ...config, transport: "gmail" } });
+  assert.equal(gmailOnly.mailroomLane, null);
+  assert.equal(gmailOnly.mailroomScopeRefusal.current, true);
 });
