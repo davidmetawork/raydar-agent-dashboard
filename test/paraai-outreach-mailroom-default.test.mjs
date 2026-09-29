@@ -1197,7 +1197,7 @@ test("an armed lane with a narrowed pattern sends new conversations by Gmail and
     assert.equal(gmail.sent.length, 2);
     assert.equal(slack.length, 1, "one line for the lane, not one per request");
     assert.match(slack[0], /paraai-outreach-relief \(revision 63\) is switched on, but its recipient pattern is not "%"/);
-    assert.match(slack[0], /through Gmail until the lane's recipient pattern is set back to "%"/);
+    assert.match(slack[0], /through Gmail until the lane's recipient pattern is set back to "%"; live Mailroom conversations and their nudges wait/);
     // Someone changes the lane (the revision moves) but leaves it narrowed:
     // that configuration pages again.
     mailroom.lane.revision = 64;

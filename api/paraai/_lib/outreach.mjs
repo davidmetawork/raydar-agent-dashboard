@@ -3416,7 +3416,7 @@ export function mailroomScopeAlertCopy({ laneId, lane, refused }) {
   if (lane?.ready) {
     next = `Yet the lane reads open ("%"), so these sends keep retrying on the Mailroom every 5 minutes and do not fall back to Gmail. Check the lane in the Mailroom Hub.`;
   } else if (MAILROOM_SCOPE_NOT_READY_REASONS.has(reason)) {
-    next = `New conversations go out through Gmail until the lane's recipient pattern is set back to "%".`;
+    next = `New conversations go out through Gmail until the lane's recipient pattern is set back to "%"; live Mailroom conversations and their nudges wait for that fix.`;
   } else if (lane?.transient || !reason) {
     next = `The lane could not be read to confirm; its recipient pattern must be "%".`;
   } else {
