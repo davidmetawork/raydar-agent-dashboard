@@ -3767,6 +3767,7 @@ export async function runOutreachTick({
   historyImpl = readSubmissionRequestHistory,
   replyPassImpl = runReplyPassStep,
 } = {}) {
+  const tickStartedAt = Date.now();
   if (!outreachExecutionEnabled(config)) {
     return {
       enabled: false,
@@ -3915,6 +3916,7 @@ export async function runOutreachTick({
       now,
       assessImpl: assessOutreachThread,
       assessmentPatchImpl: assessmentPatch,
+      startedAt: tickStartedAt,
     }).catch((error) => ({
       enabled: true,
       error: clean(error?.code || error?.message).slice(0, 120) || "reply_pass_failed",

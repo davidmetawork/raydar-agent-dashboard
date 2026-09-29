@@ -369,7 +369,7 @@ test("the per-tick cap counts Paraform attempts; the time budget and the Gmail b
   assert.equal(result.attempted.length, 3);
 
   const slow = harness({ states: [heldState("cu-slow")] });
-  slow.deps.clock = (() => { let t = 0; return () => (t += 50_000); })();
+  slow.deps.clock = (() => { let t = 0; return () => (t += 70_000); })();
   const late = await slow.run([request("s1", "cu-slow")]);
   assert.equal(late.stopped, "budget");
   assert.equal(slow.calls.dismissed.length, 0);
@@ -399,4 +399,27 @@ test("copy: the hiring manager sees a neutral reason, David sees why", () => {
     replyPassSlackLine({ request: request("r", "c", { name: "" }), cause: "do_not_contact" }),
     /for a candidate on Paraform, because they asked us not to contact them\.$/,
   );
+});
+
+test("an attempt whose request left Paraform's history is dropped after 14 days, with a note, never announced", async () => {
+  const h = harness({ states: [heldState("cu-m", { pendingPasses: { "r-gone": { at: iso(NOW - 15 * DAY), claimId: "c", cause: "off_market", request: { id: "r-gone" } } } })] });
+  const result = await h.run([]);
+  assert.deepEqual(result.confirmed, []);
+  assert.deepEqual(result.unverified, []);
+  const state = h.store.get("cu-m");
+  assert.deepEqual(state.pendingPasses, {});
+  assert.equal(state.journal.at(-1).event, "request_pass_unresolvable");
+  assert.equal(h.calls.slack.length, 0);
+  // Younger than that, it is kept and waits.
+  const young = harness({ states: [heldState("cu-y", { pendingPasses: { "r-gone": { at: iso(NOW - DAY), claimId: "c", cause: "off_market", request: { id: "r-gone" } } } })] });
+  await young.run([]);
+  assert.ok(young.store.get("cu-y").pendingPasses["r-gone"]);
+});
+
+test("the time budget counts from the start of the outreach tick", async () => {
+  const h = harness({ states: [heldState("cu-b")] });
+  h.deps.clock = () => 70_000;
+  const result = await h.run([request("b1", "cu-b")], { startedAt: 0 });
+  assert.equal(result.stopped, "budget");
+  assert.equal(h.calls.dismissed.length, 0);
 });

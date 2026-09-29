@@ -69,8 +69,13 @@ const DEFAULT_RECHECK_MINUTES = 30;
 const DEFAULT_ASSESS_LIMIT = 4;
 const DEFAULT_PASS_LIMIT = 3;
 // The worker function has a 120 s ceiling and the expired lane runs after
-// this tick, so this step stops starting new work after its own budget.
-const DEFAULT_BUDGET_MS = 45_000;
+// this tick, so this step starts no new work once the TICK (its sends
+// included) has run this long.
+const DEFAULT_BUDGET_MS = 60_000;
+// An attempted pass whose request has left Paraform's history entirely can
+// never be confirmed; after this long (past the 7-day request expiry) the
+// record is dropped with a journal note instead of being re-read forever.
+const MISSING_ROW_GIVE_UP_MS = 14 * 24 * 60 * 60 * 1000;
 // A decline older than this when the request arrived is not the candidate's
 // answer to it: that request stays held for David instead of being passed.
 const DECLINE_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
@@ -258,6 +263,8 @@ export async function runReplyPassStep({
   now = Date.now(),
   passConfig = replyPassConfig(),
   clock = Date.now,
+  // When the outreach tick began, so the budget covers the whole tick.
+  startedAt = null,
   // From outreach.mjs, injected so this module never imports it back.
   assessImpl,
   assessmentPatchImpl,
@@ -285,7 +292,7 @@ export async function runReplyPassStep({
     stopped: null,
   };
   if (!passConfig.enabled) return summary;
-  const started = clock();
+  const started = Number.isFinite(startedAt) ? startedAt : clock();
   const overBudget = () => clock() - started > passConfig.budgetMs;
   const historyById = new Map((history || []).map((row) => [clean(row?.id), row]));
 
@@ -313,6 +320,14 @@ export async function runReplyPassStep({
         const attempt = state.pendingPasses[requestId];
         const row = historyById.get(requestId);
         const status = clean(row?.status).toLowerCase();
+        if (!row && now - (finiteDate(attempt.at) ?? now) > MISSING_ROW_GIVE_UP_MS) {
+          const { [requestId]: _gone, ...kept } = next.pendingPasses;
+          next = appendOutreachJournal({ ...next, pendingPasses: kept }, "request_pass_unresolvable", {
+            requestId,
+            source: REPLY_PASS_LANE,
+          });
+          continue;
+        }
         if (!row || status === "pending") {
           // Not taken. Kept (and its claim kept) so it is never retried;
           // flagged once below.
