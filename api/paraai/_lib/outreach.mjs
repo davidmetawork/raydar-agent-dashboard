@@ -81,8 +81,10 @@ import {
   mailroomOutreachDedupeKey,
   mailroomOutreachLaneReady,
   mailroomReliefConfig,
+  MAILROOM_SCOPE_NOT_READY_REASONS,
   outreachTransportMode,
   readMailroomOutreachStatus,
+  resetMailroomOutreachLaneCache,
 } from "./outreach-mailroom.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
@@ -95,11 +97,13 @@ import {
   claimOutreachExceptionAlert,
   createOutreachState,
   getContactCapability,
+  getMailroomScopeRefusal,
   getOutreachState,
   listOutreachExceptions,
   listOutreachStates,
   probeOutreachStore,
   recordContactCapability,
+  recordMailroomScopeRefusal,
   recordOutreachException,
   releaseOutreachLock,
   releaseOutreachExceptionAlert,
@@ -1781,6 +1785,16 @@ export async function processMatchRequest(
     const laneReady = mailroomCandidate
       ? await mailroomReadyImpl().catch(() => ({ ready: false, reason: "lanes_unreadable" }))
       : { ready: false, reason: "not_applicable" };
+    if (mailroomCandidate && MAILROOM_SCOPE_NOT_READY_REASONS.has(clean(laneReady.reason))) {
+      // Routed exactly like a switched-off lane (Gmail for a new
+      // conversation), but a switched-on lane whose scope shuts candidates out
+      // is a misconfiguration, not a rollback, so it pages once per revision.
+      await noteMailroomRecipientScope({
+        source: "lane_read",
+        lane: laneReady,
+        requestId: request.id,
+      }).catch(() => null);
+    }
     if (priorMailroomClaim && (mode !== "send" || reliefTransport)) {
       const error = new Error("this request already has a Mailroom send open; drafts and relief must wait for it");
       error.code = "OUTREACH_MAILROOM_CLAIM_OPEN";
@@ -1828,9 +1842,14 @@ export async function processMatchRequest(
     }
     // A Mailroom blip must not move a live Mailroom conversation to a new Gmail
     // thread (its replies would stop being watched). Only a deliberate lane
-    // switch-off, a definite answer, sends it to Gmail.
-    if (mailroomCandidate && mailroomActive && !laneReady.ready && laneReady.transient) {
-      const error = new Error(`Mailroom lane unreadable (${laneReady.reason}); the conversation waits`);
+    // switch-off, a definite answer, sends it to Gmail. A narrowed recipient
+    // scope on a switched-on lane is a misconfiguration, not a switch-off, so
+    // the conversation waits for the fix too (the lane already paged above).
+    const scopeNarrowed = MAILROOM_SCOPE_NOT_READY_REASONS.has(clean(laneReady.reason));
+    if (mailroomCandidate && mailroomActive && !laneReady.ready && (laneReady.transient || scopeNarrowed)) {
+      const error = new Error(laneReady.transient
+        ? `Mailroom lane unreadable (${laneReady.reason}); the conversation waits`
+        : `Mailroom lane recipient scope is not open (${laneReady.reason}); the conversation waits`);
       error.code = "OUTREACH_MAILROOM_RETRY";
       throw error;
     }
@@ -2018,7 +2037,11 @@ export async function processMatchRequest(
           candidateName: contact.name || request.candidateName,
         });
       } catch (error) {
-        throw await mailroomDeliveryFailure(state, message, error);
+        const failure = await mailroomDeliveryFailure(state, message, error);
+        // The lane configuration this send was routed under, so a scope page
+        // is charged to the right revision.
+        if (failure.provablyUnsent) failure.routedLaneRevision = laneReady.laneRevision ?? null;
+        throw failure;
       }
       if (sent?.queued) {
         state = await saveOutreachState(appendOutreachJournal({
@@ -2697,6 +2720,7 @@ async function processDueMailroomFollowup(state, followup, {
   // failed hand-off (nothing enqueued) re-runs the window, reply and bounce
   // checks, so a nudge is never enqueued after a reply that came meanwhile.
   let inFlight = false;
+  let routedLaneRevision = null;
   if (onMailroom && clean(previousOutbox.mailroomDedupeKey)) {
     if (previousOutbox.status === "queued") inFlight = true;
     else if (previousOutbox.status === "claimed") {
@@ -2714,7 +2738,15 @@ async function processDueMailroomFollowup(state, followup, {
       return { action: "mailroom_window_closed", state };
     }
     const ready = await readyImpl().catch(() => ({ ready: false, reason: "lanes_unreadable" }));
+    routedLaneRevision = ready.laneRevision ?? null;
     if (!ready.ready) {
+      if (MAILROOM_SCOPE_NOT_READY_REASONS.has(clean(ready.reason))) {
+        await noteMailroomRecipientScope({
+          source: "lane_read",
+          lane: ready,
+          requestId: followup.ownerMatchId,
+        }).catch(() => null);
+      }
       // A disabled lane is David's rollback lever. A nudge held more than a day
       // past due is stale; drop it rather than send it late.
       if (finiteDate(followup.dueAt) <= now - DAY_MS) {
@@ -2815,7 +2847,16 @@ async function processDueMailroomFollowup(state, followup, {
   } catch (error) {
     const failure = await mailroomDeliveryFailure(state, message, error);
     if (failure.provablyUnsent) {
-      // A refused nudge is not worth chasing: stop the ladder quietly.
+      // A refused nudge is not worth chasing: stop the ladder quietly. A scope
+      // refusal is the lane's problem, though, and pages once per revision.
+      if (mailroomScopeRefusal(error)) {
+        await noteMailroomRecipientScope({
+          source: "followup",
+          requestId: followup.ownerMatchId,
+          routedRevision: routedLaneRevision,
+          readyImpl,
+        }).catch(() => null);
+      }
       state = await getOutreachState(state.candidateUserId);
       await stopLadder("followup_canceled_mailroom_refused", { code: clean(error?.code) });
       return { action: "canceled_mailroom_refused", state };
@@ -3334,6 +3375,108 @@ export async function escalateNearExpiry(request, code, { now = Date.now() } = {
   return { ...escalation, notified };
 }
 
+// ── Mailroom recipient scope (INCIDENT 2026-09-28/29) ────────────────────────
+// Lane paraai-outreach-relief was armed with its recipient pattern still
+// "__disabled__". It read ready, so every new conversation went to the
+// Mailroom, was refused ENQUEUE_RECIPIENT_OUT_OF_SCOPE, and retried every 5
+// minutes for 18 hours; nine candidates got no email, and each request's own
+// refusal line read like a one-off. Readiness now reads any pattern but "%" as
+// not ready (new conversations go through Gmail), and a scope problem pages
+// ONCE PER LANE REVISION, from whichever side sees it first: a lane read
+// (switched on, scope narrowed) or a refusal. Fixing the lane bumps its
+// revision, so a later relapse pages again.
+export const MAILROOM_SCOPE_REFUSAL_CODE = "ENQUEUE_RECIPIENT_OUT_OF_SCOPE";
+const MAILROOM_SCOPE_ALERT_TTL_SECONDS = 7 * 24 * 60 * 60;
+// Without a revision (lane unreadable, or an /api/lanes without one) several
+// causes share one key, so it re-arms sooner.
+const MAILROOM_SCOPE_ALERT_UNKNOWN_TTL_SECONDS = 6 * 60 * 60;
+// At most one Slack attempt per key per 15 minutes: the page runs inside a
+// candidate's lock, and a failing Slack must not be retried on every request.
+const MAILROOM_SCOPE_ALERT_ATTEMPT_SECONDS = 15 * 60;
+// Refused sends retry every 5 minutes, so a refusal older than this is over.
+const MAILROOM_SCOPE_REFUSAL_CURRENT_MS = 30 * 60 * 1000;
+
+export function mailroomScopeRefusal(error) {
+  return [error?.cause?.detail, error?.detail, error?.cause?.message, error?.message]
+    .some((value) => clean(value).includes(MAILROOM_SCOPE_REFUSAL_CODE));
+}
+
+export function mailroomScopeAlertCopy({ laneId, lane, refused }) {
+  const revision = lane?.laneRevision != null ? ` (revision ${lane.laneRevision})` : "";
+  const reason = clean(lane?.reason);
+  let what;
+  if (refused) {
+    what = `the Mailroom refused a candidate as outside the recipient scope of lane ${laneId}${revision}.`;
+  } else if (reason === "recipient_scope_unknown") {
+    what = `Mailroom lane ${laneId}${revision} is switched on, but the Mailroom did not report its recipient pattern.`;
+  } else {
+    what = `Mailroom lane ${laneId}${revision} is switched on, but its recipient pattern is not "%", so the Mailroom would refuse candidates outside it.`;
+  }
+  let next;
+  if (lane?.ready) {
+    next = `Yet the lane reads open ("%"), so these sends keep retrying on the Mailroom every 5 minutes and do not fall back to Gmail. Check the lane in the Mailroom Hub.`;
+  } else if (MAILROOM_SCOPE_NOT_READY_REASONS.has(reason)) {
+    next = `New conversations go out through Gmail until the lane's recipient pattern is set back to "%"; live Mailroom conversations and their nudges wait for that fix.`;
+  } else if (lane?.transient || !reason) {
+    next = `The lane could not be read to confirm; its recipient pattern must be "%".`;
+  } else {
+    next = `The lane now reads not ready (${reason}), so new conversations go out through Gmail.`;
+  }
+  return `📭 Para AI outreach: ${what} ${next}`;
+}
+
+// `source` is "lane_read" (an armed lane read narrowed; pass that answer as
+// `lane`), "match" or "followup" (a refusal). A refusal proves the cached
+// readiness answer stale, so the lane is read afresh before the page;
+// `routedRevision` is the revision the refused send was routed under.
+export async function noteMailroomRecipientScope({
+  source,
+  requestId = null,
+  lane = null,
+  routedRevision = null,
+  readyImpl = mailroomOutreachLaneReady,
+  notifyImpl = notifySlack,
+} = {}) {
+  const refused = source !== "lane_read";
+  const laneId = mailroomReliefConfig().lane;
+  let current = lane;
+  if (!current) {
+    resetMailroomOutreachLaneCache();
+    current = await readyImpl().catch(() => ({ ready: false, reason: "lanes_unreadable", transient: true }));
+  }
+  if (
+    refused && current?.ready && routedRevision != null &&
+    current.laneRevision != null && current.laneRevision !== routedRevision
+  ) {
+    // Reconfigured since this send was routed, and open again: the retry
+    // reads the lane afresh, so there is nothing to charge to the new revision.
+    return { record: null, alerted: false, superseded: true };
+  }
+  const record = refused
+    ? await recordMailroomScopeRefusal({
+      lane: laneId,
+      laneRevision: current?.laneRevision ?? null,
+      source,
+      requestId,
+      laneReasonAfter: current?.ready ? "ready" : clean(current?.reason) || null,
+    }).catch(() => null)
+    : null;
+  const revisionKnown = current?.laneRevision != null;
+  const alertKey = `mailroom-scope:${laneId}:r${revisionKnown ? current.laneRevision : "unknown"}`;
+  const attempt = await claimOutreachExceptionAlert(`${alertKey}:attempt`, {
+    ttlSeconds: MAILROOM_SCOPE_ALERT_ATTEMPT_SECONDS,
+  }).catch(() => false);
+  if (!attempt) return { record, alerted: false };
+  const claimed = await claimOutreachExceptionAlert(alertKey, {
+    ttlSeconds: revisionKnown ? MAILROOM_SCOPE_ALERT_TTL_SECONDS : MAILROOM_SCOPE_ALERT_UNKNOWN_TTL_SECONDS,
+  }).catch(() => false);
+  if (!claimed) return { record, alerted: false };
+  const notified = await notifyImpl(mailroomScopeAlertCopy({ laneId, lane: current, refused }))
+    .catch(() => false);
+  if (!notified) await releaseOutreachExceptionAlert(alertKey).catch(() => {});
+  return { record, alerted: Boolean(notified) };
+}
+
 export async function handleOutreachFailure(
   error,
   request,
@@ -3418,6 +3561,17 @@ export async function handleOutreachFailure(
       retryable: true,
     });
     const escalation = await escalateNearExpiry(request, code, { now });
+    // Out of the lane's recipient scope: the lane's problem, not this
+    // request's. One line per lane revision replaces the per-request line,
+    // and the refusal is recorded for outreach health.
+    if (mailroomScopeRefusal(error)) {
+      const scope = await noteMailroomRecipientScope({
+        source: "match",
+        requestId: request?.id || null,
+        routedRevision: error?.routedLaneRevision ?? null,
+      }).catch(() => null);
+      return { ...record, escalation, scope };
+    }
     const claimed = await claimOutreachExceptionAlert(`${request.id}:mailroom-refused`).catch(() => false);
     if (claimed) {
       await notifySlack(
@@ -4014,6 +4168,12 @@ export async function outreachHealth({
   const capability = config.storeConfigured
     ? await getContactCapability().catch(() => null)
     : null;
+  const mailroomLane = config.transport === "mailroom"
+    ? await mailroomOutreachLaneReady().catch(() => ({ ready: false, reason: "lanes_unreadable" }))
+    : null;
+  const scopeRefusal = config.storeConfigured
+    ? await getMailroomScopeRefusal().catch(() => null)
+    : null;
   const result = {
     approved: config.approved,
     dryRun: config.dryRun,
@@ -4027,8 +4187,16 @@ export async function outreachHealth({
     // Where new conversations start (2026-09-28). "mailroom" only takes effect
     // while the lane reads ready; otherwise they start in Gmail.
     newConversationTransport: config.transport,
-    mailroomLane: config.transport === "mailroom"
-      ? await mailroomOutreachLaneReady().catch(() => ({ ready: false, reason: "lanes_unreadable" }))
+    mailroomLane,
+    // The last ENQUEUE_RECIPIENT_OUT_OF_SCOPE refusal (2026-09-29 incident).
+    // `current` while it is recent and the lane still has the revision it was
+    // refused under (nobody has reconfigured the lane since).
+    mailroomScopeRefusal: scopeRefusal
+      ? {
+        ...scopeRefusal,
+        current: Date.now() - (Date.parse(scopeRefusal.lastAt) || 0) < MAILROOM_SCOPE_REFUSAL_CURRENT_MS &&
+          (mailroomLane?.laneRevision == null || mailroomLane.laneRevision === scopeRefusal.laneRevision),
+      }
       : null,
     mailbox: config.mailbox,
     executionReady: outreachExecutionEnabled(config),

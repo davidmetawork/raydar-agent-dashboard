@@ -340,6 +340,53 @@ export async function getContactCapability({ kvImpl = kv } = {}) {
   return parse(await kvImpl(["GET", CONTACT_CAPABILITY_KEY]), null);
 }
 
+// The last time the Mailroom refused a candidate as outside the lane's
+// recipient scope (ENQUEUE_RECIPIENT_OUT_OF_SCOPE). It belongs to the lane,
+// not to a request, so it is one record per lane revision: a later refusal on
+// the same revision only counts, and a reconfigured lane starts a new record.
+// Read by outreachHealth(). Single writer: noteMailroomRecipientScope().
+const MAILROOM_SCOPE_REFUSAL_KEY = "paraai:outreach:mailroom-scope-refusal";
+const MAILROOM_SCOPE_REFUSAL_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+export async function recordMailroomScopeRefusal(
+  {
+    lane,
+    laneRevision = null,
+    source,
+    requestId = null,
+    laneReasonAfter = null,
+  },
+  { kvImpl = kv, now = new Date() } = {},
+) {
+  const previous = parse(await kvImpl(["GET", MAILROOM_SCOPE_REFUSAL_KEY]), null);
+  const revision = laneRevision == null ? null : Number(laneRevision);
+  const sameConfig = previous?.lane === String(lane) && previous?.laneRevision === revision;
+  const at = now.toISOString();
+  const record = {
+    version: 1,
+    lane: String(lane),
+    laneRevision: revision,
+    firstAt: sameConfig ? previous.firstAt : at,
+    lastAt: at,
+    refusals: sameConfig ? (Number(previous.refusals) || 0) + 1 : 1,
+    lastSource: String(source),
+    lastRequestId: requestId ? String(requestId) : null,
+    laneReasonAfter: laneReasonAfter ? String(laneReasonAfter) : null,
+  };
+  await kvImpl([
+    "SET",
+    MAILROOM_SCOPE_REFUSAL_KEY,
+    JSON.stringify(record),
+    "EX",
+    MAILROOM_SCOPE_REFUSAL_TTL_SECONDS,
+  ]);
+  return record;
+}
+
+export async function getMailroomScopeRefusal({ kvImpl = kv } = {}) {
+  return parse(await kvImpl(["GET", MAILROOM_SCOPE_REFUSAL_KEY]), null);
+}
+
 // Fleet-wide Gmail stand-down. INCIDENT 2026-08-10: the mailbox's per-user
 // Gmail bucket was continuously exhausted (429 with a sliding Retry-After),
 // and because a pre-claim GMAIL_REQUEST_FAILED correctly leaves a request

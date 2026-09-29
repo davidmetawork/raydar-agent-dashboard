@@ -117,7 +117,8 @@ async function callMailroom(
 // PARAAI_OUTREACH_TRANSPORT=gmail is the code-side rollback. The Mailroom-side
 // rollback needs no deploy: disable the lane (or its SendGrid threading) in the
 // Hub and new conversations go back to Gmail on the next tick, because
-// mailroomOutreachLaneReady() stops answering true.
+// mailroomOutreachLaneReady() stops answering true. A recipient pattern other
+// than "%" has the same effect, and also pages once (see outreach.mjs).
 export const PARAAI_OUTREACH_MAILROOM_LANE = PARAAI_OUTREACH_RELIEF_LANE;
 const LANE_READY_CACHE_MS = 60_000;
 const DEFAULT_WAKE_POLL_ATTEMPTS = 6;
@@ -159,12 +160,29 @@ export function resetMailroomOutreachLaneCache() {
   laneReadyCache = null;
 }
 
+// Every candidate address has to be in the lane's scope. The Mailroom matches
+// the recipient against `recipient_pattern` with ILIKE, and only "%" admits
+// every candidate. INCIDENT 2026-09-28/29: the lane was armed with the pattern
+// still "__disabled__" (left by the 09-20..09-22 relief sweeps), read ready,
+// and every new conversation was refused ENQUEUE_RECIPIENT_OUT_OF_SCOPE for
+// 18 hours. A missing field (an older /api/lanes) is not proof of scope either.
+export const MAILROOM_SCOPE_NOT_READY_REASONS = new Set([
+  "recipient_scope_narrowed",
+  "recipient_scope_unknown",
+]);
+
+function laneScopeReason(lane) {
+  if (lane?.recipient_pattern == null) return "recipient_scope_unknown";
+  return lane.recipient_pattern === "%" ? null : "recipient_scope_narrowed";
+}
+
 // Ready means the lane can carry BOTH a fresh email and a threaded reply:
-// enabled, on an active SendGrid sender that replies to the mailbox, and with
-// SendGrid threading armed. A threaded row on a lane without threading parks
-// in review (THREADED_UNSUPPORTED_TRANSPORT), so a half-armed lane is not ready.
-// Never throws: an unreadable Mailroom reads as "not ready", which routes new
-// conversations to Gmail exactly as before.
+// enabled, open to every recipient, on an active SendGrid sender that replies
+// to the mailbox, and with SendGrid threading armed. A threaded row on a lane
+// without threading parks in review (THREADED_UNSUPPORTED_TRANSPORT), so a
+// half-armed lane is not ready. Never throws: an unreadable Mailroom reads as
+// "not ready", which routes new conversations to Gmail exactly as before.
+// `laneRevision` names the lane configuration the answer was read from.
 export async function mailroomOutreachLaneReady({
   config = mailroomReliefConfig(),
   fetchImpl = globalThis.fetch,
@@ -180,12 +198,17 @@ export async function mailroomOutreachLaneReady({
     const lane = (Array.isArray(body?.lanes) ? body.lanes : []).find(
       (row) => clean(row?.id) === config.lane,
     );
+    const laneRevision = lane?.revision != null && Number.isFinite(Number(lane.revision))
+      ? Number(lane.revision)
+      : null;
+    const notReady = (reason) => ({ ready: false, reason, laneRevision });
     if (!lane) value = { ready: false, reason: "lane_missing" };
-    else if (lane.enabled !== true) value = { ready: false, reason: "lane_disabled" };
-    else if (clean(lane.transport) !== "sendgrid") value = { ready: false, reason: "lane_not_sendgrid" };
-    else if (clean(lane.sender_status) !== "active") value = { ready: false, reason: "sender_inactive" };
-    else if (lane.sendgrid_threading_enabled !== true) value = { ready: false, reason: "threading_disabled" };
-    else value = { ready: true, reason: null, senderId: clean(lane.sender_id) || null };
+    else if (lane.enabled !== true) value = notReady("lane_disabled");
+    else if (laneScopeReason(lane)) value = notReady(laneScopeReason(lane));
+    else if (clean(lane.transport) !== "sendgrid") value = notReady("lane_not_sendgrid");
+    else if (clean(lane.sender_status) !== "active") value = notReady("sender_inactive");
+    else if (lane.sendgrid_threading_enabled !== true) value = notReady("threading_disabled");
+    else value = { ready: true, reason: null, senderId: clean(lane.sender_id) || null, laneRevision };
   } catch (error) {
     // A refused key is a definite answer (cached, not transient): retrying
     // quietly would only run the requests into their expiry pages.
@@ -304,6 +327,9 @@ export async function deliverViaMailroomOutreach({
         // recipient, validation) and holds no row under this key: provably
         // nothing was sent, so the caller may release its claim.
         if (status?.ok === true && Number(error?.status) >= 400 && Number(error?.status) < 500) {
+          // The lane changed under the cached readiness answer (switched off,
+          // or its scope narrowed): the next routing decision reads it afresh.
+          laneReadyCache = null;
           const refused = new OutreachMailroomError(
             "OUTREACH_MAILROOM_REFUSED",
             error?.detail || error?.message,

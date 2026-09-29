@@ -196,6 +196,47 @@ test("paraai outreach: ready payload OK; approved-but-not-ready DEGRADED; absent
   assert.equal(paraaiOutreachEmail({ results: {}, gmailBackoffUntil: null }).state, "UNKNOWN");
 });
 
+test("paraai outreach: a Mailroom lane whose recipient pattern is not % is DEGRADED (2026-09-29 incident)", () => {
+  const payload = (outreach) => ({
+    results: { "paraai-lane": { raw: { outreach: { approved: true, executionReady: true, newConversationTransport: "mailroom", ...outreach } } } },
+    gmailBackoffUntil: null,
+  });
+  const narrowed = paraaiOutreachEmail(payload({
+    mailroomLane: { ready: false, reason: "recipient_scope_narrowed", laneRevision: 62 },
+  }));
+  assert.equal(narrowed.state, "DEGRADED");
+  assert.match(narrowed.reason, /recipient pattern is not "%"/);
+  assert.equal(narrowed.metrics.mailroomLaneReason, "recipient_scope_narrowed");
+  assert.equal(narrowed.metrics.mailroomLaneReady, false);
+
+  assert.equal(paraaiOutreachEmail(payload({
+    mailroomLane: { ready: false, reason: "recipient_scope_unknown" },
+  })).state, "DEGRADED");
+
+  // A switched-off lane is David's rollback lever, not a fault.
+  assert.equal(paraaiOutreachEmail(payload({
+    mailroomLane: { ready: false, reason: "lane_disabled", laneRevision: 64 },
+  })).state, "OK");
+
+  const refusing = paraaiOutreachEmail(payload({
+    mailroomLane: { ready: true, reason: null, laneRevision: 63 },
+    mailroomScopeRefusal: { lane: "paraai-outreach-relief", laneRevision: 63, refusals: 9, current: true },
+  }));
+  assert.equal(refusing.state, "DEGRADED");
+  assert.match(refusing.reason, /refused 9 send\(s\) as out of recipient scope on lane revision 63/);
+
+  assert.equal(paraaiOutreachEmail(payload({
+    mailroomLane: { ready: true, reason: null, laneRevision: 64 },
+    mailroomScopeRefusal: { lane: "paraai-outreach-relief", laneRevision: 63, refusals: 9, current: false },
+  })).state, "OK");
+
+  // Outreach switched off: the lane's scope is not this tile's concern.
+  assert.equal(paraaiOutreachEmail(payload({
+    approved: false,
+    mailroomLane: { ready: false, reason: "recipient_scope_narrowed", laneRevision: 62 },
+  })).state, "OK");
+});
+
 test("scheduler sender: reads the booking-door fetch — gmail:false is DOWN, no payload UNKNOWN", () => {
   const down = schedulerSenderEmail({
     results: { "booking-door": { raw: { health: { checks: { gmail: false } } } } },

@@ -445,6 +445,10 @@ export function paraaiOutreachEmail({ results, gmailBackoffUntil }) {
       sendApproved: outreach.sendApproved,
       executionReady: outreach.executionReady,
       mailbox: outreach.mailbox || null,
+      ...(outreach.mailroomLane ? {
+        mailroomLaneReady: outreach.mailroomLane.ready === true,
+        mailroomLaneReason: outreach.mailroomLane.reason || null,
+      } : {}),
     } : {}),
     due: raw?.automation?.queue?.due,
   };
@@ -454,6 +458,17 @@ export function paraaiOutreachEmail({ results, gmailBackoffUntil }) {
   if (!outreach) return UNK("paraai health unavailable this tick", metrics);
   if (outreach.approved && outreach.executionReady === false) {
     return DEG("outreach approved but not execution-ready", metrics);
+  }
+  // INCIDENT 2026-09-28/29: an armed Mailroom lane whose recipient pattern was
+  // not "%" refused every new conversation for 18 hours. Same reason strings as
+  // MAILROOM_SCOPE_NOT_READY_REASONS in api/paraai/_lib/outreach-mailroom.mjs.
+  const laneReason = outreach.mailroomLane?.reason;
+  if (outreach.approved && (laneReason === "recipient_scope_narrowed" || laneReason === "recipient_scope_unknown")) {
+    return DEG(`Mailroom lane recipient pattern is not "%" (${laneReason}): new conversations fall back to Gmail`, metrics);
+  }
+  const refusal = outreach.mailroomScopeRefusal;
+  if (outreach.approved && refusal?.current === true) {
+    return DEG(`Mailroom refused ${refusal.refusals || 1} send(s) as out of recipient scope on lane revision ${refusal.laneRevision ?? "unknown"}`, metrics);
   }
   return OK(null, metrics);
 }
