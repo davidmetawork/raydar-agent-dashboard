@@ -182,6 +182,20 @@ export const CATALOG = [
     registry: "/products/sequences/",
   },
   {
+    id: "seq-merge-fields",
+    name: "Sequence merge fields",
+    group: "pipeline",
+    tier: 2,
+    kind: "pull",
+    probe: {
+      url: "https://monitor.raydar.xyz/api/seq/merge-field-check",
+      timeoutMs: 10000,
+      evaluate: "sequenceMergeFields",
+    },
+    registry: "/products/sequences/",
+    note: "Typed placeholders such as {Candidate First Name} in Paraform sequence steps, which Paraform sends word for word. The check's own cron posts the named alert; this tile never pages.",
+  },
+  {
     id: "inbox-health",
     name: "Inbox",
     group: "pipeline",
