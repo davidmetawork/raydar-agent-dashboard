@@ -194,11 +194,11 @@ export function paraaiLane({ body }) {
  * only shows the state. A live sequence with a typed placeholder is DOWN
  * (candidates are receiving it); a switched-off one is DEGRADED.
  */
-export const MERGE_FIELD_CHECK_STALE_MIN = 180;
+const MERGE_FIELD_CHECK_STALE_MIN = 180;
 export function sequenceMergeFields({ body, status }) {
   if (!body || typeof body !== "object") return UNK(`unparseable body (HTTP ${status})`);
   if (body.ok !== true) return UNK(String(body.error || `ok:false (HTTP ${status})`));
-  if (body.schema !== "raydar-seq-merge-field-check-v1") {
+  if (body.check !== "seq-merge-field-check") {
     return UNK("response is not a merge-field check payload");
   }
   const pass = body.lastPass;

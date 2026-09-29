@@ -22,6 +22,7 @@ import {
   requireAuth,
   trpcGet,
 } from "./_lib/core.mjs";
+import { shouldAlert } from "./_lib/booking-stop.mjs";
 import { paraformBackgroundPauseState } from "../_lib/paraform-background-pause.mjs";
 import { notifySlack } from "../paraai/_lib/core.mjs";
 import {
@@ -30,12 +31,16 @@ import {
   STATE_SCHEMA,
 } from "./_lib/merge-field-check.mjs";
 
-export const config = { maxDuration: 120 };
+// A pass stops reading at 75 s, but one read can still ride core.mjs's
+// 401 ladder (about 31 s, twice if it switches cookie) before the Slack post
+// and the state save. 300 s keeps a killed function (no state saved) out of
+// reach.
+export const config = { maxDuration: 300 };
 
 const STATE_KEY = "seq:v1:merge-field-check:state";
 const LOCK_KEY = "seq:v1:merge-field-check:lock";
 const STATE_TTL_SECONDS = 30 * 24 * 3600;
-const LOCK_TTL_SECONDS = 150;
+const LOCK_TTL_SECONDS = 330;
 
 async function kv(command, env = process.env) {
   const url = String(env.KV_REST_API_URL || "").replace(/\/+$/, "");
@@ -66,7 +71,7 @@ function publicSummary(state) {
   const lastPass = state?.schema === STATE_SCHEMA ? state.lastPass : null;
   return {
     ok: true,
-    schema: STATE_SCHEMA,
+    check: "seq-merge-field-check",
     lastOkAt: state?.lastOkAt ?? null,
     lastPass: lastPass && {
       at: lastPass.at,
@@ -74,7 +79,9 @@ function publicSummary(state) {
       error: lastPass.error ?? null,
       catalogSequences: lastPass.catalogSequences ?? null,
       liveSequences: lastPass.liveSequences ?? null,
+      stoppedAt: lastPass.stoppedAt ?? null,
       reads: lastPass.reads ?? null,
+      readErrors: lastPass.readErrors ?? null,
       deferred: lastPass.deferred ?? null,
       neverChecked: lastPass.neverChecked ?? null,
       flaggedLive: lastPass.flaggedLive ?? null,
@@ -84,12 +91,21 @@ function publicSummary(state) {
   };
 }
 
+// A scheduled tick that cannot authenticate would otherwise just read the
+// public counts, and the tile would take 3 h to notice.
+async function warnOnCronRejection(cron) {
+  if (await shouldAlert(`merge-field-check-cron-auth-${cron.reason}`, 3600)) {
+    await notifySlack(`:warning: A request to /api/seq/merge-field-check carried \`x-vercel-cron\` but no valid CRON_SECRET bearer (${cron.reason}). Sequences are not being checked for typed merge fields while scheduled ticks cannot authenticate.`).catch(() => {});
+  }
+}
+
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   const params = new URL(req.url, "http://x").searchParams;
   const cron = cronAuth(req);
   const run = cron.ok || params.get("run") === "1";
   const detail = params.get("detail") === "1";
+  if (!cron.ok && cron.headerPresent) await warnOnCronRejection(cron);
   if (!cron.ok && (run || detail) && !(await requireAuth(req, res))) return;
 
   if (!run) {
@@ -112,8 +128,9 @@ export default async function handler(req, res) {
       saveState,
       pauseState: () => paraformBackgroundPauseState("dashboardReaders"),
       sessionReady: async () => { await ensureParaformSession(); return hasCookie(); },
-      listCatalog: async () => (await trpcGet("campaigns.getListOfCampaignsOptimized", {}, 2)) || [],
-      readCampaign: (id) => trpcGet("campaigns.getCampaign", { campaign_id: id }, 2),
+      // One try each: a failed read waits for the next pass, not a retry.
+      listCatalog: () => trpcGet("campaigns.getListOfCampaignsOptimized", {}, 1),
+      readCampaign: (id) => trpcGet("campaigns.getCampaign", { campaign_id: id }, 1),
       send: notifySlack,
       exemptInsertIds: [CONFIG.TEMPLATE_ID],
       alert: params.get("dry") !== "1",

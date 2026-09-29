@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   alertText,
+  MAX_ALERT_SEQUENCES,
   lintCampaign,
   lintStepField,
   needsAlert,
@@ -40,6 +41,7 @@ test("every placeholder shape the check promises to catch", () => {
   const kinds = (html) => lintStepField(html).map((f) => `${f.kind}:${f.text}`);
   assert.deepEqual(kinds("<p>Hi {{first_name}}</p>"), ["typed_braces:{{first_name}}"]);
   assert.deepEqual(kinds("<p>Hi [First Name],</p>"), ["typed_brackets:[First Name]"]);
+  assert.deepEqual(kinds("<p>[XX] years at [Company 2]</p>"), ["typed_brackets:[XX]", "typed_brackets:[Company 2]"]);
   assert.deepEqual(kinds("<p>Hi &lt;&lt;First Name&gt;&gt;,</p>"), ["typed_angles:<<First Name>>"]);
   assert.deepEqual(kinds("<p>*INSERT ROLE* at Acme</p>"), ["insert_marker:*INSERT ROLE*"]);
   assert.deepEqual(kinds("<p>Hi &#123;First&#125;</p>"), ["typed_braces:{First}"]);
@@ -58,6 +60,12 @@ test("markup, styles and attribute order do not cause false alarms", () => {
   const reversed = '<span data-type="token" data-value="Candidate First Name">Candidate First Name</span>';
   assert.deepEqual(lintStepField(`<p>Hi ${reversed}</p>`), []);
   assert.deepEqual(lintStepField("<p>$3.1M Seed - Founding Engineer (remote) - 50% equity</p>"), []);
+  assert.deepEqual(lintStepField("<p>[Hybrid] role, [plus equity]; our Referral Link and Schedule Link</p>"), []);
+  // An empty span left inside a real field, and a ">" inside a style value.
+  const nested = '<span data-value="Candidate First Name" data-type="token"><span></span>Candidate First Name</span>';
+  assert.deepEqual(lintStepField(`<p>Hi ${nested}</p>`), []);
+  const quoted = '<span style="a>b" data-value="Curated List Link" data-type="token">Curated List Link</span>';
+  assert.deepEqual(lintStepField(`<p>${quoted}</p>`), []);
   assert.deepEqual(lintStepField(null), []);
 });
 
@@ -304,6 +312,16 @@ test("paused, stateless or a bad catalog: no campaign reads, and the last counts
   const shrank = await h2.run();
   assert.equal(shrank.error, "catalog_shrank");
   assert.equal(Object.keys(h2.state().records).length, 40);
+  const believed = await h2.run();
+  assert.equal(believed.status, "complete", "the same size twice in a row is a real delete");
+  assert.deepEqual(Object.keys(h2.state().records), ["x0"]);
+
+  // An empty catalog is never believed, however often it comes back.
+  rows = [];
+  const h3 = harness({ catalog: () => rows, campaigns: () => ({}), initialState: h2.state() });
+  assert.equal((await h3.run()).error, "catalog_shrank");
+  assert.equal((await h3.run()).error, "catalog_shrank");
+  assert.deepEqual(Object.keys(h3.state().records), ["x0"]);
 });
 
 test("a dead session or throttle stops the pass but keeps what was read", async () => {
@@ -335,11 +353,105 @@ test("the soft deadline and the read cap defer the rest to the next pass", async
   assert.equal(second.neverChecked, 3);
 });
 
+test("a pass where every read fails is not a good pass", async () => {
+  const boom = new Error("Unexpected token < in JSON");
+  const campaigns = { a: boom, b: boom };
+  const h = harness({ catalog: () => ["a", "b"].map((id) => ({ id, name: id, enabled: true })), campaigns: () => campaigns });
+  const result = await h.run();
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "read_errors");
+  assert.equal(result.readErrors, 2);
+  assert.equal(h.state().lastOkAt, null);
+});
+
+test("429, 403 and three failed reads in a row each stop the pass", async () => {
+  const ids = ["a", "b", "c", "d", "e"];
+  const catalog = () => ids.map((id) => ({ id, name: id, enabled: true }));
+  for (const [error, code] of [
+    [Object.assign(new Error("PARAFORM_HTTP_429"), { code: "PARAFORM_HTTP_429" }), "paraform_throttled"],
+    [new Error("FORBIDDEN"), "paraform_forbidden"],
+  ]) {
+    const h = harness({ catalog, campaigns: () => Object.fromEntries(ids.map((id) => [id, error])) });
+    const result = await h.run();
+    assert.equal(result.error, code);
+    assert.equal(h.calls.reads.length, 1, `${code} stops at once`);
+  }
+  const h = harness({ catalog, campaigns: () => Object.fromEntries(ids.map((id) => [id, new Error("HTTP 502")])) });
+  const result = await h.run();
+  assert.equal(result.error, "read_errors");
+  assert.equal(h.calls.reads.length, 3);
+});
+
+test("a sequence whose read keeps failing goes to the back instead of blocking every pass", async () => {
+  const throttled = Object.assign(new Error("PARAFORM_THROTTLED"), { code: "PARAFORM_THROTTLED" });
+  const campaigns = { stuck: throttled, b: campaign("b", [step(1, GOOD_BODY)]), c: campaign("c", [step(1, GOOD_BODY)]) };
+  const h = harness({ catalog: () => ["stuck", "b", "c"].map((id) => ({ id, name: id, enabled: true })), campaigns: () => campaigns });
+  await h.run();
+  assert.deepEqual(h.calls.reads, ["stuck"]);
+  h.advance(30 * 60 * 1000);
+  const second = await h.run();
+  assert.deepEqual(h.calls.reads.slice(1), ["b", "c", "stuck"]);
+  assert.equal(second.reads, 2);
+});
+
+test("more than one post's worth: only the named sequences are marked, the rest post next pass", async () => {
+  const ids = Array.from({ length: MAX_ALERT_SEQUENCES + 5 }, (_, i) => `s${String(i).padStart(2, "0")}`);
+  const campaigns = Object.fromEntries(ids.map((id) => [id, campaign(id, [step(1, TYPED_BODY)])]));
+  const h = harness({ catalog: () => ids.map((id) => ({ id, name: id, enabled: false })), campaigns: () => campaigns });
+  const first = await h.run({ plan: { maxReads: 100 } });
+  assert.equal(first.alertsDue, MAX_ALERT_SEQUENCES + 5);
+  assert.equal(first.alertsPosted, MAX_ALERT_SEQUENCES);
+  assert.match(h.calls.sends[0], /\+5 more, named in the next post/);
+  const second = await h.run();
+  assert.equal(second.alertsPosted, 5);
+  assert.match(h.calls.sends[1], /detail=s34/);
+  assert.doesNotMatch(h.calls.sends[1], /detail=s00/);
+  await h.run();
+  assert.equal(h.calls.sends.length, 2);
+});
+
+test("if the state cannot be saved, nothing is posted (no repeat post every pass)", async () => {
+  const campaigns = { s1: campaign("s1", [step(1, TYPED_BODY)]) };
+  const h = harness({ catalog: () => [{ id: "s1", name: "S1", enabled: true }], campaigns: () => campaigns });
+  const saveFails = async () => { throw new Error("KV write failed"); };
+  for (let i = 0; i < 3; i++) {
+    const result = await h.run({ saveState: saveFails });
+    assert.equal(result.error, "state_save_failed");
+  }
+  assert.equal(h.calls.sends.length, 0);
+});
+
+test("catalog quirks: duplicate ids read once, null names do not look renamed, a live template loses its exemption", async () => {
+  const campaigns = {
+    dup: campaign("dup", [step(1, GOOD_BODY)]),
+    nameless: campaign("nameless", [step(1, GOOD_BODY)]),
+    [TEMPLATE_ID]: campaign(TEMPLATE_ID, [step(1, "<p>*INSERT ROLE*</p>")]),
+  };
+  let templateLive = false;
+  const catalog = () => [
+    { id: "dup", name: "Dup", enabled: false },
+    { id: "dup", name: "Dup", enabled: false },
+    { id: "nameless", name: null, enabled: false },
+    { id: TEMPLATE_ID, name: "Template", enabled: templateLive },
+  ];
+  const h = harness({ catalog, campaigns: () => campaigns });
+  const first = await h.run();
+  assert.equal(first.reads, 3);
+  assert.equal(first.flaggedOff, 0);
+  h.advance(30 * 60 * 1000);
+  assert.equal((await h.run()).reads, 0, "nothing changed, nothing read");
+  templateLive = true;
+  h.advance(30 * 60 * 1000);
+  const live = await h.run();
+  assert.equal(live.flaggedLive, 1, "a switched-on template would send *INSERT ROLE*");
+  assert.match(h.calls.sends[0], /\*LIVE\*.*INSERT ROLE/);
+});
+
 // ---------- System Health tile ----------
 
 const summary = (lastPass, extra = {}) => ({
   ok: true,
-  schema: STATE_SCHEMA,
+  check: "seq-merge-field-check",
   lastOkAt: new Date().toISOString(),
   lastPass: { at: new Date().toISOString(), status: "complete", flaggedLive: 0, flaggedOff: 0, neverChecked: 0, ...lastPass },
   ...extra,
@@ -353,7 +465,7 @@ test("tile: DOWN for a live problem, DEGRADED for switched-off or stale, UNKNOWN
   assert.equal(sequenceMergeFields({ body: summary({ alertFailed: true }) }).state, "DEGRADED");
   assert.equal(sequenceMergeFields({ body: summary({ status: "error", error: "paraform_throttled" }, { lastOkAt: new Date(Date.now() - 4 * HOUR).toISOString() }) }).state, "DEGRADED");
   assert.equal(sequenceMergeFields({ body: summary({ status: "paused" }) }).state, "UNKNOWN");
-  assert.equal(sequenceMergeFields({ body: { ok: true, schema: STATE_SCHEMA, lastPass: null } }).state, "UNKNOWN");
+  assert.equal(sequenceMergeFields({ body: { ok: true, check: "seq-merge-field-check", lastPass: null } }).state, "UNKNOWN");
   assert.equal(sequenceMergeFields({ body: { ok: false, error: "state_unavailable" } }).state, "UNKNOWN");
   assert.equal(sequenceMergeFields({ body: { ok: true } }).state, "UNKNOWN");
   assert.equal(EVALUATORS.sequenceMergeFields, sequenceMergeFields);

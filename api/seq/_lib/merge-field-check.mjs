@@ -55,8 +55,9 @@ const KNOWN_VARIABLES = new Set(PARAFORM_MERGE_VARIABLES);
 const PATTERNS = [
   // `{Candidate First Name}` and `{{first_name}}`.
   ["typed_braces", /\{\{[^{}]{0,80}\}\}|\{[^{}]{0,80}\}/g],
-  // `[First Name]`, `[Company]`.
-  ["typed_brackets", /\[[A-Za-z][A-Za-z _.-]{0,40}\]/g],
+  // `[First Name]`, `[Company]`, `[XX]`. Only brackets naming a fill-in
+  // word, so ordinary copy such as `[Hybrid]` is left alone.
+  ["typed_brackets", /\[[^[\]]{0,40}\b(?:names?|first|last|company|role|title|position|job|link|candidate|recruiter|manager|insert|x+|tbd|todo)\b[^[\]]{0,40}\]/gi],
   // `<<First Name>>` (stored as &lt;&lt;...&gt;&gt;).
   ["typed_angles", /<<[^<>]{1,60}>>/g],
   // `*INSERT ROLE*`: the launcher template's fill-in marker, left unfilled.
@@ -66,7 +67,17 @@ const PATTERNS = [
 const MAX_HIT_CHARS = 80;
 const MAX_FINDINGS_PER_SEQUENCE = 40;
 
-const TOKEN_SPAN = /<span\b[^>]*\bdata-type\s*=\s*["']token["'][^>]*>[\s\S]*?<\/span>/gi;
+// Tag attributes are read with quoted values whole, so a ">" inside a style
+// value cannot end the tag early.
+const ATTRS = `(?:"[^"]*"|'[^']*'|[^'">])*`;
+const ANY_TAG = new RegExp(`<${ATTRS}>`, "g");
+// A token span, allowing one level of spans inside it (the editor can leave
+// an empty <span></span> before the name).
+const TOKEN_SPAN = new RegExp(
+  `<span\\b(?=${ATTRS}\\bdata-type\\s*=\\s*["']token["'])${ATTRS}>(?:<span\\b${ATTRS}>[\\s\\S]*?<\\/span>|[\\s\\S])*?<\\/span>`,
+  "gi",
+);
+const OPEN_TAG = new RegExp(`^<span\\b${ATTRS}>`, "i");
 const DATA_VALUE = /\bdata-value\s*=\s*(["'])([\s\S]*?)\1/i;
 
 const NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
@@ -92,14 +103,14 @@ export function visibleTextWithoutMergeFields(html) {
     .replace(/<(style|script)\b[\s\S]*?<\/\1\s*>/gi, " ")
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(TOKEN_SPAN, " ")
-    .replace(/<[^>]*>/g, " ");
+    .replace(ANY_TAG, " ");
   return decodeEntities(withoutFields).replace(/\s+/g, " ").trim();
 }
 
 function unknownVariables(html) {
   const found = [];
   for (const span of String(html ?? "").match(TOKEN_SPAN) || []) {
-    const openTag = span.slice(0, span.indexOf(">") + 1);
+    const openTag = span.match(OPEN_TAG)?.[0] ?? "";
     const value = decodeEntities(openTag.match(DATA_VALUE)?.[2] ?? "").trim();
     if (!KNOWN_VARIABLES.has(value)) found.push(value || "(empty)");
   }
@@ -107,9 +118,13 @@ function unknownVariables(html) {
 }
 
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// Longest first, so "Most Recent Company Name" is not also "Company Name".
+// Names that read as ordinary words in copy ("our Referral Link") are left
+// out; the rest never belong in an email as plain text. Longest first, so
+// "Most Recent Company Name" is one finding.
+const PLAIN_WORD_VARIABLES = new Set(["Company Name", "Role Title", "Schedule Link", "Referral Link"]);
 const BARE_VARIABLE = new RegExp(
-  `\\b(?:${[...PARAFORM_MERGE_VARIABLES].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|")})\\b`,
+  `\\b(?:${PARAFORM_MERGE_VARIABLES.filter((name) => !PLAIN_WORD_VARIABLES.has(name))
+    .sort((a, b) => b.length - a.length).map(escapeRegExp).join("|")})\\b`,
   "g",
 );
 
@@ -190,40 +205,50 @@ export function problemDigest(problems) {
 //   6. enabled sequences whose last check is older than the recheck window,
 //      because a step edit on a live sequence is invisible in the catalog
 // A switched-off, clean sequence is not re-read until it changes or is
-// switched on: it cannot send while it is off.
+// switched on: it cannot send while it is off. Inside a bucket, a sequence
+// whose last read failed goes to the back, so one bad read cannot hold up
+// every pass.
 
-export const DEFAULT_PLAN = Object.freeze({
+const DEFAULT_PLAN = Object.freeze({
   maxReads: 30,
   recheckEnabledMs: 6 * 3600 * 1000,
   recheckFlaggedMs: 2 * 3600 * 1000,
 });
 
 const isLive = (sequence) => sequence?.enabled === true;
+const nameOf = (value) => String(value ?? "");
 
 export function planReads(catalog, records = {}, {
   now = Date.now(),
   maxReads = DEFAULT_PLAN.maxReads,
   recheckEnabledMs = DEFAULT_PLAN.recheckEnabledMs,
   recheckFlaggedMs = DEFAULT_PLAN.recheckFlaggedMs,
+  failures = {},
 } = {}) {
   const buckets = [[], [], [], [], [], []];
   for (const sequence of catalog) {
     const record = records[sequence.id];
     const checkedAt = Date.parse(record?.checkedAt ?? "");
     const age = Number.isFinite(checkedAt) ? now - checkedAt : Infinity;
+    const failedAt = Date.parse(failures[sequence.id] ?? "");
     const live = isLive(sequence);
     let bucket = null;
     let reason = null;
     if (!record && live) { bucket = 0; reason = "new_live"; }
     else if (record && live && record.enabled !== true) { bucket = 1; reason = "switched_on"; }
     else if (!record) { bucket = 2; reason = "new"; }
-    else if (record.name !== sequence.name) { bucket = 3; reason = "renamed"; }
+    else if (nameOf(record.name) !== nameOf(sequence.name)) { bucket = 3; reason = "renamed"; }
     else if (record.problems?.length && age >= recheckFlaggedMs) { bucket = 4; reason = "flagged_recheck"; }
     else if (live && age >= recheckEnabledMs) { bucket = 5; reason = "live_recheck"; }
-    if (bucket !== null) buckets[bucket].push({ id: sequence.id, reason, age });
+    if (bucket !== null) {
+      buckets[bucket].push({ id: sequence.id, reason, age, failedAt: Number.isFinite(failedAt) ? failedAt : -Infinity });
+    }
   }
-  // Oldest check first inside a bucket; never-checked ones by catalog order.
-  for (const bucket of buckets) bucket.sort((a, b) => (b.age === a.age ? 0 : b.age - a.age));
+  // Never-failed first, then oldest check first; ties keep catalog order.
+  for (const bucket of buckets) {
+    bucket.sort((a, b) => (a.failedAt === b.failedAt ? 0 : a.failedAt - b.failedAt)
+      || (b.age === a.age ? 0 : b.age - a.age));
+  }
   const all = buckets.flat();
   const cap = Math.max(0, Math.floor(Number(maxReads) || 0));
   return {
@@ -248,7 +273,7 @@ export function needsAlert(record, live) {
 }
 
 const PARAFORM_SEQUENCE_URL = "https://www.paraform.com/sequences?detail=";
-const MAX_ALERT_SEQUENCES = 30;
+export const MAX_ALERT_SEQUENCES = 30;
 const MAX_HITS_PER_LINE = 3;
 
 // Slack mrkdwn treats &, < and > as control characters, even inside code.
@@ -266,18 +291,24 @@ function describeProblem(problem) {
   return `${where} ${problem.field} ${what}`;
 }
 
-/**
- * Slack text for the sequences that need an alert. Names the sequence and
- * step; carries no candidate data (the hits are template text).
- */
-export function alertText(items, { monitorUrl = "https://monitor.raydar.xyz/health" } = {}) {
-  const ordered = [...items].sort((a, b) => Number(b.live) - Number(a.live)
+/** Live ones first, then by name: the order the alert names them in. */
+export function orderAlertItems(items) {
+  return [...items].sort((a, b) => Number(b.live) - Number(a.live)
     || String(a.name).localeCompare(String(b.name)));
+}
+
+/**
+ * Slack text naming each sequence and step. Carries no candidate data (the
+ * hits are template text). `remaining`: due sequences left for the next
+ * post, because one post names at most MAX_ALERT_SEQUENCES.
+ */
+export function alertText(items, { remaining = 0 } = {}) {
+  const ordered = orderAlertItems(items);
   const liveCount = ordered.filter((item) => item.live).length;
   const head = liveCount
     ? `:rotating_light: ${liveCount} LIVE sequence${liveCount === 1 ? "" : "s"} will email candidates a typed placeholder word for word.`
     : ":warning: Switched-off sequences hold a typed placeholder that Paraform would send word for word if switched on.";
-  const lines = ordered.slice(0, MAX_ALERT_SEQUENCES).map((item) => {
+  const lines = ordered.map((item) => {
     const hits = item.problems.slice(0, MAX_HITS_PER_LINE).map(describeProblem);
     const more = item.problems.length > MAX_HITS_PER_LINE
       ? ` (+${item.problems.length - MAX_HITS_PER_LINE} more)`
@@ -285,8 +316,8 @@ export function alertText(items, { monitorUrl = "https://monitor.raydar.xyz/heal
     const name = slackEscape(item.name || item.id).replace(/\|/g, "/");
     return `• ${item.live ? "*LIVE*" : "off"}: <${PARAFORM_SEQUENCE_URL}${encodeURIComponent(item.id)}|${name}>: ${hits.join("; ")}${more}`;
   });
-  if (ordered.length > MAX_ALERT_SEQUENCES) {
-    lines.push(`• +${ordered.length - MAX_ALERT_SEQUENCES} more sequences: see the Sequence merge fields tile on ${monitorUrl}`);
+  if (remaining > 0) {
+    lines.push(`• +${remaining} more, named in the next post (all of them: signed-in https://monitor.raydar.xyz/api/seq/merge-field-check?detail=1)`);
   }
   return [
     head,
@@ -300,28 +331,36 @@ export function alertText(items, { monitorUrl = "https://monitor.raydar.xyz/heal
 export const STATE_SCHEMA = "raydar-seq-merge-field-check-v1";
 
 function freshState() {
-  return { schema: STATE_SCHEMA, records: {}, lastPass: null, lastOkAt: null };
+  return { schema: STATE_SCHEMA, records: {}, readFailures: {}, lastPass: null, lastOkAt: null };
 }
 
 function usableState(state) {
-  return state
-    && typeof state === "object"
-    && state.schema === STATE_SCHEMA
-    && state.records
-    && typeof state.records === "object"
-    && !Array.isArray(state.records)
-    ? state
-    : freshState();
+  if (!state
+    || typeof state !== "object"
+    || state.schema !== STATE_SCHEMA
+    || !state.records
+    || typeof state.records !== "object"
+    || Array.isArray(state.records)) return freshState();
+  if (!state.readFailures || typeof state.readFailures !== "object") state.readFailures = {};
+  return state;
 }
 
-function errorCode(error) {
-  if (error?.code === "AUTH_EXPIRED") return "paraform_expired";
-  if (error?.code === "PARAFORM_THROTTLED") return "paraform_throttled";
+// Read failures that end the pass at once; the rest wait for the next one.
+const STOP_CODES = {
+  AUTH_EXPIRED: "paraform_expired",
+  PARAFORM_THROTTLED: "paraform_throttled",
+  PARAFORM_HTTP_429: "paraform_throttled",
+};
+const MAX_CONSECUTIVE_READ_ERRORS = 3;
+
+function stopCode(error) {
+  if (STOP_CODES[error?.code]) return STOP_CODES[error.code];
+  // A 403 arrives as a tRPC error body, not a status code.
+  if (/\b(?:FORBIDDEN|UNAUTHORIZED)\b/.test(String(error?.message ?? ""))) return "paraform_forbidden";
   return null;
 }
 
-/** Counts for the public summary and the tile. No names. */
-export function flaggedCounts(catalog, records) {
+function flaggedCounts(catalog, records) {
   let flaggedLive = 0;
   let flaggedOff = 0;
   let neverChecked = 0;
@@ -354,10 +393,12 @@ export function flaggedDetail(state) {
 /**
  * One pass. Every dependency is injected; api/seq/merge-field-check.mjs
  * supplies the real ones. Reads are serial and spaced, and stop at the
- * soft deadline, at maxReads, or at the first throttle or dead session (the
- * rest wait for the next pass). Only the state and the Slack post are
- * written; Paraform is only read.
+ * soft deadline, at maxReads, at the first throttle, 403 or dead session,
+ * or after 3 failed reads in a row (the rest wait for the next pass). Only
+ * the state and the Slack post are written; Paraform is only read.
  *
+ * The state is saved before the post, and nothing is posted if that save
+ * fails, so a broken store cannot re-post the same alert every pass.
  * `alert: false` (a manual dry run) posts nothing and records no alert, so
  * the next real pass still posts.
  */
@@ -378,17 +419,17 @@ export async function runMergeFieldCheck({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const startedAt = clock();
+  const at = new Date(startedAt).toISOString();
   let state;
   try {
     state = usableState(await loadState());
   } catch {
     // Without the state every pass would re-read and re-alert everything,
     // so no state means no Paraform traffic at all.
-    return { ok: false, status: "error", error: "state_unavailable", at: new Date(startedAt).toISOString() };
+    return { ok: false, status: "error", error: "state_unavailable", at };
   }
 
   const finish = async (pass) => {
-    const at = new Date(startedAt).toISOString();
     // A pass that read nothing (paused, no session, bad catalog) keeps the
     // last known counts, so a live problem stays visible on the tile.
     const known = state.lastPass || {};
@@ -413,19 +454,25 @@ export async function runMergeFieldCheck({
     return finish({ status: "error", error: "no_session" });
   }
 
-  let catalog;
+  let raw;
   try {
-    catalog = await listCatalog();
+    raw = await listCatalog();
   } catch (error) {
-    return finish({ status: "error", error: errorCode(error) || "catalog_error" });
+    return finish({ status: "error", error: stopCode(error) || "catalog_error" });
   }
-  if (!Array.isArray(catalog)
-    || catalog.some((row) => !row || typeof row !== "object" || typeof row.id !== "string" || !row.id)) {
+  if (!Array.isArray(raw)
+    || raw.some((row) => !row || typeof row !== "object" || typeof row.id !== "string" || !row.id)) {
     return finish({ status: "error", error: "catalog_invalid" });
   }
-  // A short catalog is a bad read, not 200 deleted sequences: keep the state.
+  const seen = new Set();
+  const catalog = raw.filter((row) => !seen.has(row.id) && seen.add(row.id));
+  // A catalog half the size we track is more likely a bad read than a mass
+  // delete: keep the state. The same size twice in a row is believed; an
+  // empty one never is.
   const tracked = Object.keys(state.records).length;
-  if (tracked >= 20 && catalog.length < tracked / 2) {
+  if (tracked > 0 && catalog.length < tracked / 2
+    && (catalog.length === 0
+      || !(state.lastPass?.error === "catalog_shrank" && state.lastPass.catalogSequences === catalog.length))) {
     return finish({ status: "error", error: "catalog_shrank", catalogSequences: catalog.length, trackedSequences: tracked });
   }
 
@@ -437,35 +484,55 @@ export async function runMergeFieldCheck({
     // sequence back on is then a "switched_on" read.
     if (!isLive(row) && record.enabled === true) record.enabled = false;
   }
+  for (const id of Object.keys(state.readFailures)) {
+    if (!byId.has(id)) delete state.readFailures[id];
+  }
 
-  const { reads, deferred } = planReads(catalog, state.records, { now: startedAt, ...plan });
+  const { reads, deferred } = planReads(catalog, state.records, {
+    now: startedAt,
+    failures: state.readFailures,
+    ...plan,
+  });
+  const readReasons = {};
   let done = 0;
   let readErrors = 0;
+  let consecutiveErrors = 0;
   let stopped = null;
-  for (const { id } of reads) {
+  const failed = (id) => {
+    readErrors++;
+    consecutiveErrors++;
+    state.readFailures[id] = new Date(clock()).toISOString();
+  };
+  for (const { id, reason } of reads) {
     if (clock() - startedAt >= deadlineMs) { stopped = "deadline"; break; }
+    if (consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS) { stopped = "read_errors"; break; }
     await sleep(spacingMs);
     let campaign;
     try {
       campaign = await readCampaign(id);
     } catch (error) {
-      const code = errorCode(error);
+      failed(id);
+      const code = stopCode(error);
       if (code) { stopped = code; break; }
-      readErrors++;
       continue;
     }
     if (!campaign || typeof campaign !== "object" || !Array.isArray(campaign.steps)
       || (campaign.id !== undefined && campaign.id !== id)) {
-      readErrors++;
+      failed(id);
       continue;
     }
     done++;
+    consecutiveErrors = 0;
+    delete state.readFailures[id];
+    readReasons[reason] = (readReasons[reason] || 0) + 1;
     const row = byId.get(id);
-    const problems = lintCampaign({ ...campaign, id }, { exemptInsertIds });
+    // The template's marker is only intended while the template is off.
+    const problems = lintCampaign({ ...campaign, id }, { exemptInsertIds: isLive(row) ? [] : exemptInsertIds });
     const previous = state.records[id];
     state.records[id] = {
-      name: String(row.name ?? campaign.name ?? ""),
-      enabled: row.enabled === true,
+      // The catalog's name, exactly: the plan compares against it.
+      name: nameOf(row.name),
+      enabled: isLive(row),
       checkedAt: new Date(clock()).toISOString(),
       problems,
       digest: problemDigest(problems),
@@ -474,41 +541,50 @@ export async function runMergeFieldCheck({
     };
   }
 
-  let posted = 0;
-  let alertFailed = false;
-  const due = catalog
-    .filter((row) => needsAlert(state.records[row.id], isLive(row)))
-    .map((row) => ({ id: row.id, name: state.records[row.id].name, live: isLive(row), record: state.records[row.id] }));
-  if (alert && due.length) {
-    const delivered = await Promise.resolve()
-      .then(() => send(alertText(due.map(({ record, ...item }) => ({ ...item, problems: record.problems })))))
-      .then((value) => value === true)
-      .catch(() => false);
-    if (delivered) {
-      const at = new Date(clock()).toISOString();
-      for (const item of due) item.record.alerted = { digest: item.record.digest, live: item.live, at };
-      posted = due.length;
-    } else {
-      alertFailed = true; // not marked, so the next pass tries again
-    }
-  }
-
   const leftover = deferred + (reads.length - done - readErrors);
-  const fatal = stopped === "paraform_expired" || stopped === "paraform_throttled";
-  return finish({
+  const fatal = Boolean(stopped && stopped !== "deadline") || (done === 0 && readErrors > 0);
+  const pass = {
     status: fatal ? "error" : leftover > 0 || readErrors > 0 ? "partial" : "complete",
-    error: fatal ? stopped : null,
+    error: fatal ? (stopped && stopped !== "deadline" ? stopped : "read_errors") : null,
     stoppedAt: stopped,
     catalogSequences: catalog.length,
     liveSequences: catalog.filter(isLive).length,
     trackedSequences: Object.keys(state.records).length,
     reads: done,
+    readReasons,
     readErrors,
     deferred: leftover,
     ...flaggedCounts(catalog, state.records),
-    alertsDue: due.length,
-    alertsPosted: posted,
-    alertFailed,
     dryRun: !alert,
-  });
+  };
+
+  const due = orderAlertItems(catalog
+    .filter((row) => needsAlert(state.records[row.id], isLive(row)))
+    .map((row) => ({ id: row.id, name: state.records[row.id].name, live: isLive(row), problems: state.records[row.id].problems })));
+  const named = due.slice(0, MAX_ALERT_SEQUENCES);
+  let posted = 0;
+  let alertFailed = false;
+  if (alert && named.length) {
+    try {
+      await saveState(state);
+    } catch {
+      return finish({ ...pass, status: "error", error: "state_save_failed", alertsDue: due.length, alertsPosted: 0, alertFailed: true });
+    }
+    const delivered = await Promise.resolve()
+      .then(() => send(alertText(named, { remaining: due.length - named.length })))
+      .then((value) => value === true)
+      .catch(() => false);
+    if (delivered) {
+      const alertedAt = new Date(clock()).toISOString();
+      // Only the sequences the post named; the rest post next pass.
+      for (const item of named) {
+        const record = state.records[item.id];
+        record.alerted = { digest: record.digest, live: item.live, at: alertedAt };
+      }
+      posted = named.length;
+    } else {
+      alertFailed = true; // not marked, so the next pass tries again
+    }
+  }
+  return finish({ ...pass, alertsDue: due.length, alertsPosted: posted, alertFailed });
 }
