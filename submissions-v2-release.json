@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 108,
-  "digest": "57ee75e3e430930e4275b12f11a1a9773aa1818c37684fda004873cc18fe70a6",
+  "digest": "1f0588bcb1400fd5f6dfe410fa7c62bede10810587cc2ac188eba8b4fb0d3445",
   "vercel_json_canonical_sha256": "fa7369558444458a0713138adee6333287d816480c85f571730a51a3f69316aa",
   "files": [
     {
@@ -35,7 +35,7 @@
     },
     {
       "path": "api/paraai/_lib/core.mjs",
-      "sha256": "6a39433376700a74ea1a563d0182f6417dd496aa16ff54ab7d1c346cf484a1a1"
+      "sha256": "054338454c050e3938a8bb7ef4bdc206c50d355a25902c8c25e3a03bef007530"
     },
     {
       "path": "api/paraai/submission-notify.mjs",
