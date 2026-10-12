@@ -17,6 +17,7 @@ import {
   processMatchRequest,
   processMatchRequestBundleViaMailroom,
   readSubmissionRequestHistory,
+  readSubmissionRequestHistoryWithScope,
   recordExpiredExternalDelivery,
   releaseHeldOutreach,
   reviewHeldOutreach,
@@ -353,13 +354,14 @@ export default async function handler(req, res) {
     }
     if (action === "inspect-pending") {
       const [history, states] = await Promise.all([
-        readSubmissionRequestHistory(),
+        readSubmissionRequestHistoryWithScope(),
         listOutreachStates(),
       ]);
       return res.status(200).json({
         ok: true,
         action,
-        requests: pendingBackfillRequests(history, states),
+        scope: history.scope,
+        requests: pendingBackfillRequests(history.requests, states),
       });
     }
     if (action === "review-held") {

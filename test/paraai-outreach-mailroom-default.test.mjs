@@ -23,6 +23,11 @@ process.env.PARAFORM_SESSION_COOKIE = "Fe26.2*test-session*";
 process.env.MAILROOM_BASE = MAILROOM_BASE;
 process.env.MAILROOM_API_KEY = "mailroom-test-key";
 delete process.env.PARAAI_OUTREACH_TRANSPORT;
+// These tests drive transport, not whose requests are read. Their fake
+// history is never parsed into rows, so the agency read (2026-10-12) would
+// find none of David's and spend a second, scoped read the tight pace cap
+// here does not allow. The agency scope has its own suite.
+process.env.PARAAI_OUTREACH_AGENCY_VIEW = "off";
 delete process.env.SLACK_BOT_TOKEN;
 const { privateKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
