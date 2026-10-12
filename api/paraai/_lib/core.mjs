@@ -314,14 +314,14 @@ export async function trpcGet(proc, json = {}, tries = 3) {
   return classifyThrottle((cookie) => trpcGetRaw(proc, json, tries, { cookie }));
 }
 
-export async function trpcGetRaw(proc, json = {}, tries = 3, { cookie, fetchImpl = fetch } = {}) {
+export async function trpcGetRaw(proc, json = {}, tries = 3, { cookie, fetchImpl = fetch, timeoutMs = TRPC_TIMEOUT_MS } = {}) {
   const observedFetch = telemetryFetch(fetchImpl, "paraai");
   const url = `${PARAFORM_BASE}/trpc/${proc}?input=${encodeURIComponent(JSON.stringify(envelope(json)))}`;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
       const response = await observedFetch(url, {
         headers: await paraformHeaders(cookie),
-        signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await response.json().catch(() => null);
       if (!response.ok || body?.error) throw vendorError(response, body);

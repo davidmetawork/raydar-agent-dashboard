@@ -9,6 +9,7 @@ import {
   requestScope,
 } from "../api/paraai/_lib/outreach-scope.mjs";
 import {
+  measureAgencyRead,
   outreachBatch,
   readSubmissionRequestHistoryWithScope,
   requestOrdinal,
@@ -316,4 +317,29 @@ test("the reply pass never passes a teammate's request this lane did not email a
   assert.equal(passCauseFor(state, teammate("v-other"), now), null);
   assert.equal(passCauseFor(state, teammate("v-emailed"), now)?.cause, "off_market");
   assert.equal(passCauseFor(state, { ...teammate("d-own"), ownRequest: true }, now)?.cause, "off_market");
+});
+
+test("the agency-read measurement reports timing, size, split and staff ids, never candidates", async () => {
+  let t = 1_000;
+  const seen = [];
+  const ok = await measureAgencyRead({
+    scope: SCOPE,
+    clock: () => (t += 500),
+    readImpl: async (json, options) => {
+      seen.push({ json, options });
+      return { currentUserId: ME, requests: [row("d1"), vanessa("v1"), kyra("k1")] };
+    },
+  });
+  assert.deepEqual(seen[0], { json: { agencyView: true, recruiterFilter: [] }, options: { timeoutMs: 100_000 } });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.ms, 500);
+  assert.equal(ok.rows, 3);
+  assert.deepEqual(ok.userIds, { david: [ME], vanessa: ["user-vanessa"], kyra: ["user-kyra"] });
+  assert.ok(!JSON.stringify(ok).includes("Pat Q."));
+  const failed = await measureAgencyRead({
+    scope: SCOPE,
+    readImpl: async () => { throw Object.assign(new Error("slow"), { name: "TimeoutError", code: 23 }); },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, "23");
 });

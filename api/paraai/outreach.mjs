@@ -18,6 +18,7 @@ import {
   processMatchRequestBundleViaMailroom,
   readSubmissionRequestHistory,
   readSubmissionRequestHistoryWithScope,
+  measureAgencyRead,
   recordExpiredExternalDelivery,
   releaseHeldOutreach,
   reviewHeldOutreach,
@@ -350,6 +351,18 @@ export default async function handler(req, res) {
           remaining: result.state.followup.remaining,
           dueAt: result.state.followup.dueAt,
         } : null,
+      });
+    }
+    if (action === "measure-agency-read") {
+      const recruiterFilter = (Array.isArray(body.recruiterFilter) ? body.recruiterFilter : [])
+        .map((value) => String(value || "").trim())
+        .filter((value) => /^[a-z0-9]{10,40}$/i.test(value))
+        .slice(0, 10);
+      return res.status(200).json({
+        ok: true,
+        action,
+        recruiterFilter,
+        measurement: await measureAgencyRead({ recruiterFilter }),
       });
     }
     if (action === "inspect-pending") {
