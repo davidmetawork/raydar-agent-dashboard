@@ -94,6 +94,8 @@ import {
   recruiterShapeHint,
   requestScope,
   summarizeScope,
+  teammateRowScope,
+  teammateUserIds,
 } from "./outreach-scope.mjs";
 import { requestLaneKv } from "./request-lane-store.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
@@ -280,7 +282,7 @@ export function outreachExecutionEnabled(config = outreachConfig()) {
   );
 }
 
-// `scope` is requestScope()'s verdict for an agency-view row. Without one the
+// `scope` is teammateRowScope()'s verdict for a teammate's row. Without one the
 // row is David's own, which is what every caller saw before the agency read.
 export function normalizeSubmissionRequest(request, scope = null) {
   const candidate = request?.candidate || {};
@@ -416,16 +418,14 @@ export function normalizeExternalDeliveryEvidence(evidence, now = Date.now()) {
 
 const HISTORY_PROC = "submissionRequest.getRecruiterSubmissionRequestHistory";
 const usableRequest = (request) => request.id && request.candidateUserId && request.roleId;
-const AGENCY_READ_FAILED_KEY = "paraai:outreach:agency-read-failed";
-const AGENCY_READ_FAILED_SECONDS = 60 * 60;
+const TEAMMATE_READ_SLOT_KEY = "paraai:outreach:teammate-read-slot";
 const LAST_SCOPE_KEY = "paraai:outreach:last-scope";
 const TEAMMATE_WRITES_REFUSED_KEY = "paraai:outreach:teammate-writes-refused";
 const TEAMMATE_WRITES_REFUSED_SECONDS = 6 * 60 * 60;
 
 // The errors that stop a tick whatever is being read: a throttle, a dead
-// session, the lanes' own cooldown or pace cap. Anything else on the agency
-// read (a refusal, a timeout, an outage, an odd payload) falls back to David's
-// scoped read, which is what the lane read before 2026-10-12.
+// session, the lanes' own cooldown or pace cap. Any other failure of the
+// teammates' read only leaves teammates out of this tick.
 function stopsTheTick(error) {
   const code = String(error?.code || "");
   return (
@@ -438,111 +438,84 @@ function stopsTheTick(error) {
   );
 }
 
-async function readScopedHistory(trpcGetImpl) {
+// David's own requests: the read this lane has always made, unchanged.
+async function readOwnHistory(trpcGetImpl) {
   const result = await trpcGetImpl(HISTORY_PROC, { agencyView: false, recruiterFilter: [] });
   const rows = Array.isArray(result) ? result : (result?.requests || []);
   return rows.map((row) => normalizeSubmissionRequest(row)).filter(usableRequest);
 }
 
-// The request history the lane acts on, with how the agency read was scoped.
-// Since 2026-10-12 it is the agency view cut down to David's own requests and
-// the named teammates' (outreach-scope.mjs). Requests on any other seat,
-// Kyra's above all, never enter the lane: not the tick, the follow-ups, the
-// reply pass or an operator route. Whenever the agency read cannot be trusted
-// it falls back to David's scoped read, and remembers that for an hour so a
-// lasting problem costs one Paraform read per read, not two.
+// At most one teammates' read per interval for the tick (KV slot).
+async function claimTeammateReadSlot(scope, kvImpl) {
+  const claimed = await kvImpl([
+    "SET", TEAMMATE_READ_SLOT_KEY, String(Date.now()), "EX", scope.teammateReadSeconds, "NX",
+  ]).catch(() => null);
+  return Boolean(claimed);
+}
+
+// The request history the lane acts on (2026-10-12, "cover the whole
+// agency"). David's own read is exactly the one the lane always made. The
+// named teammates' requests come from a second, small read: the agency view
+// filtered to their Paraform user ids (outreach-scope.mjs). Kyra's seat is
+// never in that filter, so her requests are never fetched, and every returned
+// row is checked against the id and name it was asked for. The tick reads
+// teammates at most every PARAAI_OUTREACH_TEAMMATE_READ_SECONDS (default 10
+// minutes); on other ticks it sees David's requests only, and teammates'
+// nudges wait (teammateNudgeUnseen). Operator routes read both.
+// Measured 2026-10-12: the whole agency view is 1,558 rows, about 3.2 MB and
+// 11 to 20+ s (it timed out once at 20 s); the filtered read is 416 rows,
+// about 0.84 MB and 5 s.
 export async function readSubmissionRequestHistoryWithScope({
   scope = outreachScopeConfig(),
+  teammates = true,
   trpcGetImpl = trpcGet,
   kvImpl = requestLaneKv,
 } = {}) {
-  if (!scope.agencyView) {
-    return { requests: await readScopedHistory(trpcGetImpl), scope: { agencyView: false } };
-  }
-  const fallBack = async (reason, extra = {}, { remember = true } = {}) => {
-    if (remember) {
-      await kvImpl(["SET", AGENCY_READ_FAILED_KEY, reason, "EX", AGENCY_READ_FAILED_SECONDS]).catch(() => null);
-    }
-    return {
-      requests: await readScopedHistory(trpcGetImpl),
-      scope: { agencyView: true, fallback: reason, ...extra },
-    };
-  };
-  const remembered = await kvImpl(["GET", AGENCY_READ_FAILED_KEY]).catch(() => null);
-  if (remembered) {
-    return fallBack("agency_read_failed_recently", { cause: clean(remembered).slice(0, 80) }, { remember: false });
+  const own = await readOwnHistory(trpcGetImpl);
+  const ids = scope.agencyView ? teammateUserIds(scope) : [];
+  const base = { agencyView: scope.agencyView, teammates: scope.teammates, teammatesRead: false };
+  if (!ids.length || teammates === false) return { requests: own, scope: base };
+  if (teammates === "due" && !(await claimTeammateReadSlot(scope, kvImpl))) {
+    return { requests: own, scope: { ...base, reason: "teammate_read_not_due" } };
   }
   let result;
   try {
-    result = await trpcGetImpl(HISTORY_PROC, { agencyView: true, recruiterFilter: [] });
+    result = await trpcGetImpl(HISTORY_PROC, {
+      agencyView: true,
+      recruiterFilter: ids.map((entry) => entry.userId),
+    });
   } catch (error) {
     if (stopsTheTick(error)) throw error;
-    return fallBack("agency_read_failed", { cause: clean(error?.code || error?.name || "error").slice(0, 60) });
+    return {
+      requests: own,
+      scope: { ...base, reason: "teammate_read_failed", cause: clean(error?.code || error?.name || "error").slice(0, 60) },
+    };
   }
   const rows = Array.isArray(result) ? result : (Array.isArray(result?.requests) ? result.requests : []);
   const currentUserId = clean(result?.currentUserId);
-  if (!currentUserId) return fallBack("current_user_unknown");
-  const directory = recruiterDirectory(result);
+  const ownIds = new Set(own.map((request) => request.id));
   const entries = rows.map((row) => ({
     row,
-    scope: requestScope(row, { scope, currentUserId, directory }),
+    scope: teammateRowScope(row, { scope, ids, currentUserId }),
     status: lower(row?.status),
-    candidateUserId: clean(row?.candidate?.candidate_user_id || row?.candidate_user_id),
   }));
-  const blind = entries.find((entry) => entry.scope.unidentifiable);
-  if (blind) {
-    // Nothing trustworthy says whose this row is, so David's own rows cannot
-    // be told apart either. Keep him whole with the scoped read.
-    return fallBack("recruiter_identity_missing", {
-      excluded: blind.scope.excluded,
-      shape: recruiterShapeHint(blind.row),
-    });
-  }
-  // David's history is never empty, so an agency read without one row of his
-  // is not a read to trust (a different currentUserId, a filtered view, rows
-  // under another field). Keep him whole with the scoped read.
-  if (!entries.some((entry) => entry.scope.own)) return fallBack("no_own_rows");
-  // Any id once seen as Kyra's is Kyra's on every row, named or not.
-  const protectedIds = new Set(
-    entries
-      .filter((entry) => entry.scope.excluded === "protected_recruiter" && entry.scope.userId)
-      .map((entry) => entry.scope.userId),
-  );
-  for (const entry of entries) {
-    if (!entry.scope.own && protectedIds.has(entry.scope.userId)) {
-      entry.scope = { ...entry.scope, covered: false, excluded: "protected_recruiter" };
-    }
-  }
-  // A teammate's request is left out when the same candidate also has one on
-  // any seat the lane does not cover (Kyra's, an unnamed or unlisted seat):
-  // that candidate may be one of Kyra's.
-  const guardedCandidates = new Set(
-    entries
-      .filter((entry) => !entry.scope.own && !entry.scope.covered && entry.candidateUserId)
-      .map((entry) => entry.candidateUserId),
-  );
-  for (const entry of entries) {
-    if (!entry.scope.own && entry.scope.covered && guardedCandidates.has(entry.candidateUserId)) {
-      entry.scope = { ...entry.scope, covered: false, excluded: "candidate_on_uncovered_seat" };
-    }
-  }
-  const requests = entries
-    .filter((entry) => entry.scope.covered)
-    .map((entry) => normalizeSubmissionRequest(entry.row, entry.scope))
-    .filter(usableRequest);
+  const requests = [
+    ...own,
+    ...entries
+      .filter((entry) => entry.scope.covered && !ownIds.has(clean(entry.row?.id)))
+      .map((entry) => normalizeSubmissionRequest(entry.row, entry.scope))
+      .filter(usableRequest),
+  ];
   return {
     requests,
-    scope: {
-      agencyView: true,
-      fallback: null,
-      teammates: scope.teammates,
-      byRecruiter: summarizeScope(entries),
-    },
+    scope: { ...base, teammatesRead: true, byRecruiter: summarizeScope(entries) },
   };
 }
 
-export async function readSubmissionRequestHistory() {
-  return (await readSubmissionRequestHistoryWithScope()).requests;
+// Operator routes and read-backs see teammates' requests too, unless asked
+// not to (a read-back of David's own request needs only his read).
+export async function readSubmissionRequestHistory({ teammates = true } = {}) {
+  return (await readSubmissionRequestHistoryWithScope({ teammates })).requests;
 }
 
 // Operator-only measurement (2026-10-12): the first live agency read timed
@@ -600,7 +573,8 @@ export async function measureAgencyRead({
 
 // What the last tick's read covered, for health (best effort, a day).
 export async function recordLastOutreachScope(scope, { now = Date.now(), kvImpl = requestLaneKv } = {}) {
-  if (!scope) return;
+  // Keep the last teammates' read (or its failure) visible between reads.
+  if (!scope || scope.reason === "teammate_read_not_due") return;
   await kvImpl([
     "SET",
     LAST_SCOPE_KEY,
@@ -1520,13 +1494,13 @@ export function planDeliveredMatch(state, {
   });
 }
 
-async function markReachedOut(requestId) {
+async function markReachedOut(requestId, { teammates = false } = {}) {
   await paraformOutreachWrite("mark_reached_out", () => trpcPost(
     "submissionRequest.markReachedOutToCandidate",
     { id: requestId },
     1,
   ));
-  const history = await readSubmissionRequestHistory();
+  const history = await readSubmissionRequestHistory({ teammates });
   const visible = history.find((request) => request.id === requestId);
   if (!visible?.reachedOut) {
     const error = new Error("Paraform reached-out marker did not read back");
@@ -2481,7 +2455,7 @@ async function markRequestReachedOut(state, request) {
     }, "paraform_reached_out_already_visible", { requestId: request.id }), state.revision);
   } else {
     try {
-      await markReachedOut(request.id);
+      await markReachedOut(request.id, { teammates: request.ownRequest === false });
       state = await saveOutreachState(appendOutreachJournal({
         ...state,
         matches: {
@@ -3604,6 +3578,10 @@ export async function sweepExpiryEscalations({
     const requestId = clean(request?.id);
     if (!requestId) continue;
     if (!REQUEST_STATUSES.has(lower(request?.status))) continue;
+    // A teammate's request (2026-10-12) warns only once the lane has tried it
+    // and been held: the first teammates' read finds a backlog the batch works
+    // through over the next hour, and paging for each would be noise.
+    if (request?.ownRequest === false && !codeByRequest.has(requestId)) continue;
     // Two independent proofs that the candidate already heard from us. Our own
     // delivery record is authoritative, but reached-out can also be set by a
     // hand-sent email, and "has still not been emailed" would be a false alarm
@@ -4076,7 +4054,7 @@ export async function runOutreachTick({
   config = outreachConfig(),
   now = Date.now(),
   pauseState = () => paraformBackgroundPauseState("paraaiRequestLanes"),
-  historyImpl = readSubmissionRequestHistoryWithScope,
+  historyImpl = () => readSubmissionRequestHistoryWithScope({ teammates: "due" }),
   replyPassImpl = runReplyPassStep,
   teammatesPausedImpl = teammateWritesPaused,
   recordScopeImpl = recordLastOutreachScope,
@@ -4554,7 +4532,9 @@ export async function outreachHealth({
     // the latest tick's read actually covered (a `fallback` there means it
     // read David's requests only); `teammatesPaused` is the refusal breaker.
     requestScope: {
-      ...(({ agencyView, teammates }) => ({ agencyView, teammates }))(outreachScopeConfig()),
+      ...(({ agencyView, teammates, teammateReadSeconds }) => ({ agencyView, teammates, teammateReadSeconds }))(
+        outreachScopeConfig(),
+      ),
       last: lastScope,
       teammatesPaused: teammatesPausedNow,
     },
