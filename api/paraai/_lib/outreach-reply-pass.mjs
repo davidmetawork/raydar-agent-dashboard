@@ -145,6 +145,9 @@ export function contactedAfter(state, requestId, sinceIso) {
 // null. Pure: the state already carries every verdict the assessor latched.
 export function passCauseFor(state, request, now = Date.now()) {
   if (!state || !request?.id) return null;
+  // A teammate's request (agency view, 2026-10-12) is theirs to pass unless
+  // this lane emailed the candidate about that exact request.
+  if (request.ownRequest === false && !state.matches?.[request.id]?.sentAt) return null;
   if (state.passedRequests?.[request.id] || state.pendingPasses?.[request.id]) return null;
   if (sendInFlight(state, request.id)) return null;
   const hold = activeOffMarketHold(state, now);

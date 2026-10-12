@@ -87,6 +87,14 @@ import {
   resetMailroomOutreachLaneCache,
 } from "./outreach-mailroom.mjs";
 import { replyPassConfig, runReplyPassStep } from "./outreach-reply-pass.mjs";
+import {
+  outreachScopeConfig,
+  recruiterDirectory,
+  recruiterShapeHint,
+  requestScope,
+  summarizeScope,
+  unidentifiable,
+} from "./outreach-scope.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
@@ -271,11 +279,15 @@ export function outreachExecutionEnabled(config = outreachConfig()) {
   );
 }
 
-export function normalizeSubmissionRequest(request) {
+// `scope` is requestScope()'s verdict for an agency-view row. Without one the
+// row is David's own, which is what every caller saw before the agency read.
+export function normalizeSubmissionRequest(request, scope = null) {
   const candidate = request?.candidate || {};
   const role = request?.role || {};
   return {
     id: clean(request?.id),
+    ownRequest: scope ? scope.own === true : true,
+    recruiterKey: scope ? (scope.own ? "david" : scope.key || null) : "david",
     status: lower(request?.status),
     reachedOut: request?.reached_out_to_candidate === true,
     reachedOutAt: clean(request?.reached_out_to_candidate_at) || null,
@@ -401,15 +413,81 @@ export function normalizeExternalDeliveryEvidence(evidence, now = Date.now()) {
   };
 }
 
-export async function readSubmissionRequestHistory() {
-  const result = await trpcGet("submissionRequest.getRecruiterSubmissionRequestHistory", {
-    agencyView: false,
-    recruiterFilter: [],
-  });
+const HISTORY_PROC = "submissionRequest.getRecruiterSubmissionRequestHistory";
+const usableRequest = (request) => request.id && request.candidateUserId && request.roleId;
+
+// A refusal of the agency read itself (a 400/403/404 from Paraform), as
+// opposed to a throttle, a 401 or an outage, which must stop the tick as before.
+function agencyReadRefused(error) {
+  return [400, 403, 404].includes(Number(error?.status));
+}
+
+async function readScopedHistory(trpcGetImpl) {
+  const result = await trpcGetImpl(HISTORY_PROC, { agencyView: false, recruiterFilter: [] });
   const rows = Array.isArray(result) ? result : (result?.requests || []);
-  return rows.map(normalizeSubmissionRequest).filter(
-    (request) => request.id && request.candidateUserId && request.roleId,
-  );
+  return rows.map((row) => normalizeSubmissionRequest(row)).filter(usableRequest);
+}
+
+// The request history the lane acts on, with how the agency read was scoped.
+// Since 2026-10-12 it is the agency view cut down to David's own requests and
+// the named teammates' (outreach-scope.mjs). Requests on any other seat,
+// Kyra's above all, never enter the lane: not the tick, the follow-ups, the
+// reply pass or an operator route.
+export async function readSubmissionRequestHistoryWithScope({
+  scope = outreachScopeConfig(),
+  trpcGetImpl = trpcGet,
+} = {}) {
+  if (!scope.agencyView) {
+    return { requests: await readScopedHistory(trpcGetImpl), scope: { agencyView: false } };
+  }
+  let result;
+  try {
+    result = await trpcGetImpl(HISTORY_PROC, { agencyView: true, recruiterFilter: [] });
+  } catch (error) {
+    if (!agencyReadRefused(error)) throw error;
+    return {
+      requests: await readScopedHistory(trpcGetImpl),
+      scope: { agencyView: true, fallback: "agency_read_refused", status: Number(error.status) },
+    };
+  }
+  const rows = Array.isArray(result) ? result : (result?.requests || []);
+  const currentUserId = clean(result?.currentUserId);
+  const directory = recruiterDirectory(result);
+  const entries = rows.map((row) => {
+    const verdict = requestScope(row, { scope, currentUserId, directory });
+    return { row, scope: verdict, status: lower(row?.status) };
+  });
+  const blind = entries.find((entry) => unidentifiable(entry.scope));
+  if (blind) {
+    // Nothing on a row says whose it is, so David's own rows cannot be told
+    // apart either. Keep him whole this tick with the scoped read.
+    return {
+      requests: await readScopedHistory(trpcGetImpl),
+      scope: {
+        agencyView: true,
+        fallback: "recruiter_identity_missing",
+        shape: recruiterShapeHint(blind.row),
+      },
+    };
+  }
+  const requests = entries
+    .filter((entry) => entry.scope.covered)
+    .map((entry) => normalizeSubmissionRequest(entry.row, entry.scope))
+    .filter(usableRequest);
+  return {
+    requests,
+    scope: {
+      agencyView: true,
+      fallback: null,
+      currentUserIdKnown: Boolean(currentUserId),
+      teammates: scope.teammates,
+      byRecruiter: summarizeScope(entries),
+    },
+  };
+}
+
+export async function readSubmissionRequestHistory() {
+  return (await readSubmissionRequestHistoryWithScope()).requests;
 }
 
 // requestId -> status for every request Paraform shows with a known status
@@ -425,9 +503,19 @@ export function closedRequestStatuses(history) {
   return closed;
 }
 
-export function requestOrdinal(request, history) {
+// Which of the candidate's requests this one is, which picks the first-email
+// or another-request copy. David's own rows count as they always did. A
+// teammate's row (agency view, 2026-10-12) counts only once this lane has
+// emailed about it, so a candidate whose earlier requests sat on Vanessa's or
+// Alzen's seat unanswered still gets a first email, not "another request".
+export function requestOrdinal(request, history, state = null) {
+  const counted = (row) => (
+    row.id === request.id ||
+    row.ownRequest !== false ||
+    Boolean(state?.matches?.[row.id]?.sentAt)
+  );
   const rows = (history || [])
-    .filter((row) => row.candidateUserId === request.candidateUserId)
+    .filter((row) => row.candidateUserId === request.candidateUserId && counted(row))
     .sort((left, right) => (
       (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) - (right.createdAtMs ?? Number.MAX_SAFE_INTEGER)
       || left.id.localeCompare(right.id)
@@ -1728,7 +1816,7 @@ export async function processMatchRequest(
     }
 
     attemptStage = "digest_mutation";
-    const ordinal = requestOrdinal(request, history);
+    const ordinal = requestOrdinal(request, history, state);
     let digest = null;
     let deliveryMode = "digest";
     let autoRecoveredNoDigest = false;
@@ -2228,7 +2316,7 @@ export function planDeliveredMatchBundle(state, {
   for (const request of requests) {
     next = planDeliveredMatch(next, {
       request,
-      ordinal: requestOrdinal(request, history),
+      ordinal: requestOrdinal(request, history, state),
       roleUrl: roleShareUrl(request),
       digest,
       copy,
@@ -2572,7 +2660,7 @@ export async function recordExpiredExternalDelivery(
       throw error;
     }
 
-    const ordinal = requestOrdinal(request, history);
+    const ordinal = requestOrdinal(request, history, state);
     const roleUrl = roleShareUrl(request);
     request = { ...request, candidateEmail: contact.email };
     const copy = copyForMatch({
@@ -4207,6 +4295,11 @@ export async function outreachHealth({
     // Where new conversations start (2026-09-28). "mailroom" only takes effect
     // while the lane reads ready; otherwise they start in Gmail.
     newConversationTransport: config.transport,
+    // Whose requests the lane covers (2026-10-12): David's own plus the named
+    // teammates' when the agency view is on; Kyra's seat never.
+    requestScope: (({ agencyView, teammates }) => ({ agencyView, teammates }))(
+      outreachScopeConfig(),
+    ),
     // Reply auto-pass (2026-09-29): on unless PARAAI_REPLY_PASS=off.
     replyPass: (({ enabled, recheckMs, assessLimit, passLimit }) => ({
       enabled,
