@@ -468,10 +468,12 @@ async function claimTeammateReadSlot(scope, kvImpl) {
 export async function readSubmissionRequestHistoryWithScope({
   scope = outreachScopeConfig(),
   teammates = true,
+  // false: teammates' rows only (a teammate read-back has no use for David's).
+  ownRead = true,
   trpcGetImpl = trpcGet,
   kvImpl = requestLaneKv,
 } = {}) {
-  const own = await readOwnHistory(trpcGetImpl);
+  const own = ownRead ? await readOwnHistory(trpcGetImpl) : [];
   const ids = scope.agencyView ? teammateUserIds(scope) : [];
   const base = { agencyView: scope.agencyView, teammates: scope.teammates, teammatesRead: false };
   if (!ids.length || teammates === false) return { requests: own, scope: base };
@@ -485,6 +487,12 @@ export async function readSubmissionRequestHistoryWithScope({
       recruiterFilter: ids.map((entry) => entry.userId),
     });
   } catch (error) {
+    // The pace cap refuses the call before it is sent: David's tick goes on
+    // with his requests, and the slot is freed so teammates try again soon.
+    if (String(error?.code || "") === REQUEST_LANE_RATE_LIMITED_CODE) {
+      if (teammates === "due") await kvImpl(["DEL", TEAMMATE_READ_SLOT_KEY]).catch(() => null);
+      return { requests: own, scope: { ...base, reason: "teammate_read_rate_limited" } };
+    }
     if (stopsTheTick(error)) throw error;
     return {
       requests: own,
@@ -514,8 +522,8 @@ export async function readSubmissionRequestHistoryWithScope({
 
 // Operator routes and read-backs see teammates' requests too, unless asked
 // not to (a read-back of David's own request needs only his read).
-export async function readSubmissionRequestHistory({ teammates = true } = {}) {
-  return (await readSubmissionRequestHistoryWithScope({ teammates })).requests;
+export async function readSubmissionRequestHistory({ teammates = true, ownRead = true } = {}) {
+  return (await readSubmissionRequestHistoryWithScope({ teammates, ownRead })).requests;
 }
 
 // Operator-only measurement (2026-10-12): the first live agency read timed
@@ -1500,7 +1508,9 @@ async function markReachedOut(requestId, { teammates = false } = {}) {
     { id: requestId },
     1,
   ));
-  const history = await readSubmissionRequestHistory({ teammates });
+  const history = await readSubmissionRequestHistory(
+    teammates ? { teammates: true, ownRead: false } : { teammates: false },
+  );
   const visible = history.find((request) => request.id === requestId);
   if (!visible?.reachedOut) {
     const error = new Error("Paraform reached-out marker did not read back");
@@ -2472,6 +2482,7 @@ async function markRequestReachedOut(state, request) {
         reachedOutMarkPending: {
           requestId: request.id,
           errorCode: clean(error?.code || "REACHED_OUT_MARK_FAILED"),
+          ...(request.ownRequest === false ? { teammate: true, attempts: 1 } : {}),
         },
       }, "paraform_reached_out_pending", { requestId: request.id }), state.revision)
         .catch(() => state);
@@ -3935,6 +3946,60 @@ export async function handleOutreachFailure(
 // Mailroom's status is read; Paraform is touched only to write the reached-out
 // marker once the email has actually gone. A parked row is recorded as
 // uncertain and held for a human, exactly like an unreconcilable Gmail send.
+// Paraform's reached-out marker for a teammate's request that was emailed
+// while its row was out of sight (a queued Mailroom send that went out on a
+// tick without the teammates' read) or whose marker write failed. Runs only
+// on ticks that read teammates; at most three tries per request. David's own
+// requests are not touched here.
+const TEAMMATE_MARK_MAX_ATTEMPTS = 3;
+export async function retryTeammateReachedOutMarks({
+  history = [],
+  states = [],
+  markImpl = markRequestReachedOut,
+  lockImpl = acquireOutreachLock,
+  unlockImpl = releaseOutreachLock,
+  getStateImpl = getOutreachState,
+  saveStateImpl = saveOutreachState,
+  limit = 3,
+} = {}) {
+  const rows = new Map((history || []).map((request) => [request.id, request]));
+  const results = [];
+  for (const listed of states || []) {
+    if (results.length >= limit) break;
+    const pending = listed?.reachedOutMarkPending;
+    if (!pending?.teammate || Number(pending.attempts || 0) >= TEAMMATE_MARK_MAX_ATTEMPTS) continue;
+    const row = rows.get(clean(pending.requestId));
+    if (!row || row.ownRequest !== false) continue;
+    const lockToken = await lockImpl(listed.candidateUserId).catch(() => null);
+    if (!lockToken) continue;
+    try {
+      let state = await getStateImpl(listed.candidateUserId);
+      if (clean(state?.reachedOutMarkPending?.requestId) !== row.id) continue;
+      const attempts = Number(state.reachedOutMarkPending.attempts || 0);
+      state = await saveStateImpl({ ...state, reachedOutMarkPending: null }, state.revision);
+      if (!REQUEST_STATUSES.has(lower(row.status))) {
+        results.push({ requestId: row.id, action: "closed" });
+        continue;
+      }
+      state = await markImpl(state, row);
+      if (clean(state?.reachedOutMarkPending?.requestId) === row.id) {
+        await saveStateImpl({
+          ...state,
+          reachedOutMarkPending: { ...state.reachedOutMarkPending, teammate: true, attempts: attempts + 1 },
+        }, state.revision).catch(() => null);
+        results.push({ requestId: row.id, action: "mark_failed" });
+      } else {
+        results.push({ requestId: row.id, action: "marked" });
+      }
+    } catch (error) {
+      results.push({ requestId: row.id, action: "error", code: clean(error?.code || "MARK_RETRY_FAILED") });
+    } finally {
+      await unlockImpl(listed.candidateUserId, lockToken).catch(() => {});
+    }
+  }
+  return results;
+}
+
 export async function reconcileQueuedMailroomMatches({
   history = [],
   states = [],
@@ -4032,6 +4097,13 @@ export async function reconcileQueuedMailroomMatches({
         // Paraform's marker is only written for a request that is still open.
         if (requests.has(requestId) && REQUEST_STATUSES.has(lower(request.status))) {
           state = await reachedOutImpl(state, request);
+        } else if (!requests.has(requestId) && snapshot.ownRequest === false) {
+          // A teammate's row is only in the history on a teammates' read, so
+          // the marker waits for the next one (retryTeammateReachedOutMarks).
+          state = await saveOutreachState(appendOutreachJournal({
+            ...state,
+            reachedOutMarkPending: { requestId, errorCode: "TEAMMATE_ROW_UNSEEN", teammate: true, attempts: 0 },
+          }, "paraform_reached_out_pending", { requestId }), state.revision).catch(() => state);
         }
         results.push({ action: "sent", requestId, reconciled: true, transport: "mailroom-sendgrid" });
       } catch (error) {
@@ -4120,6 +4192,10 @@ export async function runOutreachTick({
     // Queued Mailroom sends first: cheap status reads, no batch slot.
     const results = await reconcileQueuedMailroomMatches({ history, states, config, now })
       .catch(() => []);
+    const teammateMarks = scope?.teammatesRead
+      ? await retryTeammateReachedOutMarks({ history, states: await listOutreachStates().catch(() => states) })
+        .catch(() => [])
+      : [];
     for (const request of outreachBatch(
       eligibleNewRequests(history, config, states, exceptions, { now }),
       { teammatesPaused, batchSize: config.batchSize },
@@ -4249,6 +4325,7 @@ export async function runOutreachTick({
       // are sitting out after a Paraform refusal.
       scope,
       teammatesPaused,
+      teammateMarks,
     };
   } catch (error) {
     // The FIRST Paraform call this tick (very often the history read above,

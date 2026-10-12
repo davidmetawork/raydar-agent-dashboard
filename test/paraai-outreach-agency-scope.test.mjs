@@ -14,6 +14,7 @@ import {
 } from "../api/paraai/_lib/outreach-scope.mjs";
 import {
   measureAgencyRead,
+  retryTeammateReachedOutMarks,
   sweepExpiryEscalations,
   outreachBatch,
   readSubmissionRequestHistoryWithScope,
@@ -62,6 +63,7 @@ function kvStore() {
   const map = new Map();
   const impl = async ([command, key, value, ...options]) => {
     if (command === "GET") return map.get(key) ?? null;
+    if (command === "DEL") return map.delete(key) ? 1 : 0;
     if (command === "SET") {
       if (options.includes("NX") && map.has(key)) return null;
       map.set(key, value);
@@ -170,10 +172,25 @@ test("a failed teammates' read leaves David whole; a throttle still stops the ti
     Object.assign(new Error("throttled"), { code: "PARAFORM_THROTTLED" }),
     Object.assign(new Error("429"), { status: 429 }),
     Object.assign(new Error("cool"), { code: "PARAFORM_REQUEST_LANES_COOLING_DOWN" }),
-    Object.assign(new Error("pace"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" }),
   ]) {
     await assert.rejects(read([row("d1")], stop));
   }
+  // The pace cap refused the call unsent: David's tick goes on, and the slot
+  // is freed so teammates are tried again on the next tick.
+  const kv = kvStore();
+  const paced = await read([row("d1")], Object.assign(new Error("pace"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" }), { kv, teammates: "due" });
+  assert.deepEqual(paced.requests.map((r) => r.id), ["d1"]);
+  assert.equal(paced.scope.reason, "teammate_read_rate_limited");
+  assert.equal(kv.map.size, 0);
+});
+
+test("a teammate read-back reads only the teammates' rows", async () => {
+  const vendor = paraform([{ currentUserId: ME, requests: [vanessa("v1")] }]);
+  const { requests } = await readSubmissionRequestHistoryWithScope({
+    scope: SCOPE, teammates: true, ownRead: false, trpcGetImpl: vendor.impl, kvImpl: kvStore().impl,
+  });
+  assert.deepEqual(vendor.calls.map((c) => c.input.agencyView), [true]);
+  assert.deepEqual(requests.map((r) => r.id), ["v1"]);
 });
 
 test("the tick reads teammates at most once per interval; off means David only", async () => {
@@ -304,4 +321,39 @@ test("a teammate's request near its deadline warns only after the lane was held 
     escalateImpl,
   });
   assert.deepEqual(warned, [["own", null], ["held-mate", "OUTREACH_NO_EMAIL"]]);
+});
+
+test("a teammate's missing reached-out mark is written on the next teammates' read, three tries at most", async () => {
+  const states = new Map();
+  const put = (state) => states.set(state.candidateUserId, { revision: 1, ...state });
+  const deps = (markImpl) => ({
+    markImpl,
+    lockImpl: async () => "lock",
+    unlockImpl: async () => {},
+    getStateImpl: async (id) => structuredClone(states.get(id) || null),
+    saveStateImpl: async (state) => { const next = { ...state, revision: (state.revision || 0) + 1 }; states.set(state.candidateUserId, next); return next; },
+  });
+  const mate = (id, extra = {}) => ({ id, status: "pending", ownRequest: false, candidateUserId: `c-${id}`, reachedOut: false, ...extra });
+  put({ candidateUserId: "c-v1", reachedOutMarkPending: { requestId: "v1", teammate: true, attempts: 0 } });
+  put({ candidateUserId: "c-v2", reachedOutMarkPending: { requestId: "v2", teammate: true, attempts: 3 } });
+  put({ candidateUserId: "c-v3", reachedOutMarkPending: { requestId: "v3", teammate: true, attempts: 1 } });
+  put({ candidateUserId: "c-d1", reachedOutMarkPending: { requestId: "d1" } });
+  const marked = [];
+  const ok = async (state, request) => { marked.push(request.id); return state; };
+  const results = await retryTeammateReachedOutMarks({
+    history: [mate("v1"), mate("v2"), mate("v3", { status: "expired" }), { id: "d1", status: "pending", ownRequest: true, candidateUserId: "c-d1" }],
+    states: [...states.values()],
+    ...deps(ok),
+  });
+  assert.deepEqual(marked, ["v1"]);
+  assert.deepEqual(results.map((r) => [r.requestId, r.action]), [["v1", "marked"], ["v3", "closed"]]);
+  assert.equal(states.get("c-v1").reachedOutMarkPending, null);
+  assert.equal(states.get("c-v3").reachedOutMarkPending, null);
+  assert.equal(states.get("c-v2").reachedOutMarkPending.attempts, 3);
+  assert.equal(states.get("c-d1").reachedOutMarkPending.requestId, "d1");
+  // A failed write counts a try.
+  put({ candidateUserId: "c-v4", reachedOutMarkPending: { requestId: "v4", teammate: true, attempts: 1 } });
+  const fails = async (state, request) => ({ ...state, reachedOutMarkPending: { requestId: request.id, errorCode: "X" } });
+  await retryTeammateReachedOutMarks({ history: [mate("v4")], states: [states.get("c-v4")], ...deps(fails) });
+  assert.deepEqual(states.get("c-v4").reachedOutMarkPending, { requestId: "v4", errorCode: "X", teammate: true, attempts: 2 });
 });
