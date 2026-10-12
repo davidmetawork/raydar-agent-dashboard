@@ -1,5 +1,6 @@
 // Para AI interview-request outreach covers the agency (David, 2026-10-12):
-// David's own requests plus Vanessa's, Alzen's and Noah's; Kyra's seat never.
+// David's own requests (his unchanged read) plus Vanessa's, Alzen's and Noah's
+// (a second read filtered to their user ids); Kyra's seat never.
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -7,9 +8,14 @@ import {
   outreachScopeConfig,
   recruiterKey,
   requestScope,
+  teammateRowScope,
+  teammateUserIds,
+  TEAMMATE_USER_IDS,
 } from "../api/paraai/_lib/outreach-scope.mjs";
 import {
   measureAgencyRead,
+  retryTeammateReachedOutMarks,
+  sweepExpiryEscalations,
   outreachBatch,
   readSubmissionRequestHistoryWithScope,
   requestOrdinal,
@@ -20,6 +26,9 @@ import { passCauseFor } from "../api/paraai/_lib/outreach-reply-pass.mjs";
 
 const ME = "user-david";
 const SCOPE = outreachScopeConfig({});
+const V = TEAMMATE_USER_IDS.vanessa;
+const A = TEAMMATE_USER_IDS.alzen;
+const N = TEAMMATE_USER_IDS.noah;
 
 function row(id, { sentTo = ME, recruiter = { id: sentTo }, candidate = `cand-${id}`, status = "pending", created = "2026-10-10T10:00:00.000Z" } = {}) {
   return {
@@ -34,9 +43,9 @@ function row(id, { sentTo = ME, recruiter = { id: sentTo }, candidate = `cand-${
 }
 
 const seat = (userId, name) => (id, extra = {}) => row(id, { sentTo: userId, recruiter: { id: userId, name }, ...extra });
-const vanessa = seat("user-vanessa", "Vanessa Vallador");
-const alzen = seat("user-alzen", "Alzen Flores");
-const noah = seat("user-noah", "Noah Kingsdale");
+const vanessa = seat(V, "Vanessa Vallador");
+const alzen = seat(A, "Alzen Flores");
+const noah = seat(N, "Noah Kingsdale");
 const kyra = seat("user-kyra", "Kyra Phillips");
 
 function paraform(responses) {
@@ -52,209 +61,164 @@ function paraform(responses) {
 
 function kvStore() {
   const map = new Map();
-  const commands = [];
-  const impl = async ([command, key, value]) => {
-    commands.push(command);
+  const impl = async ([command, key, value, ...options]) => {
     if (command === "GET") return map.get(key) ?? null;
-    if (command === "SET") { map.set(key, value); return "OK"; }
+    if (command === "DEL") return map.delete(key) ? 1 : 0;
+    if (command === "SET") {
+      if (options.includes("NX") && map.has(key)) return null;
+      map.set(key, value);
+      return "OK";
+    }
     return null;
   };
-  return { impl, map, commands };
+  return { impl, map };
 }
 
-const read = (responses, { scope = SCOPE, kv = kvStore() } = {}) => {
-  const vendor = paraform(responses);
-  return readSubmissionRequestHistoryWithScope({ scope, trpcGetImpl: vendor.impl, kvImpl: kv.impl })
+// The own read answers first, the teammates' read second.
+const read = (own, mates, { scope = SCOPE, kv = kvStore(), teammates = true } = {}) => {
+  const vendor = paraform([
+    { currentUserId: ME, requests: own },
+    ...(mates === undefined ? [] : [mates instanceof Error ? mates : { currentUserId: ME, requests: mates }]),
+  ]);
+  return readSubmissionRequestHistoryWithScope({ scope, teammates, trpcGetImpl: vendor.impl, kvImpl: kv.impl })
     .then((result) => ({ ...result, calls: vendor.calls, kv }));
 };
 
 test("the agency view is on by default and covers Vanessa, Alzen and Noah", () => {
-  assert.deepEqual(SCOPE, { agencyView: true, teammates: ["vanessa", "alzen", "noah"] });
+  assert.equal(SCOPE.agencyView, true);
+  assert.deepEqual(SCOPE.teammates, ["vanessa", "alzen", "noah"]);
+  assert.equal(SCOPE.teammateReadSeconds, 600);
   assert.equal(outreachScopeConfig({ PARAAI_OUTREACH_AGENCY_VIEW: "off" }).agencyView, false);
   // Set but empty means David only.
   assert.deepEqual(outreachScopeConfig({ PARAAI_OUTREACH_TEAMMATES: "" }).teammates, []);
+  assert.deepEqual(teammateUserIds(SCOPE), [
+    { key: "vanessa", userId: V },
+    { key: "alzen", userId: A },
+    { key: "noah", userId: N },
+  ]);
 });
 
-test("Kyra can never be configured in", () => {
-  const scope = outreachScopeConfig({ PARAAI_OUTREACH_TEAMMATES: "vanessa, Kyra ,noah" });
+test("Kyra can never be configured in or asked for", () => {
+  const scope = outreachScopeConfig({
+    PARAAI_OUTREACH_TEAMMATES: "vanessa, Kyra ,noah",
+    PARAAI_OUTREACH_TEAMMATE_IDS: "kyra:userkyra000001",
+  });
   assert.deepEqual(scope.teammates, ["vanessa", "noah"]);
-  const forced = { agencyView: true, teammates: ["kyra"] };
-  assert.equal(requestScope(kyra("k1"), { scope: forced, currentUserId: ME }).covered, false);
-  assert.equal(requestScope(kyra("k1"), { scope: forced, currentUserId: ME }).excluded, "protected_recruiter");
-  const wyman = seat("user-k", "Kyra Wyman")("k2");
-  assert.equal(requestScope(wyman, { scope: SCOPE, currentUserId: ME }).excluded, "protected_recruiter");
+  assert.equal(scope.teammateUserIds.kyra, undefined);
+  assert.deepEqual(teammateUserIds({ ...scope, teammates: ["kyra", "vanessa"], teammateUserIds: { kyra: "x", vanessa: V } }), [
+    { key: "vanessa", userId: V },
+  ]);
+  // A row that names her is left out even under a requested id.
+  const disguised = row("k1", { sentTo: V, recruiter: { id: V, name: "Kyra Phillips" } });
+  assert.equal(teammateRowScope(disguised, { ids: teammateUserIds(SCOPE), currentUserId: ME }).excluded, "protected_recruiter");
+  assert.equal(requestScope(kyra("k2"), { scope: SCOPE, currentUserId: ME }).excluded, "protected_recruiter");
 });
 
-test("each row is judged by its recruiter, by id first", () => {
-  const verdict = (r) => requestScope(r, { scope: SCOPE, currentUserId: ME });
-  assert.equal(verdict(row("d1")).own, true);
-  assert.equal(verdict(row("d1", { recruiter: { id: ME, name: "Anyone" } })).own, true);
+test("a teammate row is covered only for a seat that was asked for, under its own name", () => {
+  const ids = teammateUserIds(SCOPE);
+  const verdict = (r) => teammateRowScope(r, { ids, currentUserId: ME });
   assert.equal(verdict(vanessa("v1")).covered, true);
-  assert.equal(verdict(vanessa("v1")).own, false);
+  assert.equal(verdict(vanessa("v1")).key, "vanessa");
   assert.equal(verdict(alzen("a1")).covered, true);
   assert.equal(verdict(noah("n1")).covered, true);
-  assert.equal(verdict(seat("user-cleo", "Cleo Zimri")("c1")).excluded, "recruiter_not_listed");
-  assert.equal(verdict(row("x1", { sentTo: "user-x" })).excluded, "recruiter_unknown");
-  assert.equal(verdict({ ...row("x2"), sent_to_user_id: undefined, recruiter: null }).unidentifiable, true);
-  // Two ids, or two names, cannot be trusted either way.
-  const ids = row("x3", { sentTo: "user-kyra", recruiter: { id: "user-vanessa", name: "Vanessa Vallador" } });
-  assert.equal(verdict(ids).unidentifiable, true);
-  const directory = new Map([["user-kyra", { name: "Kyra Phillips", email: "" }]]);
-  const names = row("x4", { sentTo: "user-kyra", recruiter: { name: "Vanessa V" } });
-  const mixed = requestScope(names, { scope: SCOPE, currentUserId: ME, directory });
-  assert.equal(mixed.covered, false);
-  assert.equal(mixed.unidentifiable, true);
-  // No currentUserId: nothing can be called David's.
-  assert.equal(requestScope(row("d1"), { scope: SCOPE, currentUserId: "" }).unidentifiable, true);
-  // With the agency view off, every row is David's, as before.
-  assert.equal(requestScope(vanessa("v1"), { scope: { agencyView: false, teammates: [] } }).own, true);
+  // Name missing: the id the seat was asked for decides.
+  assert.equal(verdict(row("v2", { sentTo: V, recruiter: { id: V } })).covered, true);
+  assert.equal(verdict(seat("user-cleo", "Cleo Zimri")("c1")).excluded, "recruiter_not_requested");
+  assert.equal(verdict(row("x1", { sentTo: V, recruiter: { id: V, name: "Noah Kingsdale" } })).excluded, "recruiter_names_disagree");
+  assert.equal(verdict(row("x2", { sentTo: V, recruiter: { id: N } })).excluded, "recruiter_ids_disagree");
+  assert.equal(verdict({ ...row("x3"), sent_to_user_id: undefined, recruiter: null }).excluded, "recruiter_unidentifiable");
+  assert.equal(verdict(row("d1")).excluded, "own_row_in_teammate_read");
 });
 
-test("a recruiter is named from a name, an email or the directory", () => {
+test("a recruiter is named from a name or an email", () => {
   assert.equal(recruiterKey({ name: "Vanessa Vallador" }), "vanessa");
   assert.equal(recruiterKey({ email: "alzen.flores@raydargroup.com" }), "alzen");
   assert.equal(recruiterKey({}), "");
-  const byEmail = row("e1", { sentTo: "user-n", recruiter: { id: "user-n", email: "noah@raydargroup.com" } });
-  assert.equal(requestScope(byEmail, { scope: SCOPE, currentUserId: ME }).covered, true);
-  // An address that is not the first name never contradicts the name.
-  const surnameEmail = row("e3", { sentTo: "user-v2", recruiter: { id: "user-v2", name: "Vanessa Vallador", email: "vvallador@raydargroup.com" } });
-  assert.equal(requestScope(surnameEmail, { scope: SCOPE, currentUserId: ME }).covered, true);
-  // ...but a Kyra address still marks the row protected.
-  const kyraEmail = row("e4", { sentTo: "user-k3", recruiter: { id: "user-k3", name: "K. P.", email: "kyra@raydargroup.com" } });
-  assert.equal(requestScope(kyraEmail, { scope: SCOPE, currentUserId: ME }).excluded, "protected_recruiter");
-  const byDirectory = row("e2", { sentTo: "user-v", recruiter: null });
-  const directory = new Map([["user-v", { name: "Vanessa Vallador", email: "" }]]);
-  assert.equal(requestScope(byDirectory, { scope: SCOPE, currentUserId: ME, directory }).covered, true);
+  const ids = teammateUserIds(SCOPE);
+  const surnameEmail = row("e1", { sentTo: V, recruiter: { id: V, name: "Vanessa Vallador", email: "vvallador@raydargroup.com" } });
+  assert.equal(teammateRowScope(surnameEmail, { ids, currentUserId: ME }).covered, true);
+  const kyraEmail = row("e2", { sentTo: N, recruiter: { id: N, email: "kyra@raydargroup.com" } });
+  assert.equal(teammateRowScope(kyraEmail, { ids, currentUserId: ME }).excluded, "protected_recruiter");
 });
 
-test("the agency read keeps David's and the teammates' requests and drops Kyra's", async () => {
-  const { requests, scope, calls } = await read([{
-    currentUserId: ME,
-    requests: [row("d1"), vanessa("v1"), alzen("a1"), noah("n1"), kyra("k1"), kyra("k2", { status: "expired" })],
-  }]);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].input, { agencyView: true, recruiterFilter: [] });
-  assert.deepEqual(requests.map((r) => r.id), ["d1", "v1", "a1", "n1"]);
-  assert.deepEqual(requests.map((r) => r.ownRequest), [true, false, false, false]);
-  assert.deepEqual(requests.map((r) => r.recruiterKey), ["david", "vanessa", "alzen", "noah"]);
-  assert.equal(scope.fallback, null);
-  assert.deepEqual(scope.byRecruiter.kyra, { rows: 2, pending: 1, coveredPending: 0, excluded: { protected_recruiter: 1 } });
-  assert.equal(scope.byRecruiter.david.coveredPending, 1);
-});
-
-test("a teammate's request for a candidate on Kyra's seat is left out; David's is not", async () => {
-  const { requests, scope } = await read([{
-    currentUserId: ME,
-    requests: [
-      kyra("k1", { candidate: "shared" }),
-      vanessa("v1", { candidate: "shared" }),
-      row("d1", { candidate: "shared" }),
-      vanessa("v2", { candidate: "other" }),
-    ],
-  }]);
-  assert.deepEqual(requests.map((r) => r.id), ["d1", "v2"]);
-  assert.equal(scope.byRecruiter.vanessa.excluded.candidate_on_uncovered_seat, 1);
-});
-
-test("Kyra's candidates stay out even when her row carries no name", async () => {
-  // Her id is learned from a named row and applied to a nameless one.
-  const named = await read([{
-    currentUserId: ME,
-    requests: [
-      row("d1"),
-      kyra("k1", { candidate: "a" }),
-      row("k2", { sentTo: "user-kyra", recruiter: { id: "user-kyra" }, candidate: "b" }),
-      vanessa("v1", { candidate: "b" }),
-    ],
-  }]);
-  assert.deepEqual(named.requests.map((r) => r.id), ["d1"]);
-  assert.equal(named.scope.byRecruiter.unknown.excluded.protected_recruiter, 1);
-  // With no named row at all, any uncovered seat guards the candidate.
-  const nameless = await read([{
-    currentUserId: ME,
-    requests: [
-      row("d1"),
-      row("k3", { sentTo: "user-k9", recruiter: { id: "user-k9", email: "kphillips@raydargroup.com" }, candidate: "c" }),
-      vanessa("v2", { candidate: "c" }),
-      vanessa("v3", { candidate: "d" }),
-    ],
-  }]);
-  assert.deepEqual(nameless.requests.map((r) => r.id), ["d1", "v3"]);
-});
-
-test("anything ambiguous falls back to David's scoped read, and is remembered for an hour", async () => {
-  const blind = { ...row("x1"), sent_to_user_id: undefined, recruiter: null };
-  const first = await read([
-    { currentUserId: ME, requests: [row("d1"), blind, vanessa("v1")] },
-    { requests: [row("d1"), row("d2")] },
+test("David's read is unchanged; the teammates' read asks for their seats only", async () => {
+  const { requests, scope, calls } = await read(
+    [row("d1"), row("d2")],
+    [vanessa("v1"), alzen("a1"), noah("n1"), kyra("k1"), row("d1")],
+  );
+  assert.deepEqual(calls.map((c) => c.input), [
+    { agencyView: false, recruiterFilter: [] },
+    { agencyView: true, recruiterFilter: [V, A, N] },
   ]);
-  assert.deepEqual(first.calls.map((c) => c.input.agencyView), [true, false]);
-  assert.deepEqual(first.requests.map((r) => r.id), ["d1", "d2"]);
-  assert.equal(first.scope.fallback, "recruiter_identity_missing");
-  assert.ok(Array.isArray(first.scope.shape.rowKeys));
-  // The next read skips the agency view: one Paraform read, not two.
-  const vendor = paraform([{ requests: [row("d1")] }]);
-  const second = await readSubmissionRequestHistoryWithScope({ scope: SCOPE, trpcGetImpl: vendor.impl, kvImpl: first.kv.impl });
-  assert.deepEqual(vendor.calls.map((c) => c.input.agencyView), [false]);
-  assert.equal(second.scope.fallback, "agency_read_failed_recently");
-
-  // An agency read with no row of David's is not trusted: empty, someone
-  // else's currentUserId, or rows under another field.
-  for (const response of [
-    { currentUserId: ME, requests: [] },
-    { currentUserId: "user-someone", requests: [row("d1"), vanessa("v1")] },
-    { currentUserId: ME, requests: [vanessa("v1"), alzen("a1")] },
-    { currentUserId: ME, items: [row("d1")] },
-  ]) {
-    const result = await read([response, { requests: [row("d1")] }]);
-    assert.equal(result.scope.fallback, "no_own_rows");
-    assert.deepEqual(result.requests.map((r) => r.id), ["d1"]);
-    assert.deepEqual(result.calls.map((c) => c.input.agencyView), [true, false]);
-  }
-  const noUser = await read([{ requests: [row("d1"), vanessa("v1")] }, { requests: [row("d1")] }]);
-  assert.equal(noUser.scope.fallback, "current_user_unknown");
-  assert.deepEqual(noUser.requests.map((r) => r.id), ["d1"]);
+  assert.deepEqual(requests.map((r) => r.id), ["d1", "d2", "v1", "a1", "n1"]);
+  assert.deepEqual(requests.map((r) => r.ownRequest), [true, true, false, false, false]);
+  assert.deepEqual(requests.map((r) => r.recruiterKey), ["david", "david", "vanessa", "alzen", "noah"]);
+  assert.equal(scope.teammatesRead, true);
+  assert.equal(scope.byRecruiter.vanessa.coveredPending, 1);
+  assert.equal(scope.byRecruiter.kyra.excluded.recruiter_not_requested, 1);
 });
 
-test("a refused, slow or broken agency read falls back; a throttle still stops the tick", async () => {
+test("a failed teammates' read leaves David whole; a throttle still stops the tick", async () => {
   for (const failure of [
     Object.assign(new Error("FORBIDDEN"), { status: 403 }),
     Object.assign(new Error("down"), { status: 502 }),
-    Object.assign(new Error("timeout"), { name: "TimeoutError" }),
+    Object.assign(new Error("timeout"), { name: "TimeoutError", code: 23 }),
   ]) {
-    const result = await read([failure, { requests: [row("d1")] }]);
+    const result = await read([row("d1")], failure);
     assert.deepEqual(result.requests.map((r) => r.id), ["d1"]);
-    assert.equal(result.scope.fallback, "agency_read_failed");
+    assert.equal(result.scope.reason, "teammate_read_failed");
   }
   for (const stop of [
     Object.assign(new Error("throttled"), { code: "PARAFORM_THROTTLED" }),
     Object.assign(new Error("429"), { status: 429 }),
     Object.assign(new Error("cool"), { code: "PARAFORM_REQUEST_LANES_COOLING_DOWN" }),
-    Object.assign(new Error("pace"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" }),
   ]) {
-    const vendor = paraform([stop]);
-    await assert.rejects(readSubmissionRequestHistoryWithScope({ scope: SCOPE, trpcGetImpl: vendor.impl, kvImpl: kvStore().impl }));
-    assert.equal(vendor.calls.length, 1);
+    await assert.rejects(read([row("d1")], stop));
   }
+  // The pace cap refused the call unsent: David's tick goes on, and the slot
+  // is freed so teammates are tried again on the next tick.
+  const kv = kvStore();
+  const paced = await read([row("d1")], Object.assign(new Error("pace"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" }), { kv, teammates: "due" });
+  assert.deepEqual(paced.requests.map((r) => r.id), ["d1"]);
+  assert.equal(paced.scope.reason, "teammate_read_rate_limited");
+  assert.equal(kv.map.size, 0);
 });
 
-test("with the agency view off the lane reads David's requests only, once", async () => {
-  const { requests, calls } = await read([{ requests: [row("d1")] }], { scope: { agencyView: false, teammates: [] } });
-  assert.deepEqual(calls.map((c) => c.input), [{ agencyView: false, recruiterFilter: [] }]);
-  assert.equal(requests[0].ownRequest, true);
+test("a teammate read-back reads only the teammates' rows", async () => {
+  const vendor = paraform([{ currentUserId: ME, requests: [vanessa("v1")] }]);
+  const { requests } = await readSubmissionRequestHistoryWithScope({
+    scope: SCOPE, teammates: true, ownRead: false, trpcGetImpl: vendor.impl, kvImpl: kvStore().impl,
+  });
+  assert.deepEqual(vendor.calls.map((c) => c.input.agencyView), [true]);
+  assert.deepEqual(requests.map((r) => r.id), ["v1"]);
+});
+
+test("the tick reads teammates at most once per interval; off means David only", async () => {
+  const kv = kvStore();
+  const first = await read([row("d1")], [vanessa("v1")], { kv, teammates: "due" });
+  assert.equal(first.calls.length, 2);
+  const second = await read([row("d1")], undefined, { kv, teammates: "due" });
+  assert.equal(second.calls.length, 1);
+  assert.equal(second.scope.reason, "teammate_read_not_due");
+  assert.deepEqual(second.requests.map((r) => r.id), ["d1"]);
+  const off = await read([row("d1")], undefined, { scope: outreachScopeConfig({ PARAAI_OUTREACH_AGENCY_VIEW: "off" }) });
+  assert.equal(off.calls.length, 1);
+  const own = await read([row("d1")], undefined, { teammates: false });
+  assert.equal(own.calls.length, 1);
 });
 
 test("a teammate's candidate gets a first email even with older unanswered requests", async () => {
-  const { requests } = await read([{
-    currentUserId: ME,
-    requests: [
-      vanessa("v-old", { candidate: "michael", status: "expired", created: "2026-10-01T10:00:00.000Z" }),
-      vanessa("v-new", { candidate: "michael", created: "2026-10-10T10:00:00.000Z" }),
+  const { requests } = await read(
+    [
       row("d-old", { candidate: "pat", created: "2026-10-01T10:00:00.000Z" }),
-      vanessa("v-pat", { candidate: "pat", created: "2026-10-05T10:00:00.000Z" }),
       row("d-new", { candidate: "pat", created: "2026-10-10T10:00:00.000Z" }),
     ],
-  }]);
+    [
+      vanessa("v-old", { candidate: "michael", status: "expired", created: "2026-10-01T10:00:00.000Z" }),
+      vanessa("v-new", { candidate: "michael", created: "2026-10-10T10:00:00.000Z" }),
+      vanessa("v-pat", { candidate: "pat", created: "2026-10-05T10:00:00.000Z" }),
+    ],
+  );
   const byId = Object.fromEntries(requests.map((r) => [r.id, r]));
   assert.equal(requestOrdinal(byId["v-new"], requests, null), 1);
   // David's own rows count exactly as before (v-pat was never emailed).
@@ -334,7 +298,7 @@ test("the agency-read measurement reports timing, size, split and staff ids, nev
   assert.equal(ok.ok, true);
   assert.equal(ok.ms, 500);
   assert.equal(ok.rows, 3);
-  assert.deepEqual(ok.userIds, { david: [ME], vanessa: ["user-vanessa"], kyra: ["user-kyra"] });
+  assert.deepEqual(ok.userIds, { david: [ME], vanessa: [V], kyra: ["user-kyra"] });
   assert.ok(!JSON.stringify(ok).includes("Pat Q."));
   const failed = await measureAgencyRead({
     scope: SCOPE,
@@ -342,4 +306,54 @@ test("the agency-read measurement reports timing, size, split and staff ids, nev
   });
   assert.equal(failed.ok, false);
   assert.equal(failed.code, "23");
+});
+
+test("a teammate's request near its deadline warns only after the lane was held on it", async () => {
+  const now = Date.parse("2026-10-12T18:00:00.000Z");
+  const nearly = new Date(now - 6.5 * 86_400_000).toISOString();
+  const request = (id, ownRequest) => ({ id, status: "pending", createdAt: nearly, createdAtMs: Date.parse(nearly), ownRequest, reachedOut: false, candidateUserId: `c-${id}`, roleId: `r-${id}` });
+  const warned = [];
+  const escalateImpl = async (r, code) => { warned.push([r.id, code]); return { notified: true, rung: 12 }; };
+  await sweepExpiryEscalations({
+    history: [request("own", true), request("mate", false), request("held-mate", false)],
+    exceptions: [{ status: "open", requestId: "held-mate", code: "OUTREACH_NO_EMAIL" }],
+    now,
+    escalateImpl,
+  });
+  assert.deepEqual(warned, [["own", null], ["held-mate", "OUTREACH_NO_EMAIL"]]);
+});
+
+test("a teammate's missing reached-out mark is written on the next teammates' read, three tries at most", async () => {
+  const states = new Map();
+  const put = (state) => states.set(state.candidateUserId, { revision: 1, ...state });
+  const deps = (markImpl) => ({
+    markImpl,
+    lockImpl: async () => "lock",
+    unlockImpl: async () => {},
+    getStateImpl: async (id) => structuredClone(states.get(id) || null),
+    saveStateImpl: async (state) => { const next = { ...state, revision: (state.revision || 0) + 1 }; states.set(state.candidateUserId, next); return next; },
+  });
+  const mate = (id, extra = {}) => ({ id, status: "pending", ownRequest: false, candidateUserId: `c-${id}`, reachedOut: false, ...extra });
+  put({ candidateUserId: "c-v1", reachedOutMarkPending: { requestId: "v1", teammate: true, attempts: 0 } });
+  put({ candidateUserId: "c-v2", reachedOutMarkPending: { requestId: "v2", teammate: true, attempts: 3 } });
+  put({ candidateUserId: "c-v3", reachedOutMarkPending: { requestId: "v3", teammate: true, attempts: 1 } });
+  put({ candidateUserId: "c-d1", reachedOutMarkPending: { requestId: "d1" } });
+  const marked = [];
+  const ok = async (state, request) => { marked.push(request.id); return state; };
+  const results = await retryTeammateReachedOutMarks({
+    history: [mate("v1"), mate("v2"), mate("v3", { status: "expired" }), { id: "d1", status: "pending", ownRequest: true, candidateUserId: "c-d1" }],
+    states: [...states.values()],
+    ...deps(ok),
+  });
+  assert.deepEqual(marked, ["v1"]);
+  assert.deepEqual(results.map((r) => [r.requestId, r.action]), [["v1", "marked"], ["v3", "closed"]]);
+  assert.equal(states.get("c-v1").reachedOutMarkPending, null);
+  assert.equal(states.get("c-v3").reachedOutMarkPending, null);
+  assert.equal(states.get("c-v2").reachedOutMarkPending.attempts, 3);
+  assert.equal(states.get("c-d1").reachedOutMarkPending.requestId, "d1");
+  // A failed write counts a try.
+  put({ candidateUserId: "c-v4", reachedOutMarkPending: { requestId: "v4", teammate: true, attempts: 1 } });
+  const fails = async (state, request) => ({ ...state, reachedOutMarkPending: { requestId: request.id, errorCode: "X" } });
+  await retryTeammateReachedOutMarks({ history: [mate("v4")], states: [states.get("c-v4")], ...deps(fails) });
+  assert.deepEqual(states.get("c-v4").reachedOutMarkPending, { requestId: "v4", errorCode: "X", teammate: true, attempts: 2 });
 });
