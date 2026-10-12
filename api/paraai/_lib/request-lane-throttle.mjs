@@ -496,8 +496,14 @@ async function laneCall({
 // expiry-confirmation reads. `meta.kind` marks a read as "status" (health,
 // polling reads that never write) vs the default "job" (a request that acts
 // on a specific candidate/request row).
-export async function requestLaneTrpcGet(proc, json = {}, { lane = "unknown", kind = "job" } = {}) {
-  return laneCall({ lane, kind, rawFn: () => trpcGetRaw(proc, json, 1) });
+// `timeoutMs` only for an operator measurement that is expected to be slow;
+// every lane read keeps the shared default.
+export async function requestLaneTrpcGet(proc, json = {}, { lane = "unknown", kind = "job", timeoutMs } = {}) {
+  return laneCall({
+    lane,
+    kind,
+    rawFn: () => trpcGetRaw(proc, json, 1, timeoutMs ? { timeoutMs } : {}),
+  });
 }
 
 export async function requestLaneTrpcPost(proc, json = {}, { lane = "unknown", kind = "job" } = {}) {

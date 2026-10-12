@@ -11,6 +11,7 @@ import {
 import {
   acquireRequestLaneCadenceSlot,
   boundRequestLaneTrpc,
+  requestLaneTrpcGet,
   REQUEST_LANE_COOLDOWN_CODE,
   REQUEST_LANE_RATE_LIMITED_CODE,
   requestLaneAuthStatus,
@@ -542,6 +543,59 @@ export async function readSubmissionRequestHistoryWithScope({
 
 export async function readSubmissionRequestHistory() {
   return (await readSubmissionRequestHistoryWithScope()).requests;
+}
+
+// Operator-only measurement (2026-10-12): the first live agency read timed
+// out at the shared 20 s limit. One read, through the lanes' own throttle and
+// pace cap, with a long limit, reporting how long it took, how big it was,
+// how its rows split by recruiter, and the staff user ids it saw, so a
+// recruiter-filtered read can be tried next. No candidate data is returned.
+export async function measureAgencyRead({
+  recruiterFilter = [],
+  timeoutMs = 100_000,
+  scope = outreachScopeConfig(),
+  readImpl = (json, options) => requestLaneTrpcGet(HISTORY_PROC, json, { lane: "outreach", kind: "status", ...options }),
+  clock = Date.now,
+} = {}) {
+  const startedAt = clock();
+  let result;
+  try {
+    result = await readImpl({ agencyView: true, recruiterFilter }, { timeoutMs });
+  } catch (error) {
+    return {
+      ok: false,
+      ms: clock() - startedAt,
+      code: clean(error?.code || error?.name || "error").slice(0, 60),
+      status: Number(error?.status) || null,
+    };
+  }
+  const ms = clock() - startedAt;
+  const rows = Array.isArray(result) ? result : (Array.isArray(result?.requests) ? result.requests : []);
+  const currentUserId = clean(result?.currentUserId);
+  const directory = recruiterDirectory(result);
+  const entries = rows.map((row) => ({
+    row,
+    scope: requestScope(row, { scope, currentUserId, directory }),
+    status: lower(row?.status),
+  }));
+  const userIds = {};
+  for (const entry of entries) {
+    const label = entry.scope.own ? "david" : (entry.scope.key || "unknown");
+    if (!entry.scope.userId) continue;
+    (userIds[label] ||= new Set()).add(entry.scope.userId);
+  }
+  return {
+    ok: true,
+    ms,
+    approxBytes: JSON.stringify(result ?? null).length,
+    rows: rows.length,
+    resultKeys: result && typeof result === "object" && !Array.isArray(result) ? Object.keys(result).sort() : [],
+    currentUserIdKnown: Boolean(currentUserId),
+    unidentifiableRows: entries.filter((entry) => entry.scope.unidentifiable).length,
+    byRecruiter: summarizeScope(entries),
+    userIds: Object.fromEntries(Object.entries(userIds).map(([label, ids]) => [label, [...ids]])),
+    shape: rows.length ? recruiterShapeHint(rows[0]) : null,
+  };
 }
 
 // What the last tick's read covered, for health (best effort, a day).
