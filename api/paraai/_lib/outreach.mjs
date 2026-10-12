@@ -592,6 +592,20 @@ export async function recordLastOutreachScope(scope, { now = Date.now(), kvImpl 
   ]).catch(() => null);
 }
 
+// What the latest tick that read teammates did with each request (actions
+// and codes only), for health: a teammate request that is eligible but never
+// sent leaves no exception when it stops on the pace cap or a busy lock.
+const LAST_TEAMMATE_TICK_KEY = "paraai:outreach:last-teammate-tick";
+export async function recordLastTeammateTick(summary, { kvImpl = requestLaneKv } = {}) {
+  await kvImpl(["SET", LAST_TEAMMATE_TICK_KEY, JSON.stringify(summary), "EX", 24 * 60 * 60]).catch(() => null);
+}
+
+async function readLastTeammateTick({ kvImpl = requestLaneKv } = {}) {
+  const raw = await kvImpl(["GET", LAST_TEAMMATE_TICK_KEY]).catch(() => null);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 async function readLastOutreachScope({ kvImpl = requestLaneKv } = {}) {
   const raw = await kvImpl(["GET", LAST_SCOPE_KEY]).catch(() => null);
   if (!raw) return null;
@@ -4196,8 +4210,10 @@ export async function runOutreachTick({
       ? await retryTeammateReachedOutMarks({ history, states: await listOutreachStates().catch(() => states) })
         .catch(() => [])
       : [];
+    const eligibleRequests = eligibleNewRequests(history, config, states, exceptions, { now });
+    const teammateEligibleCount = eligibleRequests.filter((request) => request.ownRequest === false).length;
     for (const request of outreachBatch(
-      eligibleNewRequests(history, config, states, exceptions, { now }),
+      eligibleRequests,
       { teammatesPaused, batchSize: config.batchSize },
     )) {
       candidatesWithNewMatch.add(request.candidateUserId);
@@ -4327,6 +4343,22 @@ export async function runOutreachTick({
       teammatesPaused,
       teammateMarks,
     };
+    if (scope?.teammatesRead) {
+      await recordLastTeammateTick({
+        at: new Date(now).toISOString(),
+        eligibleTeammates: teammateEligibleCount,
+        teammatesPaused,
+        results: results.slice(0, 20).map((result) => ({
+          action: result.action || null,
+          code: result.code || null,
+          requestId: result.requestId || null,
+          teammate: result.teammate === true,
+          ...(result.followup ? { followup: true } : {}),
+          ...(result.reconciled ? { reconciled: true } : {}),
+        })),
+        teammateMarks,
+      }).catch(() => {});
+    }
   } catch (error) {
     // The FIRST Paraform call this tick (very often the history read above,
     // exactly the 2026-09-26 incident's failure point) hit a 429/401 and
@@ -4587,9 +4619,10 @@ export async function outreachHealth({
   const scopeRefusal = config.storeConfigured
     ? await getMailroomScopeRefusal().catch(() => null)
     : null;
-  const [lastScope, teammatesPausedNow] = await Promise.all([
+  const [lastScope, teammatesPausedNow, lastTeammateTick] = await Promise.all([
     readLastOutreachScope().catch(() => null),
     teammateWritesPaused().catch(() => null),
+    readLastTeammateTick().catch(() => null),
   ]);
   const result = {
     approved: config.approved,
@@ -4613,6 +4646,7 @@ export async function outreachHealth({
         outreachScopeConfig(),
       ),
       last: lastScope,
+      lastTeammateTick,
       teammatesPaused: teammatesPausedNow,
     },
     // Reply auto-pass (2026-09-29): on unless PARAAI_REPLY_PASS=off.
