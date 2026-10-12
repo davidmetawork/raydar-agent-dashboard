@@ -152,7 +152,33 @@ test("a teammate's request for a candidate on Kyra's seat is left out; David's i
     ],
   }]);
   assert.deepEqual(requests.map((r) => r.id), ["d1", "v2"]);
-  assert.equal(scope.byRecruiter.vanessa.excluded.candidate_on_protected_seat, 1);
+  assert.equal(scope.byRecruiter.vanessa.excluded.candidate_on_uncovered_seat, 1);
+});
+
+test("Kyra's candidates stay out even when her row carries no name", async () => {
+  // Her id is learned from a named row and applied to a nameless one.
+  const named = await read([{
+    currentUserId: ME,
+    requests: [
+      row("d1"),
+      kyra("k1", { candidate: "a" }),
+      row("k2", { sentTo: "user-kyra", recruiter: { id: "user-kyra" }, candidate: "b" }),
+      vanessa("v1", { candidate: "b" }),
+    ],
+  }]);
+  assert.deepEqual(named.requests.map((r) => r.id), ["d1"]);
+  assert.equal(named.scope.byRecruiter.unknown.excluded.protected_recruiter, 1);
+  // With no named row at all, any uncovered seat guards the candidate.
+  const nameless = await read([{
+    currentUserId: ME,
+    requests: [
+      row("d1"),
+      row("k3", { sentTo: "user-k9", recruiter: { id: "user-k9", email: "kphillips@raydargroup.com" }, candidate: "c" }),
+      vanessa("v2", { candidate: "c" }),
+      vanessa("v3", { candidate: "d" }),
+    ],
+  }]);
+  assert.deepEqual(nameless.requests.map((r) => r.id), ["d1", "v3"]);
 });
 
 test("anything ambiguous falls back to David's scoped read, and is remembered for an hour", async () => {
@@ -171,10 +197,19 @@ test("anything ambiguous falls back to David's scoped read, and is remembered fo
   assert.deepEqual(vendor.calls.map((c) => c.input.agencyView), [false]);
   assert.equal(second.scope.fallback, "agency_read_failed_recently");
 
-  // An empty read has nothing to attribute: no fallback, no second read.
-  const empty = await read([{ requests: [] }]);
-  assert.equal(empty.calls.length, 1);
-  assert.equal(empty.scope.fallback, null);
+  // An agency read with no row of David's is not trusted: empty, someone
+  // else's currentUserId, or rows under another field.
+  for (const response of [
+    { currentUserId: ME, requests: [] },
+    { currentUserId: "user-someone", requests: [row("d1"), vanessa("v1")] },
+    { currentUserId: ME, requests: [vanessa("v1"), alzen("a1")] },
+    { currentUserId: ME, items: [row("d1")] },
+  ]) {
+    const result = await read([response, { requests: [row("d1")] }]);
+    assert.equal(result.scope.fallback, "no_own_rows");
+    assert.deepEqual(result.requests.map((r) => r.id), ["d1"]);
+    assert.deepEqual(result.calls.map((c) => c.input.agencyView), [true, false]);
+  }
   const noUser = await read([{ requests: [row("d1"), vanessa("v1")] }, { requests: [row("d1")] }]);
   assert.equal(noUser.scope.fallback, "current_user_unknown");
   assert.deepEqual(noUser.requests.map((r) => r.id), ["d1"]);
@@ -229,6 +264,10 @@ test("a teammate's candidate gets a first email even with older unanswered reque
   // The emailed teammate row still counts when a later read cannot see it.
   const davidOnly = requests.filter((r) => r.ownRequest !== false);
   assert.equal(requestOrdinal(byId["d-new"], davidOnly, emailed), 3);
+  // Out of sight, it is placed by when the request was made, not when we wrote.
+  const lateEmail = { matches: { "v-pat": { sentAt: "2026-10-11T00:00:00.000Z", requestCreatedAt: "2026-10-05T10:00:00.000Z", ownRequest: false } } };
+  assert.equal(requestOrdinal(byId["d-new"], requests, lateEmail), 3);
+  assert.equal(requestOrdinal(byId["d-new"], davidOnly, lateEmail), 3);
   // Old records (no ownRequest field) never add phantom rows.
   assert.equal(requestOrdinal(byId["d-new"], davidOnly, { matches: { gone: { sentAt: "2026-10-02T00:00:00.000Z" } } }), 2);
 });
@@ -250,9 +289,15 @@ test("David's requests take the batch first; teammates sit out while Paraform re
   const eligible = [mate("v1"), own("d1"), mate("v2"), own("d2")];
   assert.deepEqual(outreachBatch(eligible, { batchSize: 3 }).map((r) => r.id), ["d1", "d2", "v1"]);
   assert.deepEqual(outreachBatch(eligible, { batchSize: 3, teammatesPaused: true }).map((r) => r.id), ["d1", "d2"]);
-  assert.equal(teammateWriteRefused(Object.assign(new Error("no"), { status: 403 })), true);
-  assert.equal(teammateWriteRefused(Object.assign(new Error("no"), { status: 502 })), false);
-  assert.equal(teammateWriteRefused(Object.assign(new Error("x"), { code: "PARAFORM_THROTTLED" })), false);
+  const refused = (fields) => teammateWriteRefused(Object.assign(new Error("x"), fields));
+  assert.equal(refused({ status: 403, code: "-32003", outreachStage: "digest_mutation" }), true);
+  assert.equal(refused({ status: 404, code: "HTTP_404", outreachStage: "contact_discovery" }), true);
+  assert.equal(refused({ status: 502, code: "HTTP_502", outreachStage: "digest_mutation" }), false);
+  assert.equal(refused({ code: "PARAFORM_THROTTLED", outreachStage: "digest_mutation" }), false);
+  // Gmail and the delivery stages never trip it.
+  assert.equal(refused({ status: 400, code: "GMAIL_REQUEST_FAILED", outreachStage: "contact_discovery" }), false);
+  assert.equal(refused({ status: 404, code: "HTTP_404", outreachStage: "thread_anchor" }), false);
+  assert.equal(refused({ status: 400, code: "HTTP_400", outreachStage: "gmail_delivery" }), false);
 });
 
 test("the reply pass never passes a teammate's request this lane did not email about", () => {

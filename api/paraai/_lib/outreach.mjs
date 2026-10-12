@@ -478,11 +478,7 @@ export async function readSubmissionRequestHistoryWithScope({
     if (stopsTheTick(error)) throw error;
     return fallBack("agency_read_failed", { cause: clean(error?.code || error?.name || "error").slice(0, 60) });
   }
-  const rows = Array.isArray(result) ? result : (result?.requests || []);
-  // No rows: nothing to attribute, and the scoped read would say the same.
-  if (!rows.length) {
-    return { requests: [], scope: { agencyView: true, fallback: null, teammates: scope.teammates, byRecruiter: {} } };
-  }
+  const rows = Array.isArray(result) ? result : (Array.isArray(result?.requests) ? result.requests : []);
   const currentUserId = clean(result?.currentUserId);
   if (!currentUserId) return fallBack("current_user_unknown");
   const directory = recruiterDirectory(result);
@@ -501,16 +497,32 @@ export async function readSubmissionRequestHistoryWithScope({
       shape: recruiterShapeHint(blind.row),
     });
   }
-  // A teammate's request for a candidate who also has one on Kyra's seat is
-  // left out: that candidate may be one of hers.
-  const protectedCandidates = new Set(
+  // David's history is never empty, so an agency read without one row of his
+  // is not a read to trust (a different currentUserId, a filtered view, rows
+  // under another field). Keep him whole with the scoped read.
+  if (!entries.some((entry) => entry.scope.own)) return fallBack("no_own_rows");
+  // Any id once seen as Kyra's is Kyra's on every row, named or not.
+  const protectedIds = new Set(
     entries
-      .filter((entry) => entry.scope.excluded === "protected_recruiter" && entry.candidateUserId)
+      .filter((entry) => entry.scope.excluded === "protected_recruiter" && entry.scope.userId)
+      .map((entry) => entry.scope.userId),
+  );
+  for (const entry of entries) {
+    if (!entry.scope.own && protectedIds.has(entry.scope.userId)) {
+      entry.scope = { ...entry.scope, covered: false, excluded: "protected_recruiter" };
+    }
+  }
+  // A teammate's request is left out when the same candidate also has one on
+  // any seat the lane does not cover (Kyra's, an unnamed or unlisted seat):
+  // that candidate may be one of Kyra's.
+  const guardedCandidates = new Set(
+    entries
+      .filter((entry) => !entry.scope.own && !entry.scope.covered && entry.candidateUserId)
       .map((entry) => entry.candidateUserId),
   );
   for (const entry of entries) {
-    if (!entry.scope.own && entry.scope.covered && protectedCandidates.has(entry.candidateUserId)) {
-      entry.scope = { ...entry.scope, covered: false, excluded: "candidate_on_protected_seat" };
+    if (!entry.scope.own && entry.scope.covered && guardedCandidates.has(entry.candidateUserId)) {
+      entry.scope = { ...entry.scope, covered: false, excluded: "candidate_on_uncovered_seat" };
     }
   }
   const requests = entries
@@ -553,9 +565,18 @@ async function readLastOutreachScope({ kvImpl = requestLaneKv } = {}) {
 // Paraform refusing David's seat a step on a teammate's request (a 400, 403 or
 // 404 anywhere before the send). The known "pending digest unavailable" vendor
 // shape has its own recovery and is not a refusal of the seat.
+const PARAFORM_PRE_SEND_STAGES = new Set([
+  "contact_discovery",
+  "digest_mutation",
+  "pending_digest_reverification",
+]);
 export function teammateWriteRefused(error) {
   return (
     [400, 403, 404].includes(Number(error?.status)) &&
+    PARAFORM_PRE_SEND_STAGES.has(clean(error?.outreachStage)) &&
+    // Gmail, Calendar and the lane's own codes carry statuses too; only a
+    // Paraform vendor error (a tRPC code or HTTP_nnn) is the seat being refused.
+    !/^(GMAIL|CALENDAR|GOOGLE|OUTREACH|MAILROOM)_/.test(clean(error?.code)) &&
     !isPendingDigestUnavailableError(error)
   );
 }
@@ -634,7 +655,7 @@ export function requestOrdinal(request, history, state = null) {
     .filter(([id, match]) => (
       id !== request.id && !seen.has(id) && match?.ownRequest === false && match?.sentAt
     ))
-    .map(([id, match]) => ({ id, createdAtMs: finiteDate(match.sentAt) }));
+    .map(([id, match]) => ({ id, createdAtMs: finiteDate(match.requestCreatedAt) ?? finiteDate(match.sentAt) }));
   const rows = [...visible, ...emailedTeammateRows]
     .sort((left, right) => (
       (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) - (right.createdAtMs ?? Number.MAX_SAFE_INTEGER)
@@ -1335,7 +1356,11 @@ function matchRecord({
     copyVariant: copy.variant,
     // A teammate's request (agency view, 2026-10-12); David's records are unchanged.
     ...(request.ownRequest === false
-      ? { ownRequest: false, recruiterKey: request.recruiterKey || null }
+      ? {
+        ownRequest: false,
+        recruiterKey: request.recruiterKey || null,
+        requestCreatedAt: request.createdAt || null,
+      }
       : {}),
   };
 }
@@ -2166,7 +2191,11 @@ export async function processMatchRequest(
               ordinal,
               roleUrl,
               ...(request.ownRequest === false
-                ? { ownRequest: false, recruiterKey: request.recruiterKey || null }
+                ? {
+                  ownRequest: false,
+                  recruiterKey: request.recruiterKey || null,
+                  requestCreatedAt: request.createdAt || null,
+                }
                 : {}),
               roleId: request.roleId,
               roleName: request.roleName,
@@ -3920,7 +3949,11 @@ export async function reconcileQueuedMailroomMatches({
           reachedOut: false,
           status: null,
           ...(snapshot.ownRequest === false
-            ? { ownRequest: false, recruiterKey: snapshot.recruiterKey || null }
+            ? {
+              ownRequest: false,
+              recruiterKey: snapshot.recruiterKey || null,
+              createdAt: snapshot.requestCreatedAt || null,
+            }
             : {}),
         };
         if (mailroomState !== "sent") {
@@ -4065,6 +4098,7 @@ export async function runOutreachTick({
         results.push({
           action: result.action,
           requestId: request.id,
+          ...(request.ownRequest === false ? { teammate: true } : {}),
           ...(result.autoRecoveredNoDigest
             ? { deliveryMode: result.deliveryMode, autoRecoveredNoDigest: true }
             : {}),
@@ -4074,13 +4108,19 @@ export async function runOutreachTick({
           await pauseTeammateWrites(error, request).catch(() => {});
         }
         await handleOutreachFailure(error, request, { config, now }).catch(() => {});
-        results.push({ action: "error", requestId: request.id, code: clean(error?.code || "OUTREACH_FAILED") });
+        results.push({
+          action: "error",
+          requestId: request.id,
+          code: clean(error?.code || "OUTREACH_FAILED"),
+          ...(request.ownRequest === false ? { teammate: true } : {}),
+        });
       }
     }
 
+    // A teammate's new send never takes a slot David's due nudges need.
     const remaining = Math.max(
       0,
-      config.batchSize - results.filter((result) => !result.reconciled).length,
+      config.batchSize - results.filter((result) => !result.reconciled && !result.teammate).length,
     );
     if (remaining > 0) {
       const refreshedStates = await listOutreachStates();
