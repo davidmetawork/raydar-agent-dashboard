@@ -390,6 +390,12 @@ export default async function handler(req, res) {
         action,
         scope: history.scope,
         requests: expiredUnsentRequests(history.requests, states),
+        // Status/state pairs across every row read, counts only.
+        statusCounts: history.requests.reduce((counts, row) => {
+          const key = `${row.status || "-"}/${row.state || "-"}/${row.ownRequest === false ? "teammate" : "david"}`;
+          counts[key] = (counts[key] || 0) + 1;
+          return counts;
+        }, {}),
       });
     }
     if (action === "review-held") {
