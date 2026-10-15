@@ -292,6 +292,9 @@ export function normalizeSubmissionRequest(request, scope = null) {
     ownRequest: scope ? scope.own === true : true,
     recruiterKey: scope ? (scope.own ? "david" : scope.key || null) : "david",
     status: lower(request?.status),
+    // Paraform marks expiry in `state` (EXPIRED) on some rows; expired-match
+    // actioning reads both (expired-actions.mjs isExpiredRow).
+    state: clean(request?.state).toUpperCase() || null,
     reachedOut: request?.reached_out_to_candidate === true,
     reachedOutAt: clean(request?.reached_out_to_candidate_at) || null,
     reachedOutAtMs: finiteDate(request?.reached_out_to_candidate_at),
@@ -897,7 +900,7 @@ export function expiredUnsentRequests(history, states = []) {
     }
   }
   return (history || []).filter((request) => (
-    lower(request.status) === "expired" &&
+    (lower(request.status) === "expired" || request.state === "EXPIRED") &&
     !protectedRecruiterForRoleTitle(request.roleName) &&
     !delivered.has(request.id)
   )).sort((left, right) => (
