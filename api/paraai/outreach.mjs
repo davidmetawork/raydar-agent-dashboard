@@ -14,6 +14,7 @@ import {
   PENDING_DIGEST_UNAVAILABLE_REASON,
   outreachHealth,
   pendingBackfillRequests,
+  expiredUnsentRequests,
   processMatchRequest,
   processMatchRequestBundleViaMailroom,
   readSubmissionRequestHistory,
@@ -375,6 +376,20 @@ export default async function handler(req, res) {
         action,
         scope: history.scope,
         requests: pendingBackfillRequests(history.requests, states),
+      });
+    }
+    if (action === "inspect-expired") {
+      // Read-only: expired requests (David's and the named teammates') that
+      // were never emailed. Sends nothing.
+      const [history, states] = await Promise.all([
+        readSubmissionRequestHistoryWithScope(),
+        listOutreachStates(),
+      ]);
+      return res.status(200).json({
+        ok: true,
+        action,
+        scope: history.scope,
+        requests: expiredUnsentRequests(history.requests, states),
       });
     }
     if (action === "review-held") {
