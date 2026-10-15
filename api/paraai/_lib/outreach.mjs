@@ -2025,7 +2025,21 @@ export async function processMatchRequest(
     let digest = null;
     let deliveryMode = "digest";
     let autoRecoveredNoDigest = false;
-    if (allowWithoutDigest) {
+    // A teammate's request never goes in David's digest (2026-10-15): Paraform
+    // refuses every one with the "None of the selected matches are eligible"
+    // error (4 of 4 candidates measured), and the pending no-digest proof
+    // cannot pass either, because David's seat does not list another
+    // recruiter's request as pending. The teammates' read already showed it
+    // pending and not reached out, so it goes without a digest, spending none
+    // of the 10-a-minute Paraform pace cap on a write that always fails.
+    const teammateNoDigest = mode === "send" &&
+      !allowWithoutDigest &&
+      request?.ownRequest === false &&
+      lower(request?.status) === "pending" &&
+      (request?.reachedOut !== true || paraformCandidateRecipientPremark(request));
+    if (teammateNoDigest) {
+      deliveryMode = PENDING_DIGEST_UNAVAILABLE_REASON;
+    } else if (allowWithoutDigest) {
       if (noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON) {
         attemptStage = "pending_digest_reverification";
         await verifyPendingDigestUnavailable(request);
@@ -2150,8 +2164,11 @@ export async function processMatchRequest(
     let route = reliefTransport ? "mailroom-relief" : "gmail";
     let context = null;
     let anchorStatus = "none";
+    // A teammate's role has no digest to anchor on, so it continues whatever
+    // Mailroom conversation the candidate already has rather than opening a
+    // new thread per role (one teammate candidate had six pending requests).
     const mailroomContext = laneReady.ready
-      ? mailroomConversationContext(state, digest?.digestUrl || null)
+      ? mailroomConversationContext(state, teammateNoDigest ? undefined : digest?.digestUrl || null)
       : null;
     if (reliefTransport) {
       // Relief always opens a fresh conversation.

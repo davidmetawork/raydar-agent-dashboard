@@ -721,6 +721,48 @@ test("a later role continues the Mailroom conversation, threaded, without a Gmai
   assert.equal(gmail.sent.length, 0);
 });
 
+// 2026-10-15: Paraform refuses every teammate's request a place in David's
+// digest, so they go without one, never touching matchDigest at all.
+function seedTeammateRequest(id, candidateUserId, options) {
+  const row = historyRow(id, candidateUserId, options);
+  paraform.history.push(row);
+  return normalizeSubmissionRequest(row, { own: false, key: "noah", covered: true });
+}
+
+test("a teammate's request goes out without a digest and never calls matchDigest", async () => {
+  const request = seedTeammateRequest("req-t1", "cu-t");
+  assert.equal(request.ownRequest, false);
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.action, "sent");
+  assert.equal(result.transport, "mailroom-sendgrid");
+  assert.equal(calls.filter((call) => /^matchDigest\./.test(call.proc || "")).length, 0);
+  const body = mailroom.enqueued[0];
+  assert.equal(body.subject, "1st Round - Interview Request @ Acme 🎉");
+  assert.doesNotMatch(body.html, /digest\//);
+  assert.doesNotMatch(body.html, /undefined|null/);
+  const state = await getOutreachState("cu-t");
+  assert.equal(state.matches["req-t1"].deliveryMode, "pending_digest_unavailable");
+});
+
+test("a teammate's second role for the same candidate continues the Mailroom conversation", async () => {
+  await processMatchRequest(seedTeammateRequest("req-t1", "cu-t"), history(), sendOptions());
+  const second = seedTeammateRequest("req-t2", "cu-t", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  const result = await processMatchRequest(second, history(), sendOptions());
+  assert.equal(result.action, "sent");
+  const reply = mailroom.enqueued[1];
+  assert.equal(reply.subject, "Re: 1st Round - Interview Request @ Acme 🎉");
+  assert.equal(reply.inReplyTo, "<raydar-mailroom-5000@raydar.xyz>");
+  assert.match(reply.html, /Beta/);
+  assert.doesNotMatch(reply.html, /digest\/|undefined/);
+});
+
+test("David's own request still takes the digest path", async () => {
+  const request = seedRequest("req-own", "cu-own");
+  await processMatchRequest(request, history(), sendOptions());
+  assert.ok(calls.some((call) => call.proc === "matchDigest.getDigestForCandidate"));
+  assert.match(mailroom.enqueued[0].html, /digest\/digest-abc/);
+});
+
 test("a conversation already open in Gmail finishes in Gmail", async () => {
   const request = seedRequest("req-g", "cu-g");
   await createOutreachState("cu-g", { candidateEmail: "cu-g@example.com" });
