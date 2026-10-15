@@ -1133,10 +1133,14 @@ export async function verifyPendingDigestUnavailable(
   if (!isPendingDigestUnavailableError(vendorError)) {
     throw vendorError;
   }
-  const [status, digest] = await Promise.all([
-    readStatusImpl(request.candidateUserId),
-    readDigestImpl(request.candidateUserId),
-  ]);
+  // One read after the other, never together (2026-10-15). Both go through the
+  // request lanes' cross-lane mutex, which waits only 400 ms: the second of two
+  // parallel reads always found the first still holding it and failed as
+  // PARAFORM_REQUEST_LANES_COOLING_DOWN. Every teammate's request lands here
+  // (Paraform will not add it to David's digest), so none of them could send:
+  // one Vanessa request was retried 196 times until it expired.
+  const status = await readStatusImpl(request.candidateUserId);
+  const digest = await readDigestImpl(request.candidateUserId);
   if (!pendingNoDigestOverrideEligible(request, vendorError, status, digest)) {
     const error = new Error(
       "pending no-digest recovery was not re-verified against current Paraform state",
