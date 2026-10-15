@@ -390,6 +390,16 @@ export default async function handler(req, res) {
         action,
         scope: history.scope,
         requests: expiredUnsentRequests(history.requests, states),
+        // Optional: every row (any status) for candidates whose name contains
+        // this text, to trace one person's requests. Read-only.
+        ...(String(body.candidate || "").trim().length >= 3 ? {
+          candidateRows: history.requests
+            .filter((row) => String(row.candidateName || "").toLowerCase()
+              .includes(String(body.candidate).trim().toLowerCase()))
+            .map(({ id, status, state, ownRequest, recruiterKey, createdAt, reachedOut, companyName, roleName, candidateName }) => (
+              { id, status, state, ownRequest, recruiterKey, createdAt, reachedOut, companyName, roleName, candidateName }
+            )),
+        } : {}),
         // Status/state pairs across every row read, counts only.
         statusCounts: history.requests.reduce((counts, row) => {
           const key = `${row.status || "-"}/${row.state || "-"}/${row.ownRequest === false ? "teammate" : "david"}`;
