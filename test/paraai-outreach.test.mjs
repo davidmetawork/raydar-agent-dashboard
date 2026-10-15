@@ -1658,6 +1658,37 @@ test("pending no-digest verifier re-reads status and digest after the failed mut
   });
 });
 
+// REGRESSION 2026-10-15: the two re-reads ran in parallel, and the request
+// lanes' cross-lane mutex (400 ms wait) refused the second one every time, so
+// every teammate's request (always this path) failed as COOLING_DOWN forever.
+test("pending no-digest verifier never has two Paraform reads in flight", async () => {
+  const request = {
+    id: "request-pending",
+    candidateUserId: "candidate-user",
+    roleId: "role-pending",
+    status: "pending",
+    reachedOut: false,
+  };
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const read = (value) => async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return value;
+  };
+  await verifyPendingDigestUnavailable(request, {
+    observedError: Object.assign(
+      new Error(PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE),
+      { code: "-32600" },
+    ),
+    readStatusImpl: read({ pendingIds: [request.id], digestableIds: [request.id] }),
+    readDigestImpl: read(null),
+  });
+  assert.equal(maxInFlight, 1);
+});
+
 test("pending no-digest verifier fails closed when a digest becomes available", async () => {
   const request = {
     id: "request-pending",
