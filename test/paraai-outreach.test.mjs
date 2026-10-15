@@ -81,6 +81,7 @@ import {
   PENDING_DIGEST_UNAVAILABLE_REASON,
   PENDING_DIGEST_UNAVAILABLE_VENDOR_MESSAGE,
   pendingBackfillRequests,
+  expiredUnsentRequests,
   planDeliveredFollowup,
   planDeliveredMatch,
   requestOrdinal,
@@ -2814,4 +2815,15 @@ test("a rate-limited candidate is never recorded as a held exception or alerted"
     [],
   );
   assert.deepEqual(eligible.map((row) => row.id), ["req-rate-limited"]);
+});
+
+test("expiredUnsentRequests lists only expired requests that were never delivered", () => {
+  const rows = [
+    { id: "a", status: "expired", roleName: "Engineer", createdAtMs: 2 },
+    { id: "b", status: "expired", roleName: "Engineer", createdAtMs: 1 },
+    { id: "c", status: "pending", roleName: "Engineer", createdAtMs: 0 },
+    { id: "d", status: "dismissed", roleName: "Engineer", createdAtMs: 0 },
+  ];
+  const states = [{ matches: { a: { sentAt: "2026-10-01T00:00:00.000Z" } } }];
+  assert.deepEqual(expiredUnsentRequests(rows, states).map((row) => row.id), ["b"]);
 });

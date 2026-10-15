@@ -885,6 +885,27 @@ export function pendingBackfillRequests(history, states = []) {
   ));
 }
 
+// Operator read (2026-10-15, David: "email the expired ones too"): requests
+// Paraform shows as expired that this lane never delivered. On Paraform's
+// Expired tab these are the rows nobody has actioned yet; each is sent, if
+// at all, one at a time through send-expired-without-digest.
+export function expiredUnsentRequests(history, states = []) {
+  const delivered = new Set();
+  for (const state of states || []) {
+    for (const [requestId, record] of Object.entries(state?.matches || {})) {
+      if (record?.sentAt) delivered.add(requestId);
+    }
+  }
+  return (history || []).filter((request) => (
+    lower(request.status) === "expired" &&
+    !protectedRecruiterForRoleTitle(request.roleName) &&
+    !delivered.has(request.id)
+  )).sort((left, right) => (
+    (left.createdAtMs ?? Number.MAX_SAFE_INTEGER) - (right.createdAtMs ?? Number.MAX_SAFE_INTEGER)
+    || left.id.localeCompare(right.id)
+  ));
+}
+
 function displayName(name) {
   return clean(name).replace(/^[^\p{L}\p{N}]+/u, "").trim();
 }
