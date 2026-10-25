@@ -74,6 +74,29 @@ async function pipeline(commands) {
   });
 }
 
+// Upstash bills every command inside a pipeline, so reading 500 records as
+// separate GETs cost 500 commands on every outreach pass. One MGET per chunk
+// bills as one command and returns the same values in the same order (null for
+// a missing key), still in a single HTTP request.
+const MGET_CHUNK = 100;
+
+async function getMany(keys, pipelineImpl) {
+  if (!keys.length) return [];
+  const chunks = [];
+  for (let i = 0; i < keys.length; i += MGET_CHUNK) {
+    chunks.push(["MGET", ...keys.slice(i, i + MGET_CHUNK)]);
+  }
+  const results = await pipelineImpl(chunks);
+  return results.flatMap((rows, index) => {
+    if (!Array.isArray(rows) || rows.length !== chunks[index].length - 1) {
+      const error = new Error("outreach state store MGET returned an unexpected shape");
+      error.code = "OUTREACH_STORE_COMMAND_FAILED";
+      throw error;
+    }
+    return rows;
+  });
+}
+
 export async function probeOutreachStore({ kvImpl = kv } = {}) {
   const nonce = randomUUID();
   const key = `paraai:outreach:canary:${nonce}`;
@@ -199,7 +222,7 @@ export async function listOutreachStates(limit = 500, {
   const capped = Math.max(1, Math.min(1000, Number(limit) || 500));
   const ids = await kvImpl(["ZREVRANGE", INDEX_KEY, 0, capped - 1]);
   if (!Array.isArray(ids) || !ids.length) return [];
-  const rows = await pipelineImpl(ids.map((id) => ["GET", `paraai:outreach:candidate:${id}`]));
+  const rows = await getMany(ids.map((id) => `paraai:outreach:candidate:${id}`), pipelineImpl);
   return rows.map((row) => parse(row, null)).filter(Boolean);
 }
 
@@ -292,9 +315,7 @@ export async function listOutreachExceptions(
   const capped = Math.max(1, Math.min(1000, Number(limit) || 200));
   const ids = await kvImpl(["ZREVRANGE", EXCEPTION_INDEX_KEY, 0, capped - 1]);
   if (!Array.isArray(ids) || !ids.length) return [];
-  const rows = await pipelineImpl(
-    ids.map((id) => ["GET", `paraai:outreach:exception:${id}`]),
-  );
+  const rows = await getMany(ids.map((id) => `paraai:outreach:exception:${id}`), pipelineImpl);
   return rows
     .map((row) => parse(row, null))
     .filter((row) => row && (includeResolved || row.status === "open"));
