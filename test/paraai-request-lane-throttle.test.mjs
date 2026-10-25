@@ -99,6 +99,7 @@ function evalScript([script, keyCount, ...rest]) {
 function command([name, ...args]) {
   switch (String(name).toUpperCase()) {
     case "GET": return kv.get(args[0]) ?? null;
+    case "MGET": return args.map((key) => kv.get(key) ?? null);
     case "SET": {
       const [key, value, ...options] = args;
       if (options.includes("NX") && kv.has(key)) return null;

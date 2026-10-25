@@ -99,6 +99,8 @@ import {
 import {
   claimOutreachExceptionAlert,
   getContactCapability,
+  listOutreachExceptions,
+  listOutreachStates,
   probeOutreachStore,
   recordContactCapability,
   recordOutreachException,
@@ -958,6 +960,55 @@ test("missing-email exceptions are durable and notification claims are deduplica
   assert.equal(await claimOutreachExceptionAlert(request.id, {
     kvImpl: async () => null,
   }), false);
+});
+
+test("outreach list reads batch records into MGET chunks, one billed command per 100", async () => {
+  const ids = Array.from({ length: 250 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
+  const values = new Map(ids.map((id, i) => [
+    `paraai:outreach:candidate:${id}`,
+    i % 50 === 7 ? null : JSON.stringify({ candidateUserId: `user-${i}`, revision: i }),
+  ]));
+  const batches = [];
+  const states = await listOutreachStates(250, {
+    kvImpl: async (command) => {
+      assert.deepEqual(command, ["ZREVRANGE", "paraai:outreach:index", 0, 249]);
+      return ids;
+    },
+    pipelineImpl: async (commands) => {
+      batches.push(commands);
+      return commands.map(([, ...keys]) => keys.map((key) => values.get(key) ?? null));
+    },
+  });
+  assert.equal(batches.length, 1, "still one HTTP pipeline per list");
+  assert.deepEqual(batches[0].map((command) => [command[0], command.length - 1]), [
+    ["MGET", 100], ["MGET", 100], ["MGET", 50],
+  ]);
+  assert.equal(states.length, 245, "missing records are skipped, as with GET");
+  assert.deepEqual(states.slice(0, 3).map((row) => row.revision), [0, 1, 2]);
+  assert.equal(states.at(-1).revision, 249);
+
+  const open = JSON.stringify({ requestId: "r1", status: "open" });
+  const resolved = JSON.stringify({ requestId: "r2", status: "resolved" });
+  const exceptions = await listOutreachExceptions(10, {
+    kvImpl: async () => ["e1", "e2"],
+    pipelineImpl: async (commands) => {
+      assert.deepEqual(commands, [["MGET", "paraai:outreach:exception:e1", "paraai:outreach:exception:e2"]]);
+      return [[open, resolved]];
+    },
+  });
+  assert.deepEqual(exceptions.map((row) => row.requestId), ["r1"]);
+
+  assert.deepEqual(await listOutreachStates(5, {
+    kvImpl: async () => [],
+    pipelineImpl: async () => assert.fail("no read for an empty index"),
+  }), []);
+  await assert.rejects(
+    listOutreachStates(5, {
+      kvImpl: async () => ["a", "b"],
+      pipelineImpl: async () => [["only-one"]],
+    }),
+    { code: "OUTREACH_STORE_COMMAND_FAILED" },
+  );
 });
 
 test("staged auth failures are durable and contact recovery cannot erase them", async () => {
