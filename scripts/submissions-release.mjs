@@ -33,6 +33,7 @@ const FIXED_FILES = Object.freeze([
   "vercel.json",
 ]);
 const FIXED_DIRECTORIES = Object.freeze([
+  ["api/_lib/vendor/paraform", (path) => path.endsWith(".mjs")],
   ["api/submissions-v2", (path) => path.endsWith(".mjs") && path !== MANIFEST_MODULE],
   ["submissions-v2-worker", (path) => /(?:\.mjs|\/Dockerfile|\/fly\.toml)$/u.test(path)],
   ["submissions-v2-purge", (path) => /(?:\.mjs|\/Dockerfile|\/fly\.toml)$/u.test(path)],
