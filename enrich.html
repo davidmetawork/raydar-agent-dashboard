@@ -110,6 +110,7 @@
       <div>
         <label>Sequence</label>
         <select id="seq"><option value="">Loading sequences…</option></select>
+        <div id="seqNote" class="note hidden"></div>
       </div>
       <button id="enrichBtn" class="btn go" disabled>Enrich Sequence</button>
     </div>
@@ -174,14 +175,54 @@ async function loadCredits(){
     $("cred-fe").querySelector(".cred-body").innerHTML='<span class="badge b-bad">unreachable</span>';
   }
 }
-async function loadSeqs(){
+// The list is a stored snapshot (api/seq/sequences.mjs) — an ordinary load
+// makes zero Paraform requests, so a sequence made after the snapshot is not
+// in it until someone asks for a live re-read. Without this link only the
+// Sequences page could do that, and a new sequence never reached this dropdown.
+const STALE_LIST_MS = 24*3600*1000;
+function fmtAge(ms){
+  if(ms==null) return "";
+  const min = Math.round(ms/60000);
+  if(min < 1) return "just now";
+  if(min < 60) return min+" min ago";
+  const hr = Math.round(min/60);
+  if(hr < 24) return hr+" hr ago";
+  const day = Math.round(hr/24);
+  return day+" day"+(day===1?"":"s")+" ago";
+}
+function seqNoteHtml(d){
+  const age = d.snapshotAgeMs!=null ? "List as of "+fmtAge(d.snapshotAgeMs) : "List refreshed";
+  let html = esc(age)+' — <a href="#" id="seqRefreshLink">Refresh list</a>';
+  if(d.refreshError) html += ' · <b>refresh failed</b> ('+esc(d.refreshError==="AUTH_EXPIRED"?"Paraform session expired":d.refreshError)+'), showing the older list';
+  else if(d.refreshSkipped==="too_soon") html += ' · refreshed too recently, try again in a couple of minutes';
+  if(d.snapshotAgeMs!=null && d.snapshotAgeMs>STALE_LIST_MS) html += '<br><b>Sequences created after that are not in this list yet.</b>';
+  return html;
+}
+async function loadSeqs(refresh){
+  const sel=$("seq"), note=$("seqNote"), keep=sel.value;
   try{
-    const d = await fetch("/api/seq/sequences",{headers:authHeaders()}).then(r=>r.json());
+    const d = await fetch("/api/seq/sequences"+(refresh?"?refresh=1":""),{headers:authHeaders()}).then(r=>r.json());
     SEQS = d.sequences||[];
-    const sel=$("seq");
-    if(!SEQS.length){ sel.innerHTML='<option value="">(no sequences — session not set)</option>'; return; }
-    sel.innerHTML = '<option value="">Choose a sequence…</option>' + SEQS.map(s=>`<option value="${s.id}">${esc(s.name)}${s.enabled?"":" (disabled)"}</option>`).join("");
-  }catch(e){ $("seq").innerHTML='<option value="">(failed to load)</option>'; }
+    if(!SEQS.length){
+      sel.innerHTML='<option value="">(no sequences — session not set)</option>';
+      note.innerHTML = d.warming ? "Loading the sequence list for the first time…" : (d.error ? esc(d.error==="expired"?"Paraform session expired":d.error)+' — <a href="#" id="seqRefreshLink">Try again</a>' : "");
+      note.classList.toggle("hidden", !note.innerHTML);
+    } else {
+      sel.innerHTML = '<option value="">Choose a sequence…</option>' + SEQS.map(s=>`<option value="${s.id}">${esc(s.name)}${s.enabled?"":" (disabled)"}</option>`).join("");
+      if(keep && SEQS.some(s=>s.id===keep)) sel.value = keep;
+      if(d.source==="snapshot"||d.source==="live"){ note.innerHTML = seqNoteHtml(d); note.classList.remove("hidden"); }
+      else note.classList.add("hidden");
+    }
+    bindSeqRefresh();
+    refreshEnrichBtn();
+  }catch(e){
+    if(refresh){ note.innerHTML='Refresh failed — <a href="#" id="seqRefreshLink">try again</a>'; bindSeqRefresh(); }
+    else sel.innerHTML='<option value="">(failed to load)</option>';
+  }
+}
+function bindSeqRefresh(){
+  const link=document.getElementById("seqRefreshLink");
+  if(link) link.addEventListener("click",(e)=>{ e.preventDefault(); link.textContent="Refreshing…"; loadSeqs(true); });
 }
 function selectedFields(){ const f=[]; if($("ck-personal").checked)f.push("personal"); if($("ck-work").checked)f.push("work"); if($("ck-phone").checked)f.push("phone"); return f; }
 function refreshEnrichBtn(){ $("enrichBtn").disabled = !$("seq").value || selectedFields().length===0; }
