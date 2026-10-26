@@ -1117,6 +1117,7 @@ export const SYSTEMS = [
       "neon-db",
       "upstash-kv",
       "n8n-cloud",
+      "raydar-dispatch",
       "slack-transport",
       "recall-api",
       "vapi-api",
