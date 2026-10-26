@@ -489,6 +489,21 @@ export const CATALOG = [
     note: "Reads the existing hourly watchdog's state. READ-ONLY on seqguard:n8nwatch.",
   },
 
+  // raydar-dispatch (the n8n replacement) beats on every 2nd one-minute tick,
+  // so a beat is normally under 2 min old. 4 min = two missed beats (DEGRADED);
+  // past 6 min is DOWN (SPEC 2.6 dead-man path 1). A `fail` beat is DOWN at once.
+  // Tier 2: a page-the-human tier is David's call once shadow parity is proven.
+  {
+    id: "raydar-dispatch",
+    name: "Raydar dispatch",
+    group: "pipeline",
+    tier: 2,
+    kind: "beat",
+    probe: { lane: "raydar-dispatch", degradedAfterMin: 4, maxSilenceMin: 6 },
+    registry: "/operations/monitoring-canaries/",
+    note: "Per-minute dispatcher that replaces the n8n Cloud workflows; beats from its own tick, so silence means the dispatch project itself is down.",
+  },
+
   // ---------- E. GitHub Actions ----------
   // Each scheduled Action posts a heartbeat at the end of its run instead of
   // being polled through the GitHub API. That needs no token, and it proves the

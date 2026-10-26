@@ -325,6 +325,25 @@ test("gha-post-call-watchdog has a beat row, tier 2, in the actions group", () =
   assert.equal(row.probe.lane, "gha-post-call-watchdog");
 });
 
+test("raydar-dispatch beat lane: accepted by the beat sink, stale-red after 6 minutes", () => {
+  assert.ok(beatLanes.has("raydar-dispatch"), "beat sink would 404 unknown_lane");
+  const row = byId.get("raydar-dispatch");
+  assert.ok(row);
+  assert.equal(row.kind, "beat");
+  assert.equal(row.probe.lane, "raydar-dispatch");
+  assert.equal(row.probe.maxSilenceMin, 6);
+  assert.ok(row.probe.degradedAfterMin < row.probe.maxSilenceMin);
+  const at = (mins, status = "ok") => beatLane({
+    probe: row.probe,
+    beat: { at: new Date(Date.now() - mins * 60000).toISOString(), status },
+  }).state;
+  assert.equal(at(1), "OK");
+  assert.equal(at(5), "DEGRADED");
+  assert.equal(at(7), "DOWN");
+  assert.equal(at(0, "fail"), "DOWN");
+  assert.equal(at(0, "warn"), "DEGRADED");
+});
+
 // ── Regressions found by Drill 1 on 2026-08-07 ────────────────────────────
 // Vercel answers an unknown /api/* path with a JSON error envelope when the
 // caller sends `accept: application/json`. That envelope parses cleanly, says
