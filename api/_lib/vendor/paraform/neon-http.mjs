@@ -27,8 +27,9 @@
 //   * headers `Neon-Connection-String: <the whole postgres:// URL>`,
 //     `Neon-Raw-Text-Output: "true"`, `Neon-Array-Mode: "true"`, and
 //     `Authorization: Bearer <jwt>` only when JWT auth is configured.
-//     We send the connection string and raw-text output, and we do NOT send
-//     array mode, so rows come back as objects keyed by column name.
+//     We send ONLY the connection string (plus content-type/accept). We send
+//     NEITHER `Neon-Raw-Text-Output` NOR `Neon-Array-Mode`: rows come back as
+//     objects keyed by column name, typed as the server types them (below).
 //   * a connection string must be `postgres:`/`postgresql:` and carry a
 //     username, a hostname and a database path; the driver rejects it
 //     otherwise with the same three checks made below.
@@ -38,12 +39,25 @@
 //     body the driver wraps as "Server error (HTTP status N)".
 //   * success: JSON with `fields: [{name, …}]` and `rows`; `rowCount` and
 //     `command` are passed through when the server sends them.
-// NOT verifiable without a live Neon endpoint ([V] for the lead): that
-// `Neon-Raw-Text-Output: true` returns every value as a string in OBJECT mode
-// as well as in array mode. The store never relies on it — it casts bigints
-// and timestamps to text in SQL and coerces defensively in JS — so either
-// typing works.
-//
+// MEASURED 2026-10-26 by the lead against the real CRM Neon endpoint, over
+// HTTP, with read-only literal SELECTs. These are facts about the wire, not
+// reading of a driver bundle:
+//   * WITH `Neon-Raw-Text-Output: true` EVERY value comes back as a string:
+//     bool "t", int "42", jsonb as JSON text, text[] as "{x,y}". We do NOT use
+//     it: it makes every caller re-parse every value.
+//   * WITHOUT that header (what this file sends): bool -> true/false,
+//     int4 -> number, int8/bigint -> string, numeric -> string
+//     ("1793034729593.856000"), jsonb -> object, text[] -> JS array,
+//     NULL -> null, timestamptz -> string "2026-10-26 17:12:09.593854+00"
+//     (Date.parse handles it in Node), timestamp WITHOUT tz -> string with no
+//     offset. node-pg differs only in handing timestamptz back as a JS Date,
+//     so every reader of a timestamp must accept Date OR string OR epoch number.
+//   * Parameters: a JS array sent as a JSON array param works with
+//     `$n::text[]` (["p","q,r","s\"t"] round-trips exactly, length 3); a PG
+//     array literal string also works; a JSON-stringified object works with
+//     `$n::jsonb`. A JSON array bound to a jsonb parameter would be read as a
+//     Postgres array, so a caller that wants a jsonb ARRAY stringifies it
+//     itself (a string always goes through untouched).
 // SECRET HYGIENE. The connection string carries a password. It is sent only in
 // the request header, is never logged, and never appears in a thrown error:
 // every error here carries a short code and a short literal detail.
@@ -93,12 +107,15 @@ export function neonHttpEndpoint(connectionString) {
 }
 
 /**
- * Neon's HTTP endpoint takes parameters as JSON. Postgres then casts from text,
- * which is why every statement in the store casts its parameters explicitly.
- * Dates go as ISO strings, bigints and numbers as decimal strings, objects as
- * JSON; arrays are NOT supported on purpose — the store passes comma strings
- * and lets `string_to_array` do the work, so no driver-specific array literal
- * encoding can drift between the HTTP path and an injected `pg` pool.
+ * One parameter as the Neon HTTP endpoint takes it (measured 2026-10-26, see
+ * the header). Scalars go as strings and Postgres casts from text, which is why
+ * every statement casts its parameters explicitly: numbers, bigints and
+ * booleans as decimal/word strings, dates as ISO strings. A plain object goes
+ * as JSON text (for `$n::jsonb`). A JS array goes as a JSON ARRAY (for
+ * `$n::text[]`, `$n::int[]`, ...), each element converted by the same rules, so
+ * commas, quotes and braces in an element survive without any hand-built array
+ * literal. To bind a jsonb array, pass JSON.stringify(array): a string is never
+ * touched.
  */
 export function toWireParam(value) {
   if (value === null || value === undefined) return null;
@@ -107,7 +124,7 @@ export function toWireParam(value) {
     return String(value);
   }
   if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) throw coded("NEON_HTTP_PARAM_UNSUPPORTED", "array");
+  if (Array.isArray(value)) return value.map((element) => toWireParam(element));
   return JSON.stringify(value);
 }
 
@@ -137,7 +154,6 @@ export function neonHttpQuery(connectionString, {
         method: "POST",
         headers: {
           "Neon-Connection-String": connection,
-          "Neon-Raw-Text-Output": "true",
           "content-type": "application/json",
           accept: "application/json",
         },

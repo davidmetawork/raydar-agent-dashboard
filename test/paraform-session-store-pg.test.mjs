@@ -159,7 +159,7 @@ test("vendored lifecycle copies match their pins (re-sync from lifecycle/_lib/, 
   // Byte-identical copies of Raydar lifecycle/_lib/ (the other repo has the
   // authoritative byte-identity guard). Any drift here must be a deliberate re-sync.
   const pins = {
-    "neon-http.mjs": "78d7b78cf3ad663c8439ccdf645b0fa285c831d056dd049db52800cc5a147ad4",
+    "neon-http.mjs": "df00242cec7523d80468f1e3131aea739fd0acf59a95f042306339225b74bc69",
     "paraform-accounts.mjs": "d82a4ca8dce7ad84c698c8e17c6133841538c90edfe1fcba8809c6a2735c1a32",
     "paraform-session.mjs": "6f231399854bb55ac5f0bfb4d6860f77b141d899945a0e3183f45bb1a68ac23c",
     "paraform-session-store.mjs": "08f2bdb74903b52bad7e987ad47832c6699bceacd9d9834f67d4fc94b2facb42",
