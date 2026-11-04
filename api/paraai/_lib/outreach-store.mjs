@@ -596,6 +596,7 @@ const PROTECTED_SEEN_KEY = "paraai:outreach:protected:seen";
 const PROTECTED_META_KEY = "paraai:outreach:protected:meta";
 const PROTECTED_SCAN_SLOT_KEY = "paraai:outreach:protected:scan-slot";
 const PROTECTED_MATCH_KEY = "paraai:outreach:protected:last-match";
+const PROTECTED_LOOKUP_KEY = "paraai:outreach:protected:lookup";
 
 function hashPairs(raw) {
   if (!raw) return {};
@@ -638,6 +639,21 @@ export async function claimProtectedMeta(field, value = new Date().toISOString()
 // subs (ids, status and markers only), kept two days for diagnosis.
 export async function recordProtectedMatch(record, { kvImpl = kv } = {}) {
   await kvImpl(["SET", PROTECTED_MATCH_KEY, JSON.stringify(record), "EX", "172800"]);
+}
+
+// Who each note is about (outreach-protected-lookup.mjs), by request id.
+export async function getProtectedLookups({ kvImpl = kv } = {}) {
+  const out = {};
+  for (const [requestId, raw] of Object.entries(hashPairs(await kvImpl(["HGETALL", PROTECTED_LOOKUP_KEY])))) {
+    try { out[requestId] = JSON.parse(raw); } catch { /* skip a torn value */ }
+  }
+  return out;
+}
+
+export async function saveProtectedLookup(record, { kvImpl = kv } = {}) {
+  const requestId = String(record?.requestId || "").trim();
+  if (!requestId) throw new Error("requestId required");
+  await kvImpl(["HSET", PROTECTED_LOOKUP_KEY, requestId, JSON.stringify(record)]);
 }
 
 export async function acquireProtectedScanSlot({ ttlSeconds = 300, kvImpl = kv } = {}) {

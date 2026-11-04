@@ -1588,3 +1588,51 @@ test("the tick admits a protected sub on its note, but never one a person alread
   assert.deepEqual(eligibleNewRequests([{ ...withNote, status: "submitted" }], protectedConfig), []);
   assert.deepEqual(eligibleNewRequests([withNote], { ...protectedConfig, protectedNotBeforeMs: null }), []);
 });
+
+test("a looked-up protected sub (not in the request list) sends with no digest, no reached-out mark and no list re-read", async () => {
+  const { syntheticProtectedRequests } = await import("../api/paraai/_lib/outreach-protected-lookup.mjs");
+  const sub = {
+    requestId: "req-p9",
+    roleId: "role-req-p9",
+    candidateName: "Candidate cu-p9",
+    companyName: "Acme",
+    submitUrl: "https://www.paraform.com/company/acme/role-req-p9/recruit/submit_candidate?from_submission_request=true&submission_request_id=req-p9",
+    receivedAt: "2026-09-28T16:05:00.000Z",
+    sender: "staff@paraform.com",
+  };
+  const [row] = syntheticProtectedRequests({
+    subs: new Map([[sub.requestId, sub]]),
+    lookups: { "req-p9": { requestId: "req-p9", status: "resolved", candidateUserId: "cu-p9", roleName: "Software Engineer", companyName: "Acme" } },
+    historyIds: new Set(),
+    notBeforeMs: Date.parse("2026-09-28T00:00:00Z"),
+    now: Date.parse("2026-09-28T17:00:00Z"),
+  });
+  assert.equal(row.synthetic, true);
+  const before = calls.length;
+  const result = await processMatchRequest(row, [...history(), row], sendOptions());
+  assert.equal(result.action, "sent");
+  const after = calls.slice(before).filter((call) => call.kind === "paraform").map((call) => call.proc);
+  assert.equal(after.filter((proc) => /^matchDigest\./.test(proc)).length, 0);
+  assert.ok(!after.includes("submissionRequest.markReachedOutToCandidate"), "no reached-out mark");
+  assert.ok(!after.includes("submissionRequest.getRecruiterSubmissionRequestHistory"), "no request-list re-read");
+  assert.equal(paraform.marks.includes("req-p9"), false);
+  const body = mailroom.enqueued.at(-1);
+  assert.equal(body.dedupeKey, "paraai-outreach:auto:match:req-p9");
+  assert.match(body.html, /You have a new interview request for the <a [^>]+>Software Engineer @ Acme<\/a> role\./);
+  const state = await getOutreachState("cu-p9");
+  assert.equal(state.matches["req-p9"].deliveryMode, "protected_sub");
+  assert.equal(state.matches["req-p9"].copyVariant, "protected_initial");
+});
+
+test("a looked-up row that is not a protected send never reaches the digest write", async () => {
+  const before = calls.length;
+  const row = {
+    id: "req-p10", status: "pending", synthetic: true, candidateUserId: "cu-p10", roleId: "role-req-p10",
+    roleName: "Software Engineer", companyName: "Acme", createdAtMs: Date.parse("2026-09-28T16:00:00Z"),
+    reachedOut: false, recipientTypes: [], ownRequest: true,
+  };
+  const result = await processMatchRequest(row, [...history(), row], sendOptions()).catch((error) => ({ error }));
+  const procs = calls.slice(before).filter((call) => call.kind === "paraform").map((call) => call.proc);
+  assert.equal(procs.filter((proc) => /^matchDigest\./.test(proc)).length, 0);
+  assert.notEqual(result.action, "sent");
+});

@@ -316,3 +316,133 @@ test("the match record says which stored subs the request read holds, and their 
   assert.equal(match.rows.find((row) => row.requestId === "req-b").reachedOutAfterS, 2);
   assert.ok(!JSON.stringify(match).includes("candidate"), "no names or candidate fields in the record");
 });
+
+import {
+  lookupProtectedSub,
+  lookupReason,
+  protectedLookupQueue,
+  runProtectedLookups,
+  sameName,
+  syntheticProtectedRequests,
+} from "../api/paraai/_lib/outreach-protected-lookup.mjs";
+
+function fakeParaform({ role = { title: "Founding Engineer", company: { name: "Acme" } }, crm = [], apps = {} } = {}) {
+  const calls = [];
+  const impl = async (proc, input) => {
+    calls.push(proc);
+    if (proc === "role.getRoleByIdSimple") return role;
+    if (proc === "candidateUser.getCRMExternalCandidates") return { items: crm, next_cursor: null };
+    if (proc === "candidateUser.getCandidateUserApplications") return apps[input.candidate_user_id] || [];
+    throw new Error(`unexpected ${proc}`);
+  };
+  return { impl, calls };
+}
+
+const NOTE = Object.freeze({
+  requestId: "req-1",
+  ctarId: "ctar-1",
+  roleId: "role-1",
+  candidateName: "Jane Q. Doe",
+  companyName: "Acme",
+  submitUrl: "https://www.paraform.com/company/acme/role-1/recruit/submit_candidate?from_submission_request=true&submission_request_id=req-1",
+  receivedAt: "2026-11-04T18:00:00.000Z",
+});
+
+test("names match on first and last name, ignoring case, accents and middle names", () => {
+  assert.ok(sameName("Jane Q. Doe", "jane doe"));
+  assert.ok(sameName("José Núñez", "Jose Nunez"));
+  assert.ok(!sameName("Jane Doe", "Jane Doering"));
+  assert.ok(!sameName("Jane Doe", "John Doe"));
+});
+
+test("the lookup accepts exactly one person by that name who has the note's role on their record", async () => {
+  const { impl, calls } = fakeParaform({
+    crm: [
+      { id: "cu-1", candidate: { name: "Jane Doe" }, linkedin_user: "janedoe" },
+      { id: "cu-2", candidate: { name: "Jane Doe" } },
+      { id: "cu-3", candidate: { name: "John Smith" } },
+    ],
+    apps: { "cu-1": [{ id: "app-9", role_id: "role-1" }], "cu-2": [{ id: "app-8", role_id: "role-2" }] },
+  });
+  const record = await lookupProtectedSub(NOTE, { trpcGetImpl: impl, now: Date.parse("2026-11-04T18:05:00Z") });
+  assert.equal(record.status, "resolved");
+  assert.equal(record.candidateUserId, "cu-1");
+  assert.equal(record.roleName, "Founding Engineer");
+  assert.equal(record.companyName, "Acme");
+  assert.equal(record.nameMatches, 2);
+  assert.equal(record.ctarMatch, false);
+  // Only the two same-name people are opened, never the third.
+  assert.equal(calls.filter((proc) => proc === "candidateUser.getCandidateUserApplications").length, 2);
+});
+
+test("two people by that name on the role, nobody on it, or an unreadable role never resolves", async () => {
+  const both = fakeParaform({
+    crm: [{ id: "cu-1", candidate: { name: "Jane Doe" } }, { id: "cu-2", candidate: { name: "Jane Doe" } }],
+    apps: { "cu-1": [{ role_id: "role-1" }], "cu-2": [{ role: { id: "role-1" } }] },
+  });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: both.impl })).status, "ambiguous");
+  const nobody = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" } }], apps: { "cu-1": [{ role_id: "role-9" }] } });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: nobody.impl })).status, "not_found");
+  const noRole = fakeParaform({ role: { title: "" } });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: noRole.impl })).status, "role_unreadable");
+  assert.equal((await lookupProtectedSub({ ...NOTE, candidateName: null }, { trpcGetImpl: nobody.impl })).status, "no_name");
+  assert.match(lookupReason({ status: "ambiguous" }), /more than one person/);
+  assert.equal(lookupReason({ status: "resolved" }), null);
+});
+
+test("the queue takes new notes first, retries not-found three times, and backfills earlier notes once", () => {
+  const now = Date.parse("2026-11-04T19:00:00Z");
+  const notBeforeMs = Date.parse("2026-11-04T17:46:07Z");
+  const sub = (id, receivedAt) => [id, { ...NOTE, requestId: id, receivedAt }];
+  const subs = new Map([
+    sub("new-a", "2026-11-04T18:30:00Z"),
+    sub("new-b", "2026-11-04T18:00:00Z"),
+    sub("old-a", "2026-11-04T16:00:00Z"),
+    sub("old-b", "2026-11-03T16:00:00Z"),
+    sub("in-read", "2026-11-04T18:10:00Z"),
+    sub("ancient", "2026-10-20T16:00:00Z"),
+  ]);
+  const ids = (queue) => queue.map((row) => row.requestId);
+  const historyIds = new Set(["in-read"]);
+  assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, notBeforeMs, now, backfill: 1 })), ["new-b", "new-a", "old-a"]);
+  const lookups = {
+    "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z" },
+    "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z" },
+    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z" },
+  };
+  // new-b is not due for 10 minutes, new-a is out of attempts, old-a used the backfill.
+  assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill: 1 })), []);
+  assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill: 2 })), ["old-b"]);
+});
+
+test("a throttle refusal stops the lookups without spending an attempt", async () => {
+  const saved = [];
+  const refused = Object.assign(new Error("cap"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" });
+  const result = await runProtectedLookups({
+    subs: new Map([["req-1", NOTE]]),
+    historyIds: new Set(),
+    notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
+    now: Date.parse("2026-11-04T18:05:00Z"),
+    trpcGetImpl: async () => { throw refused; },
+    store: { list: async () => ({}), save: async (record) => { saved.push(record); } },
+  });
+  assert.equal(result.looked, 0);
+  assert.equal(result.stopped, "PARAFORM_REQUEST_LANES_RATE_LIMITED");
+  assert.deepEqual(saved, []);
+});
+
+test("rows are made only for resolved notes from after the switch-on, with every field the send needs", () => {
+  const lookups = { "req-1": { status: "resolved", candidateUserId: "cu-1", roleName: "Founding Engineer", companyName: "Acme" } };
+  const args = { lookups, historyIds: new Set(), notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: Date.parse("2026-11-04T19:00:00Z") };
+  const [row] = syntheticProtectedRequests({ ...args, subs: new Map([["req-1", NOTE]]) });
+  assert.equal(row.id, "req-1");
+  assert.equal(row.status, "pending");
+  assert.equal(row.synthetic, true);
+  assert.equal(row.ownRequest, true);
+  assert.equal(row.reachedOut, false);
+  assert.equal(row.protectedSub.submitUrl, NOTE.submitUrl);
+  assert.deepEqual(syntheticProtectedRequests({ ...args, subs: new Map([["req-1", { ...NOTE, receivedAt: "2026-11-04T16:00:00Z" }]]) }), []);
+  assert.deepEqual(syntheticProtectedRequests({ ...args, historyIds: new Set(["req-1"]), subs: new Map([["req-1", NOTE]]) }), []);
+  assert.deepEqual(syntheticProtectedRequests({ ...args, lookups: { "req-1": { ...lookups["req-1"], roleName: "" } }, subs: new Map([["req-1", NOTE]]) }), []);
+  assert.deepEqual(syntheticProtectedRequests({ ...args, notBeforeMs: null, subs: new Map([["req-1", NOTE]]) }), []);
+});

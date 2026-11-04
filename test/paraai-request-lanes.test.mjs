@@ -614,6 +614,7 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
     protectedScanImpl: async () => ({ scanned: true, subs, added: ["request-protected"], unparsed: [] }),
     protectedWatchImpl: async (options) => { watched = options; return []; },
     protectedMatchRecordImpl: async (record) => { matched = record; },
+    protectedLookupImpl: async () => ({ lookups: {}, looked: 0 }),
   });
   // The protected request is attempted (this process cannot reach Paraform,
   // so it errors); the plain one is still held back by the not-before.
@@ -621,7 +622,7 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
   assert.equal(watched.subs, subs);
   assert.equal(watched.history.find((row) => row.id === "request-protected").protectedSub.receivedAt, "2026-11-04T16:05:00.000Z");
   assert.deepEqual(result.protectedSubs, {
-    scanned: true, known: 1, added: 1, unparsed: 0, unsentAlerts: 0, inRead: 1, missing: 0, admissible: 1,
+    scanned: true, known: 1, added: 1, unparsed: 0, unsentAlerts: 0, inRead: 1, missing: 0, admissible: 1, looked: 0, rows: 0,
   });
   assert.equal(matched.inRead, 1);
   assert.deepEqual(matched.status, { pending: 1 });
@@ -638,4 +639,47 @@ test("the tick never scans for protected subs while they are switched off", asyn
   });
   assert.equal(scans, 0);
   assert.equal(result.protectedSubs, undefined);
+});
+
+test("a note the request list lacks is looked up, becomes this tick's row, and stays out of the reply pass", async () => {
+  const subs = new Map([["request-missing", {
+    requestId: "request-missing",
+    roleId: "role-m",
+    candidateName: "Jane Doe",
+    companyName: "Acme",
+    submitUrl: "https://www.paraform.com/company/acme/role-m/recruit/submit_candidate?from_submission_request=true&submission_request_id=request-missing",
+    receivedAt: "2026-11-04T18:05:00.000Z",
+  }]]);
+  let lookedWith = null;
+  let replyHistory = null;
+  let watchedLookups = null;
+  const result = await runOutreachTick({
+    config: {
+      ...openOutreachConfig(),
+      notBeforeMs: Date.parse("2026-12-01T00:00:00.000Z"),
+      protectedNotBeforeMs: Date.parse("2026-11-04T17:46:07.000Z"),
+    },
+    now: Date.parse("2026-11-04T18:10:00.000Z"),
+    pauseState: async () => ({ paused: false }),
+    historyImpl: async () => [],
+    protectedScanImpl: async () => ({ scanned: true, subs, added: [], unparsed: [] }),
+    protectedMatchRecordImpl: async () => {},
+    protectedLookupImpl: async (options) => {
+      lookedWith = options;
+      return {
+        looked: 1,
+        lookups: { "request-missing": { requestId: "request-missing", status: "resolved", candidateUserId: "cu-m", roleName: "Engineer", companyName: "Acme" } },
+      };
+    },
+    protectedWatchImpl: async (options) => { watchedLookups = options.lookups; return []; },
+    replyPassImpl: async (options) => { replyHistory = options.history; return { enabled: true }; },
+  });
+  assert.equal(lookedWith.historyIds.has("request-missing"), false);
+  assert.equal(typeof lookedWith.trpcGetImpl, "function");
+  // The row is attempted (this process cannot reach Paraform, so it errors).
+  assert.deepEqual(result.results.filter((item) => item.requestId).map((item) => item.requestId), ["request-missing"]);
+  assert.equal(result.protectedSubs.looked, 1);
+  assert.equal(result.protectedSubs.rows, 1);
+  assert.equal(watchedLookups["request-missing"].status, "resolved");
+  assert.deepEqual(replyHistory, []);
 });

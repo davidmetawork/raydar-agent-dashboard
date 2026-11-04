@@ -105,6 +105,11 @@ import {
   teammateUserIds,
 } from "./outreach-scope.mjs";
 import { requestLaneKv } from "./request-lane-store.mjs";
+import {
+  getProtectedLookupsSafe,
+  runProtectedLookups,
+  syntheticProtectedRequests,
+} from "./outreach-protected-lookup.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
@@ -264,6 +269,9 @@ export function outreachConfig(env = process.env) {
     protectedNotBeforeMs: protectedSubsEnabled(env)
       ? finiteDate(env.PARAAI_PROTECTED_SUBS_NOT_BEFORE)
       : null,
+    // Earlier notes looked up once each, recorded only and never sent, so the
+    // lookup's accuracy is measured before the first new note (2026-11-04).
+    protectedLookupBackfill: Math.max(0, Math.min(50, Number(env.PARAAI_PROTECTED_LOOKUP_BACKFILL ?? 12) || 0)),
     mailbox: outreachMailbox(env),
     // Where a NEW conversation starts (David, 2026-09-28): "mailroom" unless
     // PARAAI_OUTREACH_TRANSPORT=gmail. It only takes effect while the Mailroom
@@ -2208,6 +2216,14 @@ export async function processMatchRequest(
         deliveryMode = "expired_without_digest";
       }
     } else {
+      // A protected-sub row is not a request David's digest can hold: no
+      // digest write on its id, ever.
+      if (request?.synthetic) {
+        throw blockFor(
+          "OUTREACH_PROTECTED_ROW_NOT_SENDABLE",
+          "protected-sub row is not admissible as a protected send; no digest write",
+        );
+      }
       try {
         digest = await ensureMatchDigest(request);
       } catch (error) {
@@ -2662,6 +2678,9 @@ export async function processMatchRequest(
 // Paraform's reached-out marker, written once after delivery and read back.
 // Shared by the send path and the queued-Mailroom reconcile pass.
 async function markRequestReachedOut(state, request) {
+  // A protected-sub row is not in David's request list, so the marker could
+  // never be read back; Paraform staff set the request up themselves.
+  if (request?.synthetic) return state;
   if (request.reachedOut) {
     state = await saveOutreachState(appendOutreachJournal({
       ...state,
@@ -4343,6 +4362,8 @@ export async function runOutreachTick({
   protectedScanImpl = scanProtectedNotes,
   protectedWatchImpl = watchUnsentProtectedSubs,
   protectedMatchRecordImpl = recordProtectedMatch,
+  protectedLookupImpl = runProtectedLookups,
+  protectedLookupsReadImpl = getProtectedLookupsSafe,
 } = {}) {
   const tickStartedAt = Date.now();
   if (!outreachExecutionEnabled(config)) {
@@ -4401,16 +4422,44 @@ export async function runOutreachTick({
       ? await protectedScanImpl({ mailbox: config.mailbox, now, notifyImpl: notifySlack })
         .catch((error) => ({ subs: null, error: clean(error?.code || error?.message).slice(0, 120) || "scan_failed" }))
       : null;
-    const history = attachProtectedSubs(
+    // Paraform's own rows, before any protected-sub row is added below.
+    const readHistory = attachProtectedSubs(
       Array.isArray(historyRead) ? historyRead : historyRead.requests,
       protectedScan?.subs,
     );
     const scope = Array.isArray(historyRead) ? null : historyRead.scope;
     await recordScopeImpl(scope, { now }).catch(() => {});
     const protectedMatch = protectedScan?.scanned && protectedScan.subs
-      ? protectedSubMatch({ subs: protectedScan.subs, history, config, now })
+      ? protectedSubMatch({ subs: protectedScan.subs, history: readHistory, config, now })
       : null;
     if (protectedMatch) await protectedMatchRecordImpl(protectedMatch).catch(() => {});
+    // Protected requests are not in that read (measured 2026-11-04), so the
+    // note names the person: looked up with the scan (at most every five
+    // minutes), and each resolved note becomes a row of this tick
+    // (outreach-protected-lookup.mjs). A failed lookup only means no row.
+    const readIds = new Set(readHistory.map((request) => request.id));
+    const protectedLookup = protectedScan?.subs?.size
+      ? (protectedScan.scanned
+        ? await protectedLookupImpl({
+          subs: protectedScan.subs,
+          historyIds: readIds,
+          notBeforeMs: config.protectedNotBeforeMs,
+          now,
+          trpcGetImpl: trpcGet,
+          backfill: config.protectedLookupBackfill,
+        }).catch((error) => ({ lookups: {}, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))
+        : { lookups: await protectedLookupsReadImpl() })
+      : null;
+    const protectedRows = protectedLookup
+      ? syntheticProtectedRequests({
+        subs: protectedScan.subs,
+        lookups: protectedLookup.lookups,
+        historyIds: readIds,
+        notBeforeMs: config.protectedNotBeforeMs,
+        now,
+      })
+      : [];
+    const history = protectedRows.length ? [...readHistory, ...protectedRows] : readHistory;
     const visibleRequestIds = new Set(history.map((request) => request.id));
     const teammatesPaused = history.some((request) => request.ownRequest === false)
       ? await teammatesPausedImpl().catch(() => true)
@@ -4502,7 +4551,7 @@ export async function runOutreachTick({
     // A lost match must never be quieter than a blocked one, and an exception must
     // not outlive its request (2026-07-29 incident).
     const sweep = await sweepStaleOutreachExceptions({
-      history,
+      history: readHistory,
       states,
       exceptions,
     }).catch(() => ({ expiredUnsent: [], closed: [] }));
@@ -4511,7 +4560,7 @@ export async function runOutreachTick({
     // Deliberately separate from the sweep above and separately guarded: these
     // two answer different questions, and one failing must not silence the other.
     const expiry = await sweepExpiryEscalations({
-      history,
+      history: readHistory,
       states,
       exceptions,
       // history/states were read before this tick sent anything, so anything
@@ -4535,6 +4584,7 @@ export async function runOutreachTick({
           .filter((result) => result.action === "sent" && result.requestId)
           .map((result) => result.requestId),
         exceptions,
+        lookups: protectedLookup?.lookups || {},
         notBeforeMs: config.protectedNotBeforeMs,
         now,
         notifyImpl: notifySlack,
@@ -4544,8 +4594,9 @@ export async function runOutreachTick({
     // candidate said no, is off the market, or asked not to be contacted. It
     // runs last, under this tick's brake, cadence and Gmail breaker, and its
     // own failure never fails the tick (outreach-reply-pass.mjs).
+    // Never a protected-sub row: a pass would dismiss Paraform staff's request.
     const replyPass = await replyPassImpl({
-      history,
+      history: readHistory,
       states: await listOutreachStates().catch(() => states),
       config,
       now,
@@ -4584,6 +4635,12 @@ export async function runOutreachTick({
             inRead: protectedMatch.inRead,
             missing: protectedMatch.missing,
             admissible: protectedMatch.admissible,
+          } : {}),
+          ...(protectedLookup ? {
+            looked: protectedLookup.looked || 0,
+            rows: protectedRows.length,
+            ...(protectedLookup.stopped ? { lookupStopped: protectedLookup.stopped } : {}),
+            ...(protectedLookup.error ? { lookupError: protectedLookup.error } : {}),
           } : {}),
           ...(protectedScan.error ? { error: protectedScan.error } : {}),
         },
