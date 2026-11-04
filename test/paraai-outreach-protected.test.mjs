@@ -326,12 +326,15 @@ import {
   syntheticProtectedRequests,
 } from "../api/paraai/_lib/outreach-protected-lookup.mjs";
 
-function fakeParaform({ role = { title: "Founding Engineer", company: { name: "Acme" } }, crm = [], apps = {} } = {}) {
+function fakeParaform({ role = { id: "role-1", status: "ACTIVE", title: "Founding Engineer", company: { name: "Acme" } }, crm = [], apps = {}, cursor = null, refuseAt = null } = {}) {
   const calls = [];
   const impl = async (proc, input) => {
     calls.push(proc);
+    if (refuseAt != null && calls.length === refuseAt) {
+      throw Object.assign(new Error("cap"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" });
+    }
     if (proc === "role.getRoleByIdSimple") return role;
-    if (proc === "candidateUser.getCRMExternalCandidates") return { items: crm, next_cursor: null };
+    if (proc === "candidateUser.getCRMExternalCandidates") return { items: crm, next_cursor: cursor };
     if (proc === "candidateUser.getCandidateUserApplications") return apps[input.candidate_user_id] || [];
     throw new Error(`unexpected ${proc}`);
   };
@@ -362,7 +365,7 @@ test("the lookup accepts exactly one person by that name who has the note's role
       { id: "cu-2", candidate: { name: "Jane Doe" } },
       { id: "cu-3", candidate: { name: "John Smith" } },
     ],
-    apps: { "cu-1": [{ id: "app-9", role_id: "role-1" }], "cu-2": [{ id: "app-8", role_id: "role-2" }] },
+    apps: { "cu-1": [{ id: "app-9", role_id: "role-1", created_at: "2026-11-04T17:54:00Z" }], "cu-2": [{ id: "app-8", role_id: "role-2", created_at: "2026-11-04T17:54:00Z" }] },
   });
   const record = await lookupProtectedSub(NOTE, { trpcGetImpl: impl, now: Date.parse("2026-11-04T18:05:00Z") });
   assert.equal(record.status, "resolved");
@@ -378,7 +381,7 @@ test("the lookup accepts exactly one person by that name who has the note's role
 test("two people by that name on the role, nobody on it, or an unreadable role never resolves", async () => {
   const both = fakeParaform({
     crm: [{ id: "cu-1", candidate: { name: "Jane Doe" } }, { id: "cu-2", candidate: { name: "Jane Doe" } }],
-    apps: { "cu-1": [{ role_id: "role-1" }], "cu-2": [{ role: { id: "role-1" } }] },
+    apps: { "cu-1": [{ role_id: "role-1", created_at: "2026-11-04T17:00:00Z" }], "cu-2": [{ role: { id: "role-1" }, created_at: "2026-11-02T17:00:00Z" }] },
   });
   assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: both.impl })).status, "ambiguous");
   const nobody = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" } }], apps: { "cu-1": [{ role_id: "role-9" }] } });
@@ -424,11 +427,12 @@ test("a throttle refusal stops the lookups without spending an attempt", async (
     notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
     now: Date.parse("2026-11-04T18:05:00Z"),
     trpcGetImpl: async () => { throw refused; },
-    store: { list: async () => ({}), save: async (record) => { saved.push(record); } },
+    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {} },
   });
-  assert.equal(result.looked, 0);
   assert.equal(result.stopped, "PARAFORM_REQUEST_LANES_RATE_LIMITED");
-  assert.deepEqual(saved, []);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].status, "throttled");
+  assert.ok(!saved[0].attempts, "a pacing refusal spends no attempt");
 });
 
 test("rows are made only for resolved notes from after the switch-on, with every field the send needs", () => {
@@ -445,4 +449,68 @@ test("rows are made only for resolved notes from after the switch-on, with every
   assert.deepEqual(syntheticProtectedRequests({ ...args, historyIds: new Set(["req-1"]), subs: new Map([["req-1", NOTE]]) }), []);
   assert.deepEqual(syntheticProtectedRequests({ ...args, lookups: { "req-1": { ...lookups["req-1"], roleName: "" } }, subs: new Map([["req-1", NOTE]]) }), []);
   assert.deepEqual(syntheticProtectedRequests({ ...args, notBeforeMs: null, subs: new Map([["req-1", NOTE]]) }), []);
+});
+
+test("review fixes: too many namesakes, an unfinished search, an old application or a closed role never resolves", async () => {
+  const jane = (n) => ({ id: `cu-${n}`, candidate: { name: "Jane Doe" } });
+  const recent = [{ role_id: "role-1", created_at: "2026-11-04T17:54:00Z" }];
+  const five = fakeParaform({ crm: [1, 2, 3, 4, 5].map(jane), apps: { "cu-5": recent } });
+  const crowded = await lookupProtectedSub(NOTE, { trpcGetImpl: five.impl });
+  assert.equal(crowded.status, "too_many");
+  assert.equal(five.calls.filter((proc) => proc === "candidateUser.getCandidateUserApplications").length, 0);
+  const fullPage = Array.from({ length: 50 }, (_, n) => ({ id: `x-${n}`, candidate: { name: `Other Person${n}` } }));
+  const endless = fakeParaform({ crm: [jane(1), ...fullPage.slice(1)], cursor: 50, apps: { "cu-1": recent } });
+  const unfinished = await lookupProtectedSub(NOTE, { trpcGetImpl: endless.impl });
+  assert.equal(unfinished.status, "incomplete");
+  assert.equal(unfinished.crmPages, 3);
+  // A namesake who applied to the role months ago is not the person the note means.
+  const old = fakeParaform({ crm: [jane(1)], apps: { "cu-1": [{ role_id: "role-1", created_at: "2026-06-01T00:00:00Z" }] } });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: old.impl })).status, "not_found");
+  // ...unless Paraform's own id for that application is the note's protected-sub id.
+  const exact = fakeParaform({ crm: [jane(1)], apps: { "cu-1": [{ id: "ctar-1", role_id: "role-1", created_at: "2026-06-01T00:00:00Z" }] } });
+  const exactRecord = await lookupProtectedSub(NOTE, { trpcGetImpl: exact.impl });
+  assert.equal(exactRecord.status, "resolved");
+  assert.equal(exactRecord.ctarMatch, true);
+  const closed = fakeParaform({ role: { id: "role-1", status: "PAUSED", title: "Founding Engineer", company: { name: "Acme" } } });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: closed.impl })).status, "role_inactive");
+  const otherRole = fakeParaform({ role: { id: "role-2", status: "ACTIVE", title: "Founding Engineer", company: { name: "Acme" } } });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: otherRole.impl })).status, "role_unreadable");
+  assert.match(lookupReason({ status: "too_many" }), /too many people/);
+  assert.match(lookupReason(undefined), /does not show this request/);
+});
+
+test("review fixes: a pacing refusal mid-lookup is recorded, keeps its attempts, and moves the note back", async () => {
+  const saved = [];
+  const { impl } = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" } }], refuseAt: 3 });
+  const now = Date.parse("2026-11-04T18:05:00Z");
+  const result = await runProtectedLookups({
+    subs: new Map([["req-1", NOTE]]),
+    historyIds: new Set(),
+    notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
+    now,
+    trpcGetImpl: impl,
+    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {} },
+  });
+  assert.equal(result.stopped, "PARAFORM_REQUEST_LANES_RATE_LIMITED");
+  assert.equal(saved[0].status, "throttled");
+  assert.equal(saved[0].throttled, 1);
+  assert.ok(!saved[0].attempts);
+  // Not due again for ten minutes, so the next note goes first.
+  assert.deepEqual(protectedLookupQueue({
+    subs: new Map([["req-1", NOTE]]), historyIds: new Set(), lookups: { "req-1": saved[0] },
+    notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: now + 60_000,
+  }), []);
+});
+
+test("review fixes: an unreadable lookup store runs no lookup", async () => {
+  let called = 0;
+  const result = await runProtectedLookups({
+    subs: new Map([["req-1", NOTE]]),
+    historyIds: new Set(),
+    notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
+    trpcGetImpl: async () => { called += 1; return null; },
+    store: { list: async () => { throw new Error("kv down"); } },
+  });
+  assert.equal(called, 0);
+  assert.equal(result.error, "lookup_store_unreadable");
 });

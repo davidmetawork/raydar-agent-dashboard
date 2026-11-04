@@ -16,6 +16,7 @@
 
 import {
   getProtectedLookups,
+  pruneProtectedLookups,
   saveProtectedLookup,
 } from "./outreach-store.mjs";
 import {
@@ -31,8 +32,18 @@ export const PROTECTED_LOOKUP_MAX_ATTEMPTS = 3;
 export const PROTECTED_LOOKUP_RETRY_MS = 10 * 60 * 1000;
 const CRM_PAGE_LIMIT = 50;
 const CRM_MAX_PAGES = 3;
+// More people by that name than this, or more search pages than the cap: the
+// lookup cannot prove there is only one, so it never resolves.
 const MAX_NAME_MATCHES = 4;
-const FINAL_STATUSES = new Set(["resolved", "ambiguous", "no_name"]);
+// Paraform puts the person on the role minutes before the note (measured
+// 2026-11-04: 6 minutes). An older application on the role is someone else's
+// story (a past applicant by the same name), so it does not count, unless
+// Paraform's own id for it is the note's protected-sub id.
+const APPLICATION_BEFORE_NOTE_MS = 7 * 24 * 60 * 60 * 1000;
+const APPLICATION_AFTER_NOTE_MS = 60 * 60 * 1000;
+// A pacing refusal is retried later without using an attempt, this many times.
+const MAX_THROTTLED = 12;
+const FINAL_STATUSES = new Set(["resolved", "ambiguous", "too_many", "incomplete", "no_name", "role_inactive"]);
 
 const clean = (value) => String(value ?? "").trim();
 
@@ -40,7 +51,7 @@ const clean = (value) => String(value ?? "").trim();
 export function nameTokens(value) {
   return clean(value)
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/['’.]/g, "")
     .split(/[^a-z0-9-]+/)
@@ -79,6 +90,14 @@ function applicationRoleId(row) {
   return clean(row?.role_id || row?.role?.id || row?.roleId);
 }
 
+function applicationTimeMs(row) {
+  for (const value of [row?.created_at, row?.createdAt, row?.updated_at, row?.updatedAt, row?.submitted_at]) {
+    const ms = Date.parse(clean(value));
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
 // Which subs to look up this tick: notes in the last week that the request
 // read does not hold, never looked up or due a retry. Notes from after the
 // switch-on come first (oldest first); then at most `backfill` earlier ones
@@ -89,6 +108,7 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
     if (!record) return true;
     if (FINAL_STATUSES.has(record.status)) return false;
     if (Number(record.attempts || 0) >= PROTECTED_LOOKUP_MAX_ATTEMPTS) return false;
+    if (Number(record.throttled || 0) >= MAX_THROTTLED) return false;
     const last = Date.parse(record.lastTriedAt || "");
     return !Number.isFinite(last) || last <= now - PROTECTED_LOOKUP_RETRY_MS;
   };
@@ -115,13 +135,14 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
 
 // One note: the role, then the people by that name, then whose record has
 // the role. Calls go one at a time through the lane's throttled reader; a
-// pace-cap or cooldown refusal ends the lookup without counting an attempt.
+// pace-cap or cooldown refusal throws (the runner records it as throttled).
 export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), previous = null } = {}) {
   const base = {
     requestId: sub.requestId,
     roleId: clean(sub.roleId) || null,
     lastTriedAt: new Date(now).toISOString(),
     attempts: Number(previous?.attempts || 0) + 1,
+    throttled: Number(previous?.throttled || 0),
   };
   const name = clean(sub.candidateName);
   if (!name) return { ...base, status: "no_name" };
@@ -129,41 +150,51 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
   const role = await trpcGetImpl("role.getRoleByIdSimple", { role_id: base.roleId, id: base.roleId });
   const roleName = clean(role?.title ?? role?.name);
   const companyName = clean(role?.company?.name ?? role?.company_name ?? role?.companyName) || clean(sub.companyName);
-  if (!roleName || !companyName) return { ...base, status: "role_unreadable" };
+  const returnedId = clean(role?.id || role?.role_id || role?.roleId);
+  if (!roleName || !companyName || returnedId !== base.roleId) return { ...base, status: "role_unreadable" };
+  const roleStatus = clean(role?.status).toUpperCase();
+  if (roleStatus && roleStatus !== "ACTIVE") return { ...base, roleName, companyName, roleStatus, status: "role_inactive" };
   const found = new Map();
   let cursor = null;
   let pages = 0;
-  for (; pages < CRM_MAX_PAGES; pages += 1) {
+  let complete = false;
+  while (pages < CRM_MAX_PAGES) {
     const response = await trpcGetImpl("candidateUser.getCRMExternalCandidates", {
       limit: CRM_PAGE_LIMIT,
       ...(cursor != null ? { cursor } : {}),
       filters: { sort: { field: "updated_at", direction: "desc" }, general_search: name },
     });
+    pages += 1;
     const items = Array.isArray(response?.items) ? response.items : [];
     for (const item of items) {
       const id = crmId(item);
       if (id && sameName(crmName(item), name) && !found.has(id)) found.set(id, item);
     }
     cursor = response?.next_cursor ?? null;
-    if (cursor == null || items.length < CRM_PAGE_LIMIT) { pages += 1; break; }
+    if (cursor == null || items.length < CRM_PAGE_LIMIT) { complete = true; break; }
   }
+  const evidence = { roleName, companyName, roleStatus: roleStatus || null, nameMatches: found.size, crmPages: pages };
+  // The search did not reach its end, or found too many to check: another
+  // person by that name could be the one, so this is never a match.
+  if (!complete) return { ...base, ...evidence, status: "incomplete" };
+  if (found.size > MAX_NAME_MATCHES) return { ...base, ...evidence, status: "too_many" };
+  const receivedMs = Date.parse(clean(sub.receivedAt));
   const confirmed = [];
-  for (const [candidateUserId, item] of [...found].slice(0, MAX_NAME_MATCHES)) {
+  let onRoleRows = 0;
+  for (const [candidateUserId, item] of found) {
     const rows = await trpcGetImpl("candidateUser.getCandidateUserApplications", { candidate_user_id: candidateUserId });
-    const list = Array.isArray(rows) ? rows : [];
-    const onRole = list.filter((row) => applicationRoleId(row) === base.roleId);
-    if (!onRole.length) continue;
-    confirmed.push({
-      candidateUserId,
-      linkedinUser: crmLinkedin(item),
-      // Whether Paraform's application id is the note's protected-sub id;
-      // recorded to learn the shape, not used to decide.
-      ctarMatch: Boolean(clean(sub.ctarId)) && onRole.some((row) => (
-        clean(row?.id) === clean(sub.ctarId) || clean(row?.candidate_to_approved_role_id) === clean(sub.ctarId)
-      )),
+    const onRole = (Array.isArray(rows) ? rows : []).filter((row) => applicationRoleId(row) === base.roleId);
+    onRoleRows += onRole.length;
+    const exact = Boolean(clean(sub.ctarId)) && onRole.some((row) => (
+      clean(row?.id) === clean(sub.ctarId) || clean(row?.candidate_to_approved_role_id) === clean(sub.ctarId)
+    ));
+    const recent = Number.isFinite(receivedMs) && onRole.some((row) => {
+      const at = applicationTimeMs(row);
+      return at != null && at >= receivedMs - APPLICATION_BEFORE_NOTE_MS && at <= receivedMs + APPLICATION_AFTER_NOTE_MS;
     });
+    if (exact || recent) confirmed.push({ candidateUserId, linkedinUser: crmLinkedin(item), ctarMatch: exact });
   }
-  const evidence = { roleName, companyName, nameMatches: found.size, crmPages: pages, confirmed: confirmed.length };
+  Object.assign(evidence, { onRoleRows, confirmed: confirmed.length });
   if (confirmed.length === 1) {
     return { ...base, ...evidence, status: "resolved", candidateUserId: confirmed[0].candidateUserId, linkedinUser: confirmed[0].linkedinUser, ctarMatch: confirmed[0].ctarMatch };
   }
@@ -180,8 +211,9 @@ const STOP_CODES = new Set([
   "HTTP_429",
 ]);
 
-// Looks up at most `maxLookups` notes, within `budgetMs`. Returns every
-// stored lookup (requestId → record) plus this tick's.
+// Looks up at most `maxLookups` notes (one by default: a lookup is up to
+// nine reads against the shared 10-a-minute pace cap), within `budgetMs`.
+// It runs after the tick's sends. Returns every stored lookup plus this tick's.
 export async function runProtectedLookups({
   subs,
   historyIds,
@@ -189,38 +221,53 @@ export async function runProtectedLookups({
   now = Date.now(),
   trpcGetImpl,
   backfill = 0,
-  maxLookups = 3,
+  maxLookups = 1,
   budgetMs = 25_000,
   clock = Date.now,
   store = {},
 } = {}) {
-  const s = { list: getProtectedLookups, save: saveProtectedLookup, ...store };
-  const lookups = await s.list().catch(() => ({}));
+  const s = { list: getProtectedLookups, save: saveProtectedLookup, prune: pruneProtectedLookups, ...store };
   const summary = { looked: 0, stopped: null };
+  // An unreadable store would re-run (and overwrite) every lookup: skip.
+  const lookups = await s.list().catch(() => null);
+  if (!lookups) return { lookups: {}, ...summary, error: "lookup_store_unreadable" };
   if (typeof trpcGetImpl !== "function" || !subs?.size) return { lookups, ...summary };
+  // Records for notes no longer stored or older than two windows go.
+  const stale = Object.keys(lookups).filter((requestId) => {
+    const sub = subs.get(requestId);
+    const receivedMs = Date.parse(sub?.receivedAt || "");
+    return !sub || !Number.isFinite(receivedMs) || receivedMs < now - 2 * PROTECTED_LOOKUP_WINDOW_MS;
+  });
+  if (stale.length) await s.prune(stale).catch(() => {});
   const started = clock();
   const queue = protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill });
   for (const sub of queue.slice(0, maxLookups)) {
     if (clock() - started > budgetMs) { summary.stopped = "budget"; break; }
+    const previous = lookups[sub.requestId] || null;
     let record;
     try {
-      record = await lookupProtectedSub(sub, { trpcGetImpl, now, previous: lookups[sub.requestId] });
+      record = await lookupProtectedSub(sub, { trpcGetImpl, now, previous });
     } catch (error) {
       const code = clean(error?.code);
-      if (STOP_CODES.has(code) || Number(error?.status) === 429) { summary.stopped = code || "throttled"; break; }
+      const throttled = STOP_CODES.has(code) || Number(error?.status) === 429;
       record = {
+        ...(previous || {}),
         requestId: sub.requestId,
         roleId: clean(sub.roleId) || null,
-        status: "error",
-        error: (code || clean(error?.name) || "error").slice(0, 60),
         lastTriedAt: new Date(now).toISOString(),
-        attempts: Number(lookups[sub.requestId]?.attempts || 0) + 1,
+        // A pacing refusal moves the note to the back of the queue without
+        // using an attempt; any other error uses one.
+        ...(throttled
+          ? { status: previous?.status && previous.status !== "error" ? previous.status : "throttled", throttled: Number(previous?.throttled || 0) + 1 }
+          : { status: "error", error: (code || clean(error?.name) || "error").slice(0, 60), attempts: Number(previous?.attempts || 0) + 1 }),
       };
+      if (throttled) summary.stopped = code || "throttled";
     }
     record.afterSwitchOn = notBeforeMs != null && Date.parse(sub.receivedAt) >= notBeforeMs;
     lookups[sub.requestId] = record;
     summary.looked += 1;
     await s.save(record).catch(() => {});
+    if (summary.stopped) break;
   }
   return { lookups, ...summary };
 }
@@ -278,9 +325,13 @@ export function lookupReason(lookup) {
     case "not_found": return "no one on Paraform by that name has this role on their record";
     case "ambiguous": return "more than one person on Paraform by that name has this role on their record";
     case "role_unreadable": return "the role in the note could not be read on Paraform";
+    case "role_inactive": return `Paraform shows the role as ${lookup.roleStatus || "not active"}`;
+    case "too_many": return "too many people on Paraform share that name to be sure who it is";
+    case "incomplete": return "the Paraform search by that name did not finish, so another person by that name could be the one";
+    case "throttled": return "the candidate lookup is waiting on Paraform's request pacing";
     case "no_name": return "the note does not name the candidate";
     case "error": return `the candidate lookup failed (${lookup.error || "error"})`;
     case "resolved": return null;
-    default: return null;
+    default: return "Paraform's request list does not show this request and the candidate lookup has not finished";
   }
 }

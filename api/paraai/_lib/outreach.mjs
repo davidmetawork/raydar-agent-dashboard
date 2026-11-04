@@ -4434,26 +4434,15 @@ export async function runOutreachTick({
       : null;
     if (protectedMatch) await protectedMatchRecordImpl(protectedMatch).catch(() => {});
     // Protected requests are not in that read (measured 2026-11-04), so the
-    // note names the person: looked up with the scan (at most every five
-    // minutes), and each resolved note becomes a row of this tick
-    // (outreach-protected-lookup.mjs). A failed lookup only means no row.
+    // note names the person (outreach-protected-lookup.mjs): each note looked
+    // up and resolved becomes a row of this tick. New lookups run after the
+    // sends, below. An unreadable lookup store only means no rows.
     const readIds = new Set(readHistory.map((request) => request.id));
-    const protectedLookup = protectedScan?.subs?.size
-      ? (protectedScan.scanned
-        ? await protectedLookupImpl({
-          subs: protectedScan.subs,
-          historyIds: readIds,
-          notBeforeMs: config.protectedNotBeforeMs,
-          now,
-          trpcGetImpl: trpcGet,
-          backfill: config.protectedLookupBackfill,
-        }).catch((error) => ({ lookups: {}, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))
-        : { lookups: await protectedLookupsReadImpl() })
-      : null;
-    const protectedRows = protectedLookup
+    const storedLookups = protectedScan?.subs?.size ? await protectedLookupsReadImpl() : {};
+    const protectedRows = protectedScan?.subs?.size
       ? syntheticProtectedRequests({
         subs: protectedScan.subs,
-        lookups: protectedLookup.lookups,
+        lookups: storedLookups,
         historyIds: readIds,
         notBeforeMs: config.protectedNotBeforeMs,
         now,
@@ -4571,6 +4560,18 @@ export async function runOutreachTick({
       now,
       config,
     }).catch(() => ({ escalated: [] }));
+    // At most one new protected-sub lookup, with the scan (every five minutes)
+    // and after the sends, so it never takes the pace cap from them.
+    const protectedLookup = protectedScan?.scanned && protectedScan.subs?.size
+      ? await protectedLookupImpl({
+        subs: protectedScan.subs,
+        historyIds: readIds,
+        notBeforeMs: config.protectedNotBeforeMs,
+        now,
+        trpcGetImpl: trpcGet,
+        backfill: config.protectedLookupBackfill,
+      }).catch((error) => ({ lookups: storedLookups, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))
+      : null;
     // A protected sub nobody emailed an hour after its note pages once, with
     // the reason this read shows (2026-11-04).
     // It runs with the scan, every five minutes, on the states read at the
@@ -4584,7 +4585,7 @@ export async function runOutreachTick({
           .filter((result) => result.action === "sent" && result.requestId)
           .map((result) => result.requestId),
         exceptions,
-        lookups: protectedLookup?.lookups || {},
+        lookups: protectedLookup?.lookups || storedLookups,
         notBeforeMs: config.protectedNotBeforeMs,
         now,
         notifyImpl: notifySlack,
@@ -4636,9 +4637,9 @@ export async function runOutreachTick({
             missing: protectedMatch.missing,
             admissible: protectedMatch.admissible,
           } : {}),
+          rows: protectedRows.length,
           ...(protectedLookup ? {
             looked: protectedLookup.looked || 0,
-            rows: protectedRows.length,
             ...(protectedLookup.stopped ? { lookupStopped: protectedLookup.stopped } : {}),
             ...(protectedLookup.error ? { lookupError: protectedLookup.error } : {}),
           } : {}),

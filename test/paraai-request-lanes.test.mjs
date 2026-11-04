@@ -615,6 +615,7 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
     protectedWatchImpl: async (options) => { watched = options; return []; },
     protectedMatchRecordImpl: async (record) => { matched = record; },
     protectedLookupImpl: async () => ({ lookups: {}, looked: 0 }),
+    protectedLookupsReadImpl: async () => ({}),
   });
   // The protected request is attempted (this process cannot reach Paraform,
   // so it errors); the plain one is still held back by the not-before.
@@ -664,6 +665,10 @@ test("a note the request list lacks is looked up, becomes this tick's row, and s
     historyImpl: async () => [],
     protectedScanImpl: async () => ({ scanned: true, subs, added: [], unparsed: [] }),
     protectedMatchRecordImpl: async () => {},
+    // Resolved on an earlier tick; this tick's lookup runs after the sends.
+    protectedLookupsReadImpl: async () => ({
+      "request-missing": { requestId: "request-missing", status: "resolved", candidateUserId: "cu-m", roleName: "Engineer", companyName: "Acme" },
+    }),
     protectedLookupImpl: async (options) => {
       lookedWith = options;
       return {

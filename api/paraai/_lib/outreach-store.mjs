@@ -656,6 +656,11 @@ export async function saveProtectedLookup(record, { kvImpl = kv } = {}) {
   await kvImpl(["HSET", PROTECTED_LOOKUP_KEY, requestId, JSON.stringify(record)]);
 }
 
+export async function pruneProtectedLookups(requestIds, { kvImpl = kv } = {}) {
+  const ids = (requestIds || []).map((id) => String(id || "").trim()).filter(Boolean);
+  if (ids.length) await kvImpl(["HDEL", PROTECTED_LOOKUP_KEY, ...ids]);
+}
+
 export async function acquireProtectedScanSlot({ ttlSeconds = 300, kvImpl = kv } = {}) {
   const result = await kvImpl([
     "SET", PROTECTED_SCAN_SLOT_KEY, new Date().toISOString(), "NX", "EX", Math.max(30, Number(ttlSeconds) || 300),
