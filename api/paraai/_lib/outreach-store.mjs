@@ -585,3 +585,57 @@ export async function releaseOutreachPollSlot(token, { kvImpl = kv } = {}) {
     "EVAL", script, 1, POLL_LOCK_KEY, token,
   ])) === 1;
 }
+
+// ── Rating-protected subs (David, 2026-11-04) ────────────────────────────────
+// Paraform staff email David "Rating-protected sub" notes; outreach-protected.mjs
+// reads them from Gmail. One hash holds the notes by Paraform request id, one
+// the Gmail message ids already read, one small bookkeeping fields (senders
+// seen, one-time alerts, the scan slot).
+const PROTECTED_SUBS_KEY = "paraai:outreach:protected:subs";
+const PROTECTED_SEEN_KEY = "paraai:outreach:protected:seen";
+const PROTECTED_META_KEY = "paraai:outreach:protected:meta";
+const PROTECTED_SCAN_SLOT_KEY = "paraai:outreach:protected:scan-slot";
+
+function hashPairs(raw) {
+  if (!raw) return {};
+  if (!Array.isArray(raw)) return typeof raw === "object" ? raw : {};
+  const out = {};
+  for (let i = 0; i + 1 < raw.length; i += 2) out[raw[i]] = raw[i + 1];
+  return out;
+}
+
+export async function listProtectedSubs({ kvImpl = kv } = {}) {
+  const pairs = hashPairs(await kvImpl(["HGETALL", PROTECTED_SUBS_KEY]));
+  return Object.values(pairs).map((value) => parse(value)).filter((row) => row?.requestId);
+}
+
+export async function saveProtectedSub(record, { kvImpl = kv } = {}) {
+  const requestId = String(record?.requestId || "").trim();
+  if (!requestId) throw new Error("requestId required");
+  await kvImpl(["HSET", PROTECTED_SUBS_KEY, requestId, JSON.stringify(record)]);
+  return record;
+}
+
+export async function protectedSeenMessageIds({ kvImpl = kv } = {}) {
+  return new Set(Object.keys(hashPairs(await kvImpl(["HGETALL", PROTECTED_SEEN_KEY]))));
+}
+
+export async function markProtectedMessageSeen(messageId, { kvImpl = kv } = {}) {
+  await kvImpl(["HSET", PROTECTED_SEEN_KEY, String(messageId), new Date().toISOString()]);
+}
+
+export async function getProtectedMeta({ kvImpl = kv } = {}) {
+  return hashPairs(await kvImpl(["HGETALL", PROTECTED_META_KEY]));
+}
+
+// HSETNX: true only for the first writer, so a one-time alert fires once.
+export async function claimProtectedMeta(field, value = new Date().toISOString(), { kvImpl = kv } = {}) {
+  return Number(await kvImpl(["HSETNX", PROTECTED_META_KEY, String(field), String(value)])) === 1;
+}
+
+export async function acquireProtectedScanSlot({ ttlSeconds = 300, kvImpl = kv } = {}) {
+  const result = await kvImpl([
+    "SET", PROTECTED_SCAN_SLOT_KEY, new Date().toISOString(), "NX", "EX", Math.max(30, Number(ttlSeconds) || 300),
+  ]);
+  return result === "OK";
+}

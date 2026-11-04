@@ -345,3 +345,64 @@ export function followupCopy({
   ]);
   return { subject: null, text, html, variant };
 }
+
+// Rating-protected subs (David, 2026-11-04). Paraform staff picked this
+// person for the role, so nothing here claims a founder saw a resume, and
+// there is no digest link. The role's details (location, office days) are on
+// the role page, so no role line either. A new conversation ends in a bare
+// "Thanks," because the full signature follows; a later request on an
+// existing conversation signs "David" with no signature.
+export function protectedSubCopy({
+  firstName,
+  roleName,
+  companyName,
+  roleUrl,
+  existingConversation = false,
+  // false when the signature could not be read: sign "David" instead.
+  signatureFollows = true,
+}) {
+  const first = clean(firstName) || "there";
+  const roleLabel = `${clean(roleName)} @ ${clean(companyName)}`;
+  if (existingConversation) {
+    const text = [
+      `Hey ${first},`,
+      "",
+      `Another interview request just came in for the ${roleLabel} (${clean(roleUrl)}) role. I think your background could be a really strong fit.`,
+      "",
+      "Would you be interested in me putting you forward? Let me know!",
+      "",
+      "Thanks,",
+      "David",
+    ].join("\n");
+    const html = paragraphHtml([
+      `Hey ${escapeHtml(first)},`,
+      `Another interview request just came in for the ${anchor(roleLabel, roleUrl)} role. I think your background could be a really strong fit.`,
+      "Would you be interested in me putting you forward? Let me know!",
+      "Thanks,<br>David",
+    ]);
+    return { subject: null, text, html, variant: "protected_later" };
+  }
+  const text = [
+    `Hey ${first},`,
+    "",
+    "Hope you are doing well!",
+    "",
+    `You have a new interview request for the ${roleLabel} (${clean(roleUrl)}) role.`,
+    "",
+    "Based on your background, I think you could be a really strong fit, and I'd love to put you forward for a first-round conversation with the team.",
+    "",
+    "Would you be interested? Let me know!",
+    "",
+    "Thanks,",
+    ...(signatureFollows ? [] : ["David"]),
+  ].join("\n");
+  const html = paragraphHtml([
+    `Hey ${escapeHtml(first)},`,
+    "Hope you are doing well!",
+    `You have a new interview request for the ${anchor(roleLabel, roleUrl)} role.`,
+    "Based on your background, I think you could be a really strong fit, and I'd love to put you forward for a first-round conversation with the team.",
+    "Would you be interested? Let me know!",
+    signatureFollows ? "Thanks," : "Thanks,<br>David",
+  ]);
+  return { subject: initialSubject(companyName), text, html, variant: "protected_initial" };
+}

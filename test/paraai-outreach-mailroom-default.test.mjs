@@ -1476,3 +1476,115 @@ test("outreach health: a refusal stops being current after 30 minutes, and witho
   assert.equal(gmailOnly.mailroomLane, null);
   assert.equal(gmailOnly.mailroomScopeRefusal.current, true);
 });
+
+// ── Rating-protected subs (2026-11-04) ───────────────────────────────────────
+const PROTECTED_SUB = Object.freeze({
+  submitUrl: "https://www.paraform.com/company/acme/role-req-p1/recruit/submit_candidate?from_submission_request=true&submission_request_id=req-p1",
+  receivedAt: "2026-09-28T16:05:00.000Z",
+  sender: "staff@paraform.com",
+});
+
+function seedProtectedRequest(id, candidateUserId, options = {}) {
+  const row = historyRow(id, candidateUserId, options);
+  paraform.history.push(row);
+  return { ...normalizeSubmissionRequest(row), protectedSub: PROTECTED_SUB };
+}
+
+test("a protected sub starts a new conversation with its own copy, the signature and no digest", async () => {
+  const request = seedProtectedRequest("req-p1", "cu-p");
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.action, "sent");
+  assert.equal(result.transport, "mailroom-sendgrid");
+  assert.equal(calls.filter((call) => /^matchDigest\./.test(call.proc || "")).length, 0);
+  const body = mailroom.enqueued[0];
+  assert.equal(body.dedupeKey, "paraai-outreach:auto:match:req-p1");
+  assert.equal(body.subject, "1st Round - Interview Request @ Acme 🎉");
+  assert.match(body.html, /You have a new interview request for the <a href="https:\/\/www\.paraform\.com\/share\/acme\/role-req-p1">Software Engineer @ Acme<\/a> role\./);
+  assert.match(body.html, /Would you be interested\? Let me know!/);
+  assert.match(body.html, /DAVID-SIGNATURE/);
+  assert.doesNotMatch(body.html, /digest\/|redacted|Founder|hybrid|undefined|null/i);
+  const state = await getOutreachState("cu-p");
+  assert.equal(state.matches["req-p1"].deliveryMode, "protected_sub");
+  assert.equal(state.matches["req-p1"].protectedSub, true);
+  assert.equal(state.matches["req-p1"].copyVariant, "protected_initial");
+  assert.equal(state.followup.remaining, 2);
+  assert.equal(state.followup.ordinal, 1);
+  assert.deepEqual(paraform.marks, ["req-p1"]);
+});
+
+test("a protected sub for someone already in a Mailroom conversation replies on it, unsigned", async () => {
+  await processMatchRequest(seedRequest("req-1", "cu-p"), history(), sendOptions());
+  const request = seedProtectedRequest("req-p2", "cu-p", { company: "Beta", createdAt: "2026-09-28T17:00:00.000Z" });
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.action, "sent");
+  const reply = mailroom.enqueued[1];
+  assert.equal(reply.subject, "Re: 1st Round - Interview Request @ Acme 🎉");
+  assert.equal(reply.inReplyTo, "<raydar-mailroom-5000@raydar.xyz>");
+  assert.match(reply.html, /Another interview request just came in for the <a [^>]+>Software Engineer @ Beta<\/a> role\./);
+  assert.match(reply.html, /Thanks,<br>David/);
+  assert.doesNotMatch(reply.html, /DAVID-SIGNATURE|digest\//);
+  const state = await getOutreachState("cu-p");
+  assert.equal(state.matches["req-p2"].copyVariant, "protected_later");
+  // Its own two generic nudges, even as this person's second role.
+  assert.equal(state.followup.ownerMatchId, "req-p2");
+  assert.equal(state.followup.remaining, 2);
+  assert.equal(state.followup.ordinal, 1);
+});
+
+test("a protected sub for someone in a Gmail conversation replies there, whatever role started it", async () => {
+  const request = seedProtectedRequest("req-p3", "cu-pg");
+  await createOutreachState("cu-pg", { candidateEmail: "cu-pg@example.com" });
+  const existing = await getOutreachState("cu-pg");
+  gmail.threads.set("gmail-thread-p", {
+    id: "gmail-thread-p",
+    messages: [{
+      id: "m1",
+      internalDate: String(Date.parse("2026-09-20T16:00:00Z")),
+      labelIds: ["SENT"],
+      payload: {
+        mimeType: "text/plain",
+        headers: [
+          header("From", "David Phillips <david@raydar.xyz>"),
+          header("Subject", "1st Round - Interview Request @ Old 🎉"),
+          header("Message-ID", "<CAold@mail.gmail.com>"),
+        ],
+        body: { data: Buffer.from("No digest link here", "utf8").toString("base64url") },
+      },
+    }],
+  });
+  await saveOutreachState({
+    ...existing,
+    threadId: "gmail-thread-p",
+    threadSubject: "1st Round - Interview Request @ Old 🎉",
+    firstOutboundAt: "2026-09-20T16:00:00.000Z",
+  }, existing.revision);
+  const result = await processMatchRequest(request, history(), sendOptions());
+  assert.equal(result.action, "sent");
+  assert.equal(result.transport, "gmail");
+  assert.equal(mailroom.enqueued.length, 0);
+  assert.equal(gmail.sent.length, 1);
+  assert.equal(gmail.sent[0].threadId, "gmail-thread-p");
+  const mime = Buffer.from(gmail.sent[0].raw, "base64url").toString("utf8");
+  assert.match(mime, /In-Reply-To: <CAold@mail\.gmail\.com>/);
+  assert.doesNotMatch(mime, /DAVID-SIGNATURE/);
+});
+
+test("the tick admits a protected sub on its note, but never one a person already reached out on", () => {
+  const protectedConfig = { ...config, notBeforeMs: Date.parse("2030-01-01T00:00:00Z"), protectedNotBeforeMs: Date.parse("2026-09-28T00:00:00Z") };
+  const base = normalizeSubmissionRequest(historyRow("req-a", "cu-a"));
+  const sub = { ...PROTECTED_SUB };
+  // Without a note, the lane's own not-before keeps it out.
+  assert.deepEqual(eligibleNewRequests([base], protectedConfig).map((row) => row.id), []);
+  const withNote = { ...base, protectedSub: sub };
+  assert.deepEqual(eligibleNewRequests([withNote], protectedConfig).map((row) => row.id), ["req-a"]);
+  // Paraform's own marker, written as the request was created, does not block it.
+  const premarked = { ...withNote, reachedOut: true, reachedOutAtMs: withNote.createdAtMs + 5_000 };
+  assert.deepEqual(eligibleNewRequests([premarked], protectedConfig).map((row) => row.id), ["req-a"]);
+  // A marker written later is a person's send.
+  const handSent = { ...withNote, reachedOut: true, reachedOutAtMs: withNote.createdAtMs + 3_600_000 };
+  assert.deepEqual(eligibleNewRequests([handSent], protectedConfig), []);
+  // A note from before the switch-on, a closed request, or a protected recruiter's role never sends.
+  assert.deepEqual(eligibleNewRequests([{ ...withNote, protectedSub: { ...sub, receivedAt: "2026-09-27T00:00:00Z" } }], protectedConfig), []);
+  assert.deepEqual(eligibleNewRequests([{ ...withNote, status: "submitted" }], protectedConfig), []);
+  assert.deepEqual(eligibleNewRequests([withNote], { ...protectedConfig, protectedNotBeforeMs: null }), []);
+});

@@ -402,6 +402,20 @@ export async function searchThreads(mailbox, query, maxResults = 20) {
   return (await gmailCall(mailbox, `/threads?${params}`))?.threads || [];
 }
 
+// Message ids (not threads) matching a query: 5 quota units, against 40 for
+// each thread read, so a scanner can open only the messages it has not seen.
+export async function searchMessages(mailbox, query, maxResults = 50) {
+  const params = new URLSearchParams({
+    q: clean(query),
+    maxResults: String(Math.max(1, Math.min(500, Number(maxResults) || 50))),
+  });
+  return (await gmailCall(mailbox, `/messages?${params}`))?.messages || [];
+}
+
+export async function getMessage(mailbox, messageId) {
+  return gmailCall(mailbox, `/messages/${encodeURIComponent(messageId)}?format=full`);
+}
+
 // ── Change detection ─────────────────────────────────────────────────────────
 // Reading a thread costs 40 quota units; asking Gmail "what changed since X?"
 // costs 2. The reply scan used to re-open every pending thread on every pass
