@@ -202,6 +202,9 @@ export async function scanProtectedNotes({
   getMessageImpl = getMessage,
   notifyImpl,
   store = {},
+  // A burst (Paraform sends about 20 in a morning) is read over a few scans
+  // rather than in one tick.
+  maxReads = 25,
 } = {}) {
   const s = {
     acquireSlot: acquireProtectedScanSlot,
@@ -232,9 +235,13 @@ export async function scanProtectedNotes({
   }
   const noteThreads = new Set([...existing.values()].map((row) => clean(row.noteThreadId)).filter(Boolean));
   summary.failed = 0;
-  for (const ref of listed || []) {
+  let reads = 0;
+  // Oldest first, so a capped scan never leaves an old note behind new ones.
+  for (const ref of [...(listed || [])].reverse()) {
     const messageId = clean(ref?.id);
     if (!messageId || seen.has(messageId)) continue;
+    if (reads >= maxReads) { summary.capped = true; break; }
+    reads += 1;
     try {
       await scanOneMessage(messageId, ref);
     } catch {
@@ -244,7 +251,8 @@ export async function scanProtectedNotes({
     await s.markSeen(messageId).catch(() => {});
     seen.add(messageId);
   }
-  if (!seeded) await s.claimMeta("seeded").catch(() => false);
+  // Seeded once the backlog has been read through, so no old note pages.
+  if (!seeded && !summary.capped) await s.claimMeta("seeded").catch(() => false);
   return { subs: existing, ...summary };
 
   async function scanOneMessage(messageId, ref) {

@@ -125,10 +125,10 @@ test("the scan stores new notes once, reads each message once, and learns sender
   messages.set("msg-3", note({ id: "msg-3", html: "<div>protected sub, but no link</div>" }));
   const second = await scanProtectedNotes(options);
   assert.deepEqual(second.added, [req2]);
-  assert.deepEqual(reads, ["msg-1", "msg-2", "msg-3"], "a message already seen is never read again");
+  assert.deepEqual(reads, ["msg-1", "msg-3", "msg-2"], "a message already seen is never read again (oldest first)");
   assert.equal(alerts.length, 2);
-  assert.match(alerts[0], /new Paraform sender .*new\.person@paraform\.com/);
-  assert.match(alerts[1], /NOT handled/);
+  assert.match(alerts[1], /new Paraform sender .*new\.person@paraform\.com/);
+  assert.match(alerts[0], /NOT handled/);
   // Not due: no Gmail call at all, but the stored subs still come back.
   memory.closeSlot();
   const third = await scanProtectedNotes({ ...options, searchImpl: async () => { throw new Error("must not search"); } });
@@ -262,4 +262,22 @@ test("review fixes: a send queued in the Mailroom is not reported unemailed", as
     claimImpl: async () => true,
   });
   assert.deepEqual(flagged, []);
+});
+
+test("a burst is read over several scans, oldest first", async () => {
+  const memory = memoryStore();
+  const ids = Array.from({ length: 5 }, (_, i) => `m${i}`);
+  const reads = [];
+  const options = {
+    mailbox: "david@raydar.xyz",
+    maxReads: 2,
+    searchImpl: async () => ids.map((id) => ({ id })),
+    getMessageImpl: async (_mailbox, id) => { reads.push(id); return note({ id, html: `<a href="${SUBMIT.replace(REQ, `cprotectedreq000000000010${id.slice(1)}`)}">x</a>` }); },
+    store: memory.store,
+  };
+  await scanProtectedNotes(options);
+  await scanProtectedNotes(options);
+  await scanProtectedNotes(options);
+  assert.deepEqual(reads, ["m4", "m3", "m2", "m1", "m0"]);
+  assert.equal(memory.subs.size, 5);
 });
