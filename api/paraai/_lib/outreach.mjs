@@ -122,6 +122,7 @@ import {
   listOutreachStates,
   probeOutreachStore,
   recordContactCapability,
+  recordProtectedMatch,
   recordMailroomScopeRefusal,
   recordOutreachException,
   releaseOutreachLock,
@@ -403,6 +404,57 @@ export function attachProtectedSubs(history, subs) {
       },
     };
   });
+}
+
+// How this tick's request read lines up with the stored protected subs: how
+// many it holds, their status, reached-out marker and recipient types, and how
+// many the lane would admit. Ids and markers only, no names.
+export function protectedSubMatch({ subs, history = [], config, now = Date.now() } = {}) {
+  const byId = new Map((history || []).map((request) => [request.id, request]));
+  const count = (bag, key) => { bag[key] = (bag[key] || 0) + 1; };
+  const out = {
+    at: new Date(now).toISOString(),
+    known: subs?.size || 0,
+    inRead: 0,
+    missing: 0,
+    status: {},
+    reachedOut: 0,
+    premarked: 0,
+    recipientTypes: {},
+    admissible: 0,
+    rows: [],
+  };
+  for (const sub of subs?.values?.() || []) {
+    const request = byId.get(sub.requestId);
+    if (!request) {
+      out.missing += 1;
+      if (out.rows.length < 60) out.rows.push({ requestId: sub.requestId, inRead: false, receivedAt: sub.receivedAt || null });
+      continue;
+    }
+    out.inRead += 1;
+    count(out.status, request.status || "unknown");
+    const deltaMs = Number(request.reachedOutAtMs) - Number(request.createdAtMs);
+    const premarked = request.reachedOut === true && Number.isFinite(deltaMs) && deltaMs >= 0
+      && deltaMs <= PARAFORM_CANDIDATE_PREMARK_MAX_MS;
+    if (request.reachedOut === true) out.reachedOut += 1;
+    if (premarked) out.premarked += 1;
+    for (const type of request.recipientTypes?.length ? request.recipientTypes : ["none"]) count(out.recipientTypes, type);
+    const admissible = protectedSubAdmissible({ ...request, protectedSub: { receivedAt: sub.receivedAt } }, config);
+    if (admissible) out.admissible += 1;
+    if (out.rows.length < 60) {
+      out.rows.push({
+        requestId: sub.requestId,
+        inRead: true,
+        status: request.status || null,
+        reachedOut: request.reachedOut === true,
+        reachedOutAfterS: Number.isFinite(deltaMs) ? Math.round(deltaMs / 1000) : null,
+        recipientTypes: request.recipientTypes || [],
+        ownRequest: request.ownRequest !== false,
+        receivedAt: sub.receivedAt || null,
+      });
+    }
+  }
+  return out;
 }
 
 export function expiredNoDigestOverrideEligible(request) {
@@ -4290,6 +4342,7 @@ export async function runOutreachTick({
   recordScopeImpl = recordLastOutreachScope,
   protectedScanImpl = scanProtectedNotes,
   protectedWatchImpl = watchUnsentProtectedSubs,
+  protectedMatchRecordImpl = recordProtectedMatch,
 } = {}) {
   const tickStartedAt = Date.now();
   if (!outreachExecutionEnabled(config)) {
@@ -4354,6 +4407,10 @@ export async function runOutreachTick({
     );
     const scope = Array.isArray(historyRead) ? null : historyRead.scope;
     await recordScopeImpl(scope, { now }).catch(() => {});
+    const protectedMatch = protectedScan?.scanned && protectedScan.subs
+      ? protectedSubMatch({ subs: protectedScan.subs, history, config, now })
+      : null;
+    if (protectedMatch) await protectedMatchRecordImpl(protectedMatch).catch(() => {});
     const visibleRequestIds = new Set(history.map((request) => request.id));
     const teammatesPaused = history.some((request) => request.ownRequest === false)
       ? await teammatesPausedImpl().catch(() => true)
@@ -4523,6 +4580,11 @@ export async function runOutreachTick({
           added: protectedScan.added?.length || 0,
           unparsed: protectedScan.unparsed?.length || 0,
           unsentAlerts: protectedUnsent.length,
+          ...(protectedMatch ? {
+            inRead: protectedMatch.inRead,
+            missing: protectedMatch.missing,
+            admissible: protectedMatch.admissible,
+          } : {}),
           ...(protectedScan.error ? { error: protectedScan.error } : {}),
         },
       } : {}),

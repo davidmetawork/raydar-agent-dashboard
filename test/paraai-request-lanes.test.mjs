@@ -601,6 +601,7 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
     receivedAt: "2026-11-04T16:05:00.000Z",
   }]]);
   let watched = null;
+  let matched = null;
   const result = await runOutreachTick({
     config: {
       ...openOutreachConfig(),
@@ -612,13 +613,18 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
     historyImpl: async () => history,
     protectedScanImpl: async () => ({ scanned: true, subs, added: ["request-protected"], unparsed: [] }),
     protectedWatchImpl: async (options) => { watched = options; return []; },
+    protectedMatchRecordImpl: async (record) => { matched = record; },
   });
   // The protected request is attempted (this process cannot reach Paraform,
   // so it errors); the plain one is still held back by the not-before.
   assert.deepEqual(result.results.filter((item) => item.requestId).map((item) => item.requestId), ["request-protected"]);
   assert.equal(watched.subs, subs);
   assert.equal(watched.history.find((row) => row.id === "request-protected").protectedSub.receivedAt, "2026-11-04T16:05:00.000Z");
-  assert.deepEqual(result.protectedSubs, { scanned: true, known: 1, added: 1, unparsed: 0, unsentAlerts: 0 });
+  assert.deepEqual(result.protectedSubs, {
+    scanned: true, known: 1, added: 1, unparsed: 0, unsentAlerts: 0, inRead: 1, missing: 0, admissible: 1,
+  });
+  assert.equal(matched.inRead, 1);
+  assert.deepEqual(matched.status, { pending: 1 });
 });
 
 test("the tick never scans for protected subs while they are switched off", async () => {
