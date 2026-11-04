@@ -21,6 +21,7 @@
 // protected sub but carries no such link posts one Slack line instead of being
 // dropped; a protected sub nobody emailed within an hour posts one Slack line.
 
+import { lookupReason } from "./outreach-protected-lookup.mjs";
 import {
   acquireProtectedScanSlot,
   claimProtectedMeta,
@@ -301,6 +302,9 @@ export async function watchUnsentProtectedSubs({
   states = [],
   sentThisTick = [],
   exceptions = [],
+  // Who each note is about (outreach-protected-lookup.mjs): says why a note
+  // the request read does not hold has no row.
+  lookups = {},
   // Notes from before protected subs were switched on are not this lane's.
   notBeforeMs = null,
   now = Date.now(),
@@ -334,7 +338,7 @@ export async function watchUnsentProtectedSubs({
     if (!(await claimImpl(`unsent:${sub.requestId}`).catch(() => false))) continue;
     const row = rows.get(sub.requestId);
     const why = !row
-      ? "Paraform's request list does not show this request"
+      ? lookupReason(lookups[sub.requestId]) || "Paraform's request list does not show this request"
       : row.status !== "pending"
         ? `Paraform shows the request as ${row.status || "unknown"}`
         : openException.get(sub.requestId)
