@@ -30,8 +30,15 @@ import {
   initialMatchCopy,
   initialSubject,
   matchBundleCopy,
+  protectedSubCopy,
   roleShareUrl,
 } from "./outreach-copy.mjs";
+import {
+  PROTECTED_SUB_DELIVERY_MODE,
+  protectedSubsEnabled,
+  scanProtectedNotes,
+  watchUnsentProtectedSubs,
+} from "./outreach-protected.mjs";
 import {
   canonicalAddress,
   candidateRepliedAfter,
@@ -251,6 +258,11 @@ export function outreachConfig(env = process.env) {
     sendApproved: bool(env.PARAAI_OUTREACH_SEND_APPROVED),
     notBeforeMs,
     candidateRecipientNotBeforeMs,
+    // Rating-protected subs (2026-11-04): notes received at or after this time
+    // are emailed. Unset, or PARAAI_PROTECTED_SUBS=off, leaves them alone.
+    protectedNotBeforeMs: protectedSubsEnabled(env)
+      ? finiteDate(env.PARAAI_PROTECTED_SUBS_NOT_BEFORE)
+      : null,
     mailbox: outreachMailbox(env),
     // Where a NEW conversation starts (David, 2026-09-28): "mailroom" unless
     // PARAAI_OUTREACH_TRANSPORT=gmail. It only takes effect while the Mailroom
@@ -355,6 +367,42 @@ function automaticRequestMarkerEligible(request, config) {
   ) return false;
   if (request?.reachedOut !== true) return true;
   return candidateRecipientPremarkArmed(request, config);
+}
+
+// A rating-protected sub (outreach-protected.mjs) is a Paraform request a
+// Paraform staff member picked for us, so it is admitted on the note instead
+// of PARAAI_OUTREACH_NOT_BEFORE. Its reached-out marker may be Paraform's own,
+// written as the request was created; a marker written later is a person's
+// hand send and still blocks it.
+export function protectedSubAdmissible(request, config) {
+  const receivedMs = finiteDate(request?.protectedSub?.receivedAt);
+  if (
+    receivedMs == null ||
+    config?.protectedNotBeforeMs == null ||
+    receivedMs < config.protectedNotBeforeMs
+  ) return false;
+  if (request?.reachedOut !== true) return true;
+  const deltaMs = Number(request?.reachedOutAtMs) - Number(request?.createdAtMs);
+  return Number.isFinite(deltaMs) && deltaMs >= 0 && deltaMs <= PARAFORM_CANDIDATE_PREMARK_MAX_MS;
+}
+
+// Rows of this tick's history read that a stored protected-sub note names.
+export function attachProtectedSubs(history, subs) {
+  if (!subs?.size) return history;
+  return (history || []).map((request) => {
+    const sub = subs.get(request.id);
+    if (!sub) return request;
+    return {
+      ...request,
+      protectedSub: {
+        submitUrl: sub.submitUrl,
+        ctarId: sub.ctarId || null,
+        receivedAt: sub.receivedAt,
+        sender: sub.sender || null,
+        noteThreadId: sub.noteThreadId || null,
+      },
+    };
+  });
 }
 
 export function expiredNoDigestOverrideEligible(request) {
@@ -818,7 +866,8 @@ export function eligibleNewRequests(
           candidateRecipientPremarkArmed(request, config)
         )
       ) ||
-      automaticRequestMarkerEligible(request, config)
+      automaticRequestMarkerEligible(request, config) ||
+      protectedSubAdmissible(request, config)
     ) &&
     !delivered.has(request.id)
   )).sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
@@ -1233,6 +1282,25 @@ async function threadForMatch({ state, request, mailbox, digestUrl }) {
   return { thread: null, context: null, anchorStatus: "none" };
 }
 
+// A protected sub replies on the candidate's live Gmail conversation, whatever
+// role started it, as long as we actually sent something on it (a thread that
+// holds only a draft is not a conversation the candidate has seen).
+async function protectedSubThread({ state, mailbox, getThreadImpl = getThread }) {
+  if (!state?.threadId) return { thread: null, context: null, anchorStatus: "none" };
+  try {
+    const thread = await getThreadImpl(mailbox, state.threadId);
+    const delivered = (thread?.messages || []).some((message) => (
+      (message?.labelIds || []).includes("SENT") &&
+      !(message?.labelIds || []).includes("DRAFT")
+    ));
+    const context = delivered ? threadReplyContext(thread) : null;
+    if (context) return { thread, context, anchorStatus: "delivered" };
+  } catch {
+    // An unreadable thread starts a new conversation rather than guessing.
+  }
+  return { thread: null, context: null, anchorStatus: "none" };
+}
+
 // ── Mailroom conversations (David, 2026-09-28) ───────────────────────────────
 // A conversation the Mailroom started has no Gmail thread: SendGrid delivers it
 // and nothing lands in Gmail Sent. The state carries the conversation instead,
@@ -1432,6 +1500,7 @@ function matchRecord({
     providerMessageId: transport === "gmail" ? null : providerMessageId,
     mailroomRowId: sent?.mailroomRowId || null,
     copyVariant: copy.variant,
+    ...(deliveryMode === PROTECTED_SUB_DELIVERY_MODE ? { protectedSub: true } : {}),
     // A teammate's request (agency view, 2026-10-12); David's records are unchanged.
     ...(request.ownRequest === false
       ? {
@@ -1460,7 +1529,10 @@ export function planDeliveredMatch(state, {
   mailroom = null,
 }) {
   const previousFollowup = state.followup;
-  const remaining = ordinal === 1 ? 2 : 1;
+  // Every rating-protected sub gets the two generic nudges an initial request
+  // gets (David, 2026-11-04), whichever role number it is for this person.
+  const protectedSub = deliveryMode === PROTECTED_SUB_DELIVERY_MODE;
+  const remaining = ordinal === 1 || protectedSub ? 2 : 1;
   const mailroomConversation = mailroom
     ? nextMailroomConversation(state, {
         start: mailroom.start === true,
@@ -1522,7 +1594,7 @@ export function planDeliveredMatch(state, {
     // even when an operator explicitly overrides the send for a new role.
     followup: (!armFollowup || state.repliedAt || state.stoppedReason) ? null : {
       ownerMatchId: request.id,
-      ordinal,
+      ordinal: protectedSub ? 1 : ordinal,
       number: 1,
       remaining,
       dueAt: new Date(Date.parse(sentAt) + TWO_DAYS_MS).toISOString(),
@@ -2061,7 +2133,17 @@ export async function processMatchRequest(
       request?.ownRequest === false &&
       lower(request?.status) === "pending" &&
       (request?.reachedOut !== true || paraformCandidateRecipientPremark(request));
-    if (teammateNoDigest) {
+    // A rating-protected sub (2026-11-04) has no digest either: Paraform staff
+    // picked the person, so there is no "the team reviewed you" page to link.
+    const protectedSub = mode === "send" &&
+      !allowWithoutDigest &&
+      !reliefTransport &&
+      Boolean(clean(request?.protectedSub?.submitUrl)) &&
+      lower(request?.status) === "pending" &&
+      protectedSubAdmissible(request, { protectedNotBeforeMs: 0 });
+    if (protectedSub) {
+      deliveryMode = PROTECTED_SUB_DELIVERY_MODE;
+    } else if (teammateNoDigest) {
       deliveryMode = PENDING_DIGEST_UNAVAILABLE_REASON;
     } else if (allowWithoutDigest) {
       if (noDigestReason === PENDING_DIGEST_UNAVAILABLE_REASON) {
@@ -2191,8 +2273,13 @@ export async function processMatchRequest(
     // A teammate's role has no digest to anchor on, so it continues whatever
     // Mailroom conversation the candidate already has rather than opening a
     // new thread per role (one teammate candidate had six pending requests).
+    // A protected sub does the same (David, 2026-11-04: a later request
+    // follows up on the same conversation, Mailroom or Gmail).
     const mailroomContext = laneReady.ready
-      ? mailroomConversationContext(state, teammateNoDigest ? undefined : digest?.digestUrl || null)
+      ? mailroomConversationContext(
+        state,
+        teammateNoDigest || protectedSub ? undefined : digest?.digestUrl || null,
+      )
       : null;
     if (reliefTransport) {
       // Relief always opens a fresh conversation.
@@ -2200,6 +2287,9 @@ export async function processMatchRequest(
       route = "mailroom";
       context = mailroomContext;
       anchorStatus = mailroomContext ? "mailroom" : "none";
+    } else if (protectedSub) {
+      ({ context, anchorStatus } = await protectedSubThread({ state, mailbox: config.mailbox }));
+      if (!context && laneReady.ready) route = "mailroom";
     } else {
       ({ context, anchorStatus } = await threadForMatch({
         state,
@@ -2222,16 +2312,25 @@ export async function processMatchRequest(
       : context
         ? ""
         : await getSignatureHtml(config.mailbox).catch(() => "");
-    let copy = copyForMatch({
-      request,
-      ordinal,
-      contact,
-      digest,
-      roleUrl,
-      // If the signature fetch failed, keep the baked-in "David" sign-off
-      // rather than sending a thread-starting email with no name at all.
-      signatureFollows: Boolean(signatureHtml),
-    });
+    let copy = protectedSub
+      ? protectedSubCopy({
+        firstName: firstName(contact.name || request.candidateName),
+        roleName: request.roleName,
+        companyName: request.companyName,
+        roleUrl,
+        existingConversation: Boolean(context),
+        signatureFollows: Boolean(signatureHtml),
+      })
+      : copyForMatch({
+        request,
+        ordinal,
+        contact,
+        digest,
+        roleUrl,
+        // If the signature fetch failed, keep the baked-in "David" sign-off
+        // rather than sending a thread-starting email with no name at all.
+        signatureFollows: Boolean(signatureHtml),
+      });
     if (
       deliveryMode === PENDING_DIGEST_UNAVAILABLE_REASON ||
       deliveryMode === OPERATOR_CONFIRMED_NO_DIGEST_REASON
@@ -4189,6 +4288,8 @@ export async function runOutreachTick({
   replyPassImpl = runReplyPassStep,
   teammatesPausedImpl = teammateWritesPaused,
   recordScopeImpl = recordLastOutreachScope,
+  protectedScanImpl = scanProtectedNotes,
+  protectedWatchImpl = watchUnsentProtectedSubs,
 } = {}) {
   const tickStartedAt = Date.now();
   if (!outreachExecutionEnabled(config)) {
@@ -4240,7 +4341,17 @@ export async function runOutreachTick({
       listOutreachStates(),
       listOutreachExceptions(),
     ]);
-    const history = Array.isArray(historyRead) ? historyRead : historyRead.requests;
+    // Rating-protected sub notes (2026-11-04): read new ones from Gmail at
+    // most every five minutes, then mark the rows of this read they name. A
+    // failed scan only means no protected sub is admitted this tick.
+    const protectedScan = config.protectedNotBeforeMs != null
+      ? await protectedScanImpl({ mailbox: config.mailbox, now, notifyImpl: notifySlack })
+        .catch((error) => ({ subs: null, error: clean(error?.code || error?.message).slice(0, 120) || "scan_failed" }))
+      : null;
+    const history = attachProtectedSubs(
+      Array.isArray(historyRead) ? historyRead : historyRead.requests,
+      protectedScan?.subs,
+    );
     const scope = Array.isArray(historyRead) ? null : historyRead.scope;
     await recordScopeImpl(scope, { now }).catch(() => {});
     const visibleRequestIds = new Set(history.map((request) => request.id));
@@ -4354,6 +4465,24 @@ export async function runOutreachTick({
       now,
       config,
     }).catch(() => ({ escalated: [] }));
+    // A protected sub nobody emailed an hour after its note pages once, with
+    // the reason this read shows (2026-11-04).
+    // It runs with the scan, every five minutes, on the states read at the
+    // top of this tick plus what this tick just sent.
+    const protectedUnsent = protectedScan?.scanned && protectedScan.subs
+      ? await protectedWatchImpl({
+        subs: protectedScan.subs,
+        history,
+        states,
+        sentThisTick: results
+          .filter((result) => result.action === "sent" && result.requestId)
+          .map((result) => result.requestId),
+        exceptions,
+        notBeforeMs: config.protectedNotBeforeMs,
+        now,
+        notifyImpl: notifySlack,
+      }).catch(() => [])
+      : [];
     // Reply auto-pass (David, 2026-09-29): pass the pending requests whose
     // candidate said no, is off the market, or asked not to be contacted. It
     // runs last, under this tick's brake, cadence and Gmail breaker, and its
@@ -4387,6 +4516,16 @@ export async function runOutreachTick({
       scope,
       teammatesPaused,
       teammateMarks,
+      ...(protectedScan ? {
+        protectedSubs: {
+          scanned: protectedScan.scanned === true,
+          known: protectedScan.subs?.size ?? null,
+          added: protectedScan.added?.length || 0,
+          unparsed: protectedScan.unparsed?.length || 0,
+          unsentAlerts: protectedUnsent.length,
+          ...(protectedScan.error ? { error: protectedScan.error } : {}),
+        },
+      } : {}),
     };
     if (scope?.teammatesRead) {
       await recordLastTeammateTick({

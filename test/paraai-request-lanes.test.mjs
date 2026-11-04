@@ -587,3 +587,49 @@ test("a paused Para AI matching status raises the matching-paused alert; an acti
     assert.equal(alerts.length, expected, String(matchingPaused));
   }
 });
+
+test("the tick reads protected-sub notes, admits the request they name, and runs the unsent watch", async () => {
+  const created = Date.parse("2026-11-04T16:00:00.000Z");
+  const history = [
+    // Created before the lane's not-before, so only the note can admit it.
+    { id: "request-protected", status: "pending", candidateUserId: "candidate-p", roleId: "role-p", roleName: "Engineer", companyName: "Acme", reachedOut: false, createdAtMs: created, recipientTypes: [] },
+    { id: "request-plain", status: "pending", candidateUserId: "candidate-q", roleId: "role-q", roleName: "Engineer", companyName: "Acme", reachedOut: false, createdAtMs: created, recipientTypes: [] },
+  ];
+  const subs = new Map([["request-protected", {
+    requestId: "request-protected",
+    submitUrl: "https://www.paraform.com/company/acme/role-p/recruit/submit_candidate?from_submission_request=true&submission_request_id=request-protected",
+    receivedAt: "2026-11-04T16:05:00.000Z",
+  }]]);
+  let watched = null;
+  const result = await runOutreachTick({
+    config: {
+      ...openOutreachConfig(),
+      notBeforeMs: Date.parse("2026-12-01T00:00:00.000Z"),
+      protectedNotBeforeMs: Date.parse("2026-11-04T00:00:00.000Z"),
+    },
+    now: Date.parse("2026-11-04T16:10:00.000Z"),
+    pauseState: async () => ({ paused: false }),
+    historyImpl: async () => history,
+    protectedScanImpl: async () => ({ scanned: true, subs, added: ["request-protected"], unparsed: [] }),
+    protectedWatchImpl: async (options) => { watched = options; return []; },
+  });
+  // The protected request is attempted (this process cannot reach Paraform,
+  // so it errors); the plain one is still held back by the not-before.
+  assert.deepEqual(result.results.filter((item) => item.requestId).map((item) => item.requestId), ["request-protected"]);
+  assert.equal(watched.subs, subs);
+  assert.equal(watched.history.find((row) => row.id === "request-protected").protectedSub.receivedAt, "2026-11-04T16:05:00.000Z");
+  assert.deepEqual(result.protectedSubs, { scanned: true, known: 1, added: 1, unparsed: 0, unsentAlerts: 0 });
+});
+
+test("the tick never scans for protected subs while they are switched off", async () => {
+  let scans = 0;
+  const result = await runOutreachTick({
+    config: { ...openOutreachConfig(), protectedNotBeforeMs: null },
+    now: Date.parse("2026-11-04T16:10:00.000Z"),
+    pauseState: async () => ({ paused: false }),
+    historyImpl: async () => [],
+    protectedScanImpl: async () => { scans += 1; return { subs: new Map() }; },
+  });
+  assert.equal(scans, 0);
+  assert.equal(result.protectedSubs, undefined);
+});
