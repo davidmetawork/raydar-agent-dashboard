@@ -41,6 +41,8 @@ const MAX_NAME_MATCHES = 4;
 // Paraform's own id for it is the note's protected-sub id.
 const APPLICATION_BEFORE_NOTE_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLICATION_AFTER_NOTE_MS = 60 * 60 * 1000;
+// Bumped when the lookup changes, so the earlier notes are measured again.
+export const PROTECTED_LOOKUP_VERSION = 2;
 // A pacing refusal is retried later without using an attempt, this many times.
 const MAX_THROTTLED = 12;
 const FINAL_STATUSES = new Set(["resolved", "ambiguous", "too_many", "incomplete", "no_name", "role_inactive"]);
@@ -90,6 +92,36 @@ function applicationRoleId(row) {
   return clean(row?.role_id || row?.role?.id || row?.roleId);
 }
 
+// Where a person's CRM row names the role (measured 2026-11-04: the
+// applications read omits roles Paraform added the person to as "Sourced",
+// which is how a protected sub arrives). Returns the path to the first value
+// equal to the role id and the date on the object holding it, if any.
+export function roleLinkInRow(node, roleId, path = "", depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6) return null;
+  const entries = Array.isArray(node) ? node.map((value, index) => [index, value]) : Object.entries(node);
+  for (const [key, value] of entries) {
+    if (typeof value === "string" && value === roleId) {
+      return { path: `${path}${Array.isArray(node) ? "[]" : `.${key}`}`, atMs: Array.isArray(node) ? null : applicationTimeMs(node) };
+    }
+  }
+  for (const [key, value] of entries) {
+    if (value && typeof value === "object") {
+      const found = roleLinkInRow(value, roleId, `${path}${Array.isArray(node) ? "[]" : `.${key}`}`, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function rowUpdatedMs(item) {
+  const person = item?.candidate && typeof item.candidate === "object" ? item.candidate : {};
+  for (const value of [item?.updated_at, item?.updatedAt, person.updated_at, person.updatedAt]) {
+    const ms = Date.parse(clean(value));
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
 function applicationTimeMs(row) {
   for (const value of [row?.created_at, row?.createdAt, row?.updated_at, row?.updatedAt, row?.submitted_at]) {
     const ms = Date.parse(clean(value));
@@ -122,7 +154,7 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
     const afterSwitchOn = notBeforeMs != null && receivedMs >= notBeforeMs;
     if (afterSwitchOn) {
       if (due(sub)) fresh.push(sub);
-    } else if (lookups[sub.requestId]) {
+    } else if (Number(lookups[sub.requestId]?.version || 1) >= PROTECTED_LOOKUP_VERSION) {
       earlierRecorded += 1;
     } else {
       earlier.push(sub);
@@ -143,6 +175,7 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
     lastTriedAt: new Date(now).toISOString(),
     attempts: Number(previous?.attempts || 0) + 1,
     throttled: Number(previous?.throttled || 0),
+    version: PROTECTED_LOOKUP_VERSION,
   };
   const name = clean(sub.candidateName);
   if (!name) return { ...base, status: "no_name" };
@@ -179,24 +212,41 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
   if (!complete) return { ...base, ...evidence, status: "incomplete" };
   if (found.size > MAX_NAME_MATCHES) return { ...base, ...evidence, status: "too_many" };
   const receivedMs = Date.parse(clean(sub.receivedAt));
+  const nearNote = (at) => Number.isFinite(receivedMs) && at != null
+    && at >= receivedMs - APPLICATION_BEFORE_NOTE_MS && at <= receivedMs + APPLICATION_AFTER_NOTE_MS;
   const confirmed = [];
   let onRoleRows = 0;
+  let crmRoleLinks = 0;
+  let crmRolePath = null;
   for (const [candidateUserId, item] of found) {
+    // The role on the person's CRM row counts when that link is dated near
+    // the note, or, undated, when the row itself changed since a week before
+    // the note (Paraform adding the role is what changed it).
+    const link = roleLinkInRow(item, base.roleId);
+    if (link) {
+      crmRoleLinks += 1;
+      crmRolePath = crmRolePath || link.path;
+      const updatedMs = rowUpdatedMs(item);
+      const linkRecent = link.atMs != null
+        ? nearNote(link.atMs)
+        : updatedMs != null && Number.isFinite(receivedMs) && updatedMs >= receivedMs - APPLICATION_BEFORE_NOTE_MS;
+      if (linkRecent) {
+        confirmed.push({ candidateUserId, linkedinUser: crmLinkedin(item), ctarMatch: false, via: "crm_row" });
+        continue;
+      }
+    }
     const rows = await trpcGetImpl("candidateUser.getCandidateUserApplications", { candidate_user_id: candidateUserId });
     const onRole = (Array.isArray(rows) ? rows : []).filter((row) => applicationRoleId(row) === base.roleId);
     onRoleRows += onRole.length;
     const exact = Boolean(clean(sub.ctarId)) && onRole.some((row) => (
       clean(row?.id) === clean(sub.ctarId) || clean(row?.candidate_to_approved_role_id) === clean(sub.ctarId)
     ));
-    const recent = Number.isFinite(receivedMs) && onRole.some((row) => {
-      const at = applicationTimeMs(row);
-      return at != null && at >= receivedMs - APPLICATION_BEFORE_NOTE_MS && at <= receivedMs + APPLICATION_AFTER_NOTE_MS;
-    });
-    if (exact || recent) confirmed.push({ candidateUserId, linkedinUser: crmLinkedin(item), ctarMatch: exact });
+    const recent = onRole.some((row) => nearNote(applicationTimeMs(row)));
+    if (exact || recent) confirmed.push({ candidateUserId, linkedinUser: crmLinkedin(item), ctarMatch: exact, via: "application" });
   }
-  Object.assign(evidence, { onRoleRows, confirmed: confirmed.length });
+  Object.assign(evidence, { onRoleRows, crmRoleLinks, crmRolePath, confirmed: confirmed.length });
   if (confirmed.length === 1) {
-    return { ...base, ...evidence, status: "resolved", candidateUserId: confirmed[0].candidateUserId, linkedinUser: confirmed[0].linkedinUser, ctarMatch: confirmed[0].ctarMatch };
+    return { ...base, ...evidence, status: "resolved", candidateUserId: confirmed[0].candidateUserId, linkedinUser: confirmed[0].linkedinUser, ctarMatch: confirmed[0].ctarMatch, via: confirmed[0].via };
   }
   if (confirmed.length > 1) return { ...base, ...evidence, status: "ambiguous" };
   return { ...base, ...evidence, status: "not_found" };

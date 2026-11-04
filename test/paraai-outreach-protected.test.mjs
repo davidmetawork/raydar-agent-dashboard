@@ -411,7 +411,7 @@ test("the queue takes new notes first, retries not-found three times, and backfi
   const lookups = {
     "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z" },
     "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z" },
-    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z" },
+    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z", version: 2 },
   };
   // new-b is not due for 10 minutes, new-a is out of attempts, old-a used the backfill.
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill: 1 })), []);
@@ -513,4 +513,33 @@ test("review fixes: an unreadable lookup store runs no lookup", async () => {
   });
   assert.equal(called, 0);
   assert.equal(result.error, "lookup_store_unreadable");
+});
+
+test("the role on the person's CRM row confirms them when it is dated near the note or the row just changed", async () => {
+  const dated = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" }, roles: [{ role_id: "role-1", created_at: "2026-11-04T17:54:00Z" }] }] });
+  const record = await lookupProtectedSub(NOTE, { trpcGetImpl: dated.impl });
+  assert.equal(record.status, "resolved");
+  assert.equal(record.via, "crm_row");
+  assert.equal(record.crmRolePath, ".roles[].role_id");
+  assert.equal(dated.calls.filter((proc) => proc === "candidateUser.getCandidateUserApplications").length, 0);
+  const undated = fakeParaform({ crm: [{ id: "cu-1", name: "Jane Doe", updated_at: "2026-11-04T17:54:00Z", roleIds: ["role-0", "role-1"] }] });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: undated.impl })).status, "resolved");
+  // An old link, or an undated one on a row untouched for months, is not enough.
+  const oldLink = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" }, roles: [{ role_id: "role-1", created_at: "2026-05-01T00:00:00Z" }] }] });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: oldLink.impl })).status, "not_found");
+  const stale = fakeParaform({ crm: [{ id: "cu-1", name: "Jane Doe", updated_at: "2026-05-01T00:00:00Z", roleIds: ["role-1"] }] });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: stale.impl })).status, "not_found");
+  // Two namesakes whose rows both carry the role: never a guess.
+  const twins = fakeParaform({ crm: [
+    { id: "cu-1", name: "Jane Doe", updated_at: "2026-11-04T17:54:00Z", roleIds: ["role-1"] },
+    { id: "cu-2", name: "Jane Doe", updated_at: "2026-11-04T17:55:00Z", roleIds: ["role-1"] },
+  ] });
+  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: twins.impl })).status, "ambiguous");
+});
+
+test("earlier notes looked up by an older lookup are measured again", () => {
+  const subs = new Map([["old-a", { ...NOTE, requestId: "old-a", receivedAt: "2026-11-04T16:00:00Z" }]]);
+  const args = { subs, historyIds: new Set(), notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: Date.parse("2026-11-04T19:00:00Z"), backfill: 12 };
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1 } } }).length, 1);
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 2 } } }).length, 0);
 });
