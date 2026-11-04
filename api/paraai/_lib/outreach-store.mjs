@@ -595,6 +595,7 @@ const PROTECTED_SUBS_KEY = "paraai:outreach:protected:subs";
 const PROTECTED_SEEN_KEY = "paraai:outreach:protected:seen";
 const PROTECTED_META_KEY = "paraai:outreach:protected:meta";
 const PROTECTED_SCAN_SLOT_KEY = "paraai:outreach:protected:scan-slot";
+const PROTECTED_MATCH_KEY = "paraai:outreach:protected:last-match";
 
 function hashPairs(raw) {
   if (!raw) return {};
@@ -631,6 +632,12 @@ export async function getProtectedMeta({ kvImpl = kv } = {}) {
 // HSETNX: true only for the first writer, so a one-time alert fires once.
 export async function claimProtectedMeta(field, value = new Date().toISOString(), { kvImpl = kv } = {}) {
   return Number(await kvImpl(["HSETNX", PROTECTED_META_KEY, String(field), String(value)])) === 1;
+}
+
+// What the last scanned tick's request read held for the stored protected
+// subs (ids, status and markers only), kept two days for diagnosis.
+export async function recordProtectedMatch(record, { kvImpl = kv } = {}) {
+  await kvImpl(["SET", PROTECTED_MATCH_KEY, JSON.stringify(record), "EX", "172800"]);
 }
 
 export async function acquireProtectedScanSlot({ ttlSeconds = 300, kvImpl = kv } = {}) {

@@ -10,7 +10,7 @@ import {
   watchUnsentProtectedSubs,
 } from "../api/paraai/_lib/outreach-protected.mjs";
 import { protectedSubCopy } from "../api/paraai/_lib/outreach-copy.mjs";
-import { attachProtectedSubs } from "../api/paraai/_lib/outreach.mjs";
+import { attachProtectedSubs, protectedSubMatch } from "../api/paraai/_lib/outreach.mjs";
 
 const REQ = "cprotectedreq0000000000001";
 const CTAR = "cprotectedctar000000000001";
@@ -280,4 +280,39 @@ test("a burst is read over several scans, oldest first", async () => {
   await scanProtectedNotes(options);
   assert.deepEqual(reads, ["m4", "m3", "m2", "m1", "m0"]);
   assert.equal(memory.subs.size, 5);
+});
+
+test("the match record says which stored subs the request read holds, and their markers", () => {
+  const created = Date.parse("2026-11-04T16:00:00.000Z");
+  const subs = new Map([
+    ["req-a", { requestId: "req-a", receivedAt: "2026-11-04T18:00:00.000Z" }],
+    ["req-b", { requestId: "req-b", receivedAt: "2026-11-04T18:00:00.000Z" }],
+    ["req-c", { requestId: "req-c", receivedAt: "2026-11-04T18:00:00.000Z" }],
+    ["req-old", { requestId: "req-old", receivedAt: "2026-11-01T18:00:00.000Z" }],
+  ]);
+  const history = [
+    { id: "req-a", status: "pending", reachedOut: false, createdAtMs: created, recipientTypes: ["CANDIDATE"] },
+    { id: "req-b", status: "pending", reachedOut: true, createdAtMs: created, reachedOutAtMs: created + 2_000, recipientTypes: [] },
+    { id: "req-old", status: "expired", reachedOut: true, createdAtMs: created, reachedOutAtMs: created + 3_600_000, recipientTypes: [] },
+    { id: "req-other", status: "pending", reachedOut: false, createdAtMs: created, recipientTypes: [] },
+  ];
+  const match = protectedSubMatch({
+    subs,
+    history,
+    config: { protectedNotBeforeMs: Date.parse("2026-11-04T17:46:07Z") },
+    now: Date.parse("2026-11-04T19:00:00.000Z"),
+  });
+  assert.equal(match.known, 4);
+  assert.equal(match.inRead, 3);
+  assert.equal(match.missing, 1);
+  assert.deepEqual(match.status, { pending: 2, expired: 1 });
+  assert.equal(match.reachedOut, 2);
+  assert.equal(match.premarked, 1);
+  assert.deepEqual(match.recipientTypes, { CANDIDATE: 1, none: 2 });
+  // req-a (not reached out) and req-b (premarked) are admitted; req-old's note
+  // predates the switch-on.
+  assert.equal(match.admissible, 2);
+  assert.deepEqual(match.rows.find((row) => row.requestId === "req-c"), { requestId: "req-c", inRead: false, receivedAt: "2026-11-04T18:00:00.000Z" });
+  assert.equal(match.rows.find((row) => row.requestId === "req-b").reachedOutAfterS, 2);
+  assert.ok(!JSON.stringify(match).includes("candidate"), "no names or candidate fields in the record");
 });
