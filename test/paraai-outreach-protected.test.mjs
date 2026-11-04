@@ -201,3 +201,65 @@ test("only the rows a note names are marked protected", () => {
   assert.equal(rows[1].protectedSub, undefined);
   assert.deepEqual(attachProtectedSubs([{ id: "x" }], null), [{ id: "x" }]);
 });
+
+test("review fixes: lookalike senders and domains are refused", () => {
+  assert.equal(parseProtectedNote(note({ from: '"conor@paraform.com" <x@paraform.com.evil.io>' })), null);
+  assert.equal(parseProtectedNote(note({ from: "x@paraform.com.evil.io" })), null);
+  const lookalikeDmarc = "mx.google.com; dmarc=pass (p=NONE) header.from=paraform.com.evil.io";
+  assert.equal(parseProtectedNote(note({ auth: lookalikeDmarc })).unparsed.reason, "auth");
+  assert.equal(parseProtectedNote(note({ from: '"Staff" <staff.member@paraform.com>' })).record.sender, "staff.member@paraform.com");
+});
+
+test("review fixes: a note naming two requests stores both, and a body-only mention never pages", () => {
+  const second = SUBMIT.replace(REQ, "cprotectedreq0000000000003");
+  const both = parseProtectedNote(note({ html: `<a href="${WRAPPED}">one</a> <a href="${second}">two</a>` }));
+  assert.deepEqual(both.records.map((row) => row.requestId), [REQ, "cprotectedreq0000000000003"]);
+  assert.equal(both.records[0].candidateName, null, "a two-request note's subject names neither");
+  assert.equal(parseProtectedNote(note({ subject: "Weekly update", html: "<div>about protected submission rules</div>" })), null);
+});
+
+test("review fixes: one unreadable message is skipped, a failed search keeps the stored subs, and a chaser on a known note thread never pages", async () => {
+  const memory = memoryStore();
+  memory.subs.set(REQ, { requestId: REQ, noteThreadId: "thread-msg-1", submitUrl: SUBMIT });
+  memory.meta.set("seeded", "x");
+  memory.meta.set("sender:staff.member@paraform.com", "x");
+  const alerts = [];
+  const messages = new Map([
+    ["broken", null],
+    ["chaser", { ...note({ id: "chaser", subject: "Re: Rating-protected sub: Jane Doe → Acme", html: "<div>any update?</div>" }), threadId: "thread-msg-1" }],
+    ["fresh", note({ id: "fresh", html: `<a href="${SUBMIT.replace(REQ, "cprotectedreq0000000000004")}">submit here</a>` })],
+  ]);
+  const result = await scanProtectedNotes({
+    mailbox: "david@raydar.xyz",
+    searchImpl: async () => [...messages.keys()].map((id) => ({ id })),
+    getMessageImpl: async (_mailbox, id) => {
+      if (id === "broken") throw Object.assign(new Error("not found"), { status: 404 });
+      return messages.get(id);
+    },
+    notifyImpl: async (text) => { alerts.push(text); return true; },
+    store: memory.store,
+  });
+  assert.equal(result.failed, 1);
+  assert.deepEqual(result.added, ["cprotectedreq0000000000004"], "the message after the broken one is still read");
+  assert.equal(memory.seen.has("broken"), false, "the broken one is retried next scan");
+  assert.deepEqual(alerts, [], "the chaser is not a new note");
+  const failed = await scanProtectedNotes({
+    mailbox: "david@raydar.xyz",
+    searchImpl: async () => { throw Object.assign(new Error("429"), { code: "GMAIL_RATE_LIMITED" }); },
+    store: memory.store,
+  });
+  assert.equal(failed.error, "GMAIL_RATE_LIMITED");
+  assert.equal(failed.subs.size, 2);
+});
+
+test("review fixes: a send queued in the Mailroom is not reported unemailed", async () => {
+  const subs = new Map([["q", { requestId: "q", receivedAt: "2026-11-04T16:00:00Z", submitUrl: "https://x/q" }]]);
+  const flagged = await watchUnsentProtectedSubs({
+    subs,
+    history: [{ id: "q", status: "pending" }],
+    states: [{ matches: {}, outbox: { "match:q": { status: "queued" } } }],
+    now: Date.parse("2026-11-04T18:00:00Z"),
+    claimImpl: async () => true,
+  });
+  assert.deepEqual(flagged, []);
+});

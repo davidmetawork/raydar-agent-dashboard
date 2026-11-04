@@ -105,13 +105,19 @@ export function protectedSubmitLink(href) {
 
 const HREF = /href\s*=\s*"([^"]+)"|href\s*=\s*'([^']+)'|<(https?:\/\/[^>\s]+)>|(https?:\/\/[^\s"'<>)]+)/gi;
 
-export function findProtectedSubmitLink(body) {
-  const text = String(body ?? "");
-  for (const match of text.matchAll(HREF)) {
+// Every distinct protected submit link in a note, in order: one note can name
+// more than one request.
+export function findProtectedSubmitLinks(body) {
+  const byRequest = new Map();
+  for (const match of String(body ?? "").matchAll(HREF)) {
     const found = protectedSubmitLink(match[1] || match[2] || match[3] || match[4]);
-    if (found) return found;
+    if (found && !byRequest.has(found.requestId)) byRequest.set(found.requestId, found);
   }
-  return null;
+  return [...byRequest.values()];
+}
+
+export function findProtectedSubmitLink(body) {
+  return findProtectedSubmitLinks(body)[0] || null;
 }
 
 // "Rating-protected sub: Jane Doe → Acme" (also "->"), with or without "Re:".
@@ -127,49 +133,58 @@ export function parseProtectedSubject(subject) {
 // DMARC is what ties that signature (or SPF) back to paraform.com.
 export function paraformAuthenticated(message) {
   const results = clean(headerValue(message, "Authentication-Results"));
-  return /\bdmarc=pass\b[^;]*\bheader\.from=paraform\.com\b/i.test(results);
+  // The lookahead stops "paraform.com.evil.example" from passing as paraform.com.
+  return /\bdmarc=pass\b[^;]*\bheader\.from=paraform\.com(?=[\s;)]|$)/i.test(results);
 }
 
+// The real address is the one in angle brackets: a display name such as
+// "conor@paraform.com" <x@elsewhere> must not pass as Paraform.
 export function paraformSender(message) {
-  const from = headerAddresses(message, "From")[0] || "";
-  return /@paraform\.com$/i.test(from) ? from.toLowerCase() : null;
+  const raw = clean(headerValue(message, "From"));
+  const bracketed = raw.match(/<([^<>\s]+@[^<>\s]+)>\s*$/);
+  const from = bracketed
+    ? bracketed[1].toLowerCase()
+    : (headerAddresses(message, "From").length === 1 ? headerAddresses(message, "From")[0] : "");
+  return /^[^@\s]+@paraform\.com$/i.test(from) ? from.toLowerCase() : null;
 }
 
-const MENTIONS_PROTECTED = /protected sub/i;
+// Only a subject that names a protected sub makes a link-less note worth a
+// page; "protected submission" in Paraform's own mail bodies does not.
+const MENTIONS_PROTECTED = /protected sub\b/i;
 
-// { record } for a protected-sub note, { unparsed } for a Paraform note that
-// talks about a protected sub without the link, or null for anything else.
+// { record, records } for a protected-sub note (records: one per request it
+// names), { unparsed } for a Paraform note whose subject names a protected sub
+// but has no link, or null for anything else.
 export function parseProtectedNote(message, { threadId = null } = {}) {
   const sender = paraformSender(message);
   if (!sender) return null;
   const subject = clean(headerValue(message, "Subject"));
   const body = messageText(message);
-  const link = findProtectedSubmitLink(body);
-  const mentions = MENTIONS_PROTECTED.test(subject) || MENTIONS_PROTECTED.test(body);
-  if (!link) {
-    return mentions ? { unparsed: { messageId: clean(message?.id), threadId, sender, subject } } : null;
+  const links = findProtectedSubmitLinks(body);
+  if (!links.length) {
+    return MENTIONS_PROTECTED.test(subject)
+      ? { unparsed: { messageId: clean(message?.id), threadId, sender, subject } }
+      : null;
   }
   if (!paraformAuthenticated(message)) {
     return { unparsed: { messageId: clean(message?.id), threadId, sender, subject, reason: "auth" } };
   }
-  const names = parseProtectedSubject(subject);
-  const roleLink = body.match(/paraform\.com\/role\/(c[a-z0-9]{20,32})/i);
+  // The subject's name belongs to the note's request only when it names one.
+  const names = links.length === 1 ? parseProtectedSubject(subject) : {};
   const internal = Number(message?.internalDate);
-  return {
-    record: {
-      ...link,
-      roleId: link.roleId || (roleLink ? roleLink[1] : null),
-      candidateName: names.candidateName || null,
-      companyName: names.companyName || null,
-      sender,
-      subject,
-      noteMessageId: clean(message?.id) || null,
-      noteThreadId: clean(threadId || message?.threadId) || null,
-      receivedAt: Number.isFinite(internal) && internal > 0
-        ? new Date(internal).toISOString()
-        : new Date().toISOString(),
-    },
-  };
+  const records = links.map((link) => ({
+    ...link,
+    candidateName: names.candidateName || null,
+    companyName: names.companyName || null,
+    sender,
+    subject,
+    noteMessageId: clean(message?.id) || null,
+    noteThreadId: clean(threadId || message?.threadId) || null,
+    receivedAt: Number.isFinite(internal) && internal > 0
+      ? new Date(internal).toISOString()
+      : new Date().toISOString(),
+  }));
+  return { record: records[0], records };
 }
 
 function senderName(email) {
@@ -205,21 +220,45 @@ export async function scanProtectedNotes({
   const meta = await s.getMeta().catch(() => ({}));
   // The very first scan learns who already sends these notes without paging.
   const seeded = Boolean(meta.seeded);
-  const seen = await s.seenIds();
-  const listed = await searchImpl(mailbox, PROTECTED_NOTE_QUERY, 100);
+  // A Gmail or store failure ends the scan, never the tick, and never hides
+  // the subs already stored; one unreadable message is skipped, not fatal.
+  let seen;
+  let listed;
+  try {
+    seen = await s.seenIds();
+    listed = await searchImpl(mailbox, PROTECTED_NOTE_QUERY, 100);
+  } catch (error) {
+    return { subs: existing, ...summary, error: clean(error?.code || error?.message).slice(0, 120) || "scan_failed" };
+  }
+  const noteThreads = new Set([...existing.values()].map((row) => clean(row.noteThreadId)).filter(Boolean));
+  summary.failed = 0;
   for (const ref of listed || []) {
     const messageId = clean(ref?.id);
     if (!messageId || seen.has(messageId)) continue;
+    try {
+      await scanOneMessage(messageId, ref);
+    } catch {
+      summary.failed += 1;
+      continue;
+    }
+    await s.markSeen(messageId).catch(() => {});
+    seen.add(messageId);
+  }
+  if (!seeded) await s.claimMeta("seeded").catch(() => false);
+  return { subs: existing, ...summary };
+
+  async function scanOneMessage(messageId, ref) {
     const message = await getMessageImpl(mailbox, messageId);
-    const parsed = parseProtectedNote(message, { threadId: clean(message?.threadId || ref?.threadId) });
-    if (parsed?.record) {
-      const record = parsed.record;
+    const threadId = clean(message?.threadId || ref?.threadId);
+    const parsed = parseProtectedNote(message, { threadId });
+    for (const record of parsed?.records || []) {
       if (!existing.has(record.requestId)) {
         const stored = { ...record, firstSeenAt: new Date(now).toISOString() };
         await s.save(stored);
         existing.set(record.requestId, stored);
         summary.added.push(record.requestId);
       }
+      if (record.noteThreadId) noteThreads.add(record.noteThreadId);
       if (await s.claimMeta(`sender:${record.sender}`).catch(() => false)) {
         summary.newSenders.push(record.sender);
         if (seeded && notifyImpl) {
@@ -228,7 +267,10 @@ export async function scanProtectedNotes({
           ).catch(() => false);
         }
       }
-    } else if (parsed?.unparsed) {
+    }
+    // A reply on a note thread we already hold (a staff chaser that does not
+    // quote the link) is not a new note.
+    if (parsed?.unparsed && !noteThreads.has(threadId)) {
       summary.unparsed.push(parsed.unparsed.messageId);
       if (seeded && notifyImpl && await s.claimMeta(`unparsed:${messageId}`).catch(() => false)) {
         const reason = parsed.unparsed.reason === "auth"
@@ -239,11 +281,7 @@ export async function scanProtectedNotes({
         ).catch(() => false);
       }
     }
-    await s.markSeen(messageId);
-    seen.add(messageId);
   }
-  if (!seeded) await s.claimMeta("seeded").catch(() => false);
-  return { subs: existing, ...summary };
 }
 
 // Protected subs whose note is recent, an hour old, and still unemailed: one
@@ -265,6 +303,12 @@ export async function watchUnsentProtectedSubs({
   for (const state of states || []) {
     for (const [requestId, match] of Object.entries(state?.matches || {})) {
       if (match?.sentAt) delivered.add(requestId);
+    }
+    // Queued in the Mailroom (its send window is closed) is on its way.
+    for (const [key, entry] of Object.entries(state?.outbox || {})) {
+      if (key.startsWith("match:") && ["claimed", "queued"].includes(entry?.status)) {
+        delivered.add(key.slice("match:".length));
+      }
     }
   }
   const rows = new Map((history || []).map((row) => [row.id, row]));
