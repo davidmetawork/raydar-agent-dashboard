@@ -10,7 +10,7 @@ import {
   watchUnsentProtectedSubs,
 } from "../api/paraai/_lib/outreach-protected.mjs";
 import { protectedSubCopy } from "../api/paraai/_lib/outreach-copy.mjs";
-import { attachProtectedSubs, protectedSubMatch } from "../api/paraai/_lib/outreach.mjs";
+import { attachProtectedSubs, outreachConfig, protectedSubMatch } from "../api/paraai/_lib/outreach.mjs";
 
 const REQ = "cprotectedreq0000000000001";
 const CTAR = "cprotectedctar000000000001";
@@ -542,4 +542,47 @@ test("earlier notes looked up by an older lookup are measured again", () => {
   const args = { subs, historyIds: new Set(), notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: Date.parse("2026-11-04T19:00:00Z"), backfill: 12 };
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1 } } }).length, 1);
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 2 } } }).length, 0);
+});
+
+test("the backlog (2026-11-05): earlier notes send from the backlog cutoff, skipped ids and roles already emailed never do", () => {
+  const lookups = {
+    "req-1": { status: "resolved", candidateUserId: "cu-1", roleName: "Founding Engineer", companyName: "Acme" },
+    "req-2": { status: "resolved", candidateUserId: "cu-2", roleName: "Founding Engineer", companyName: "Acme" },
+  };
+  const old = { ...NOTE, receivedAt: "2026-10-28T20:00:00Z" };
+  const subs = new Map([["req-1", { ...old, requestId: "req-1" }], ["req-2", { ...old, requestId: "req-2" }]]);
+  const now = Date.parse("2026-11-06T03:00:00Z");
+  const args = { lookups, subs, historyIds: new Set(), notBeforeMs: Date.parse("2026-10-28T00:00:00Z"), now };
+  const ids = (rows) => rows.map((row) => row.id).sort();
+  // A week-long window drops the 8-day-old notes; two weeks keeps them.
+  assert.deepEqual(ids(syntheticProtectedRequests(args)), []);
+  const windowMs = 14 * 24 * 60 * 60 * 1000;
+  assert.deepEqual(ids(syntheticProtectedRequests({ ...args, windowMs })), ["req-1", "req-2"]);
+  assert.deepEqual(ids(syntheticProtectedRequests({ ...args, windowMs, skip: new Set(["req-2"]) })), ["req-1"]);
+  // cu-2 was emailed about this role under another request: no second email.
+  // cu-1's own protected send keeps its row (follow-ups and replies need it).
+  const states = [
+    { candidateUserId: "cu-2", matches: { other: { requestId: "other", roleId: NOTE.roleId, sentAt: "2026-10-20T00:00:00Z" } } },
+    { candidateUserId: "cu-1", matches: { "req-1": { requestId: "req-1", roleId: NOTE.roleId, sentAt: "2026-11-06T02:00:00Z" } } },
+  ];
+  assert.deepEqual(ids(syntheticProtectedRequests({ ...args, windowMs, states })), ["req-1"]);
+  // The lookup queue takes the same window and skip list.
+  const queue = protectedLookupQueue({ subs, historyIds: new Set(), notBeforeMs: args.notBeforeMs, now, windowMs, skip: new Set(["req-2"]) });
+  assert.deepEqual(queue.map((sub) => sub.requestId), ["req-1"]);
+  assert.deepEqual(protectedLookupQueue({ subs, historyIds: new Set(), notBeforeMs: args.notBeforeMs, now }), []);
+});
+
+test("the backlog cutoff only ever moves the send cutoff earlier, and needs the switch-on", () => {
+  const base = { PARAAI_PROTECTED_SUBS_NOT_BEFORE: "2026-11-04T17:46:07Z" };
+  assert.equal(outreachConfig(base).protectedSendFromMs, Date.parse("2026-11-04T17:46:07Z"));
+  assert.equal(outreachConfig({ ...base, PARAAI_PROTECTED_SUBS_BACKLOG_FROM: "2026-10-28T00:00:00Z" }).protectedSendFromMs, Date.parse("2026-10-28T00:00:00Z"));
+  assert.equal(outreachConfig({ ...base, PARAAI_PROTECTED_SUBS_BACKLOG_FROM: "2026-11-10T00:00:00Z" }).protectedSendFromMs, Date.parse("2026-11-04T17:46:07Z"));
+  assert.equal(outreachConfig({ PARAAI_PROTECTED_SUBS_BACKLOG_FROM: "2026-10-28T00:00:00Z" }).protectedSendFromMs, null);
+  assert.equal(outreachConfig({ ...base, PARAAI_PROTECTED_SUBS: "off", PARAAI_PROTECTED_SUBS_BACKLOG_FROM: "2026-10-28T00:00:00Z" }).protectedSendFromMs, null);
+  const config = outreachConfig({ ...base, PARAAI_PROTECTED_SUBS_WINDOW_DAYS: "14", PARAAI_PROTECTED_LOOKUPS_PER_SCAN: "9", PARAAI_PROTECTED_SUBS_SKIP: " a, b ,," });
+  assert.equal(config.protectedWindowMs, 14 * 24 * 60 * 60 * 1000);
+  assert.equal(config.protectedMaxLookups, 3);
+  assert.deepEqual([...config.protectedSkip], ["a", "b"]);
+  // The unsent-note page stays on the switch-on.
+  assert.equal(config.protectedNotBeforeMs, Date.parse("2026-11-04T17:46:07Z"));
 });

@@ -130,11 +130,11 @@ function applicationTimeMs(row) {
   return null;
 }
 
-// Which subs to look up this tick: notes in the last week that the request
-// read does not hold, never looked up or due a retry. Notes from after the
-// switch-on come first (oldest first); then at most `backfill` earlier ones
-// (newest first), which are only recorded, never sent.
-export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBeforeMs, now = Date.now(), backfill = 0 } = {}) {
+// Which subs to look up this tick: notes in the window (a week unless set)
+// that the request read does not hold, never looked up or due a retry, and
+// not skipped. Notes from the send cutoff on come first (oldest first); then
+// at most `backfill` earlier ones (newest first), only recorded, never sent.
+export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBeforeMs, now = Date.now(), backfill = 0, windowMs = PROTECTED_LOOKUP_WINDOW_MS, skip = null } = {}) {
   const due = (sub) => {
     const record = lookups[sub.requestId];
     if (!record) return true;
@@ -149,8 +149,9 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
   let earlierRecorded = 0;
   for (const sub of subs?.values?.() || []) {
     const receivedMs = Date.parse(sub?.receivedAt || "");
-    if (!Number.isFinite(receivedMs) || receivedMs < now - PROTECTED_LOOKUP_WINDOW_MS) continue;
+    if (!Number.isFinite(receivedMs) || receivedMs < now - windowMs) continue;
     if (historyIds?.has?.(sub.requestId)) continue;
+    if (skip?.has?.(sub.requestId)) continue;
     const afterSwitchOn = notBeforeMs != null && receivedMs >= notBeforeMs;
     if (afterSwitchOn) {
       if (due(sub)) fresh.push(sub);
@@ -272,6 +273,8 @@ export async function runProtectedLookups({
   trpcGetImpl,
   backfill = 0,
   maxLookups = 1,
+  windowMs = PROTECTED_LOOKUP_WINDOW_MS,
+  skip = null,
   budgetMs = 25_000,
   clock = Date.now,
   store = {},
@@ -286,11 +289,11 @@ export async function runProtectedLookups({
   const stale = Object.keys(lookups).filter((requestId) => {
     const sub = subs.get(requestId);
     const receivedMs = Date.parse(sub?.receivedAt || "");
-    return !sub || !Number.isFinite(receivedMs) || receivedMs < now - 2 * PROTECTED_LOOKUP_WINDOW_MS;
+    return !sub || !Number.isFinite(receivedMs) || receivedMs < now - 2 * windowMs;
   });
   if (stale.length) await s.prune(stale).catch(() => {});
   const started = clock();
-  const queue = protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill });
+  const queue = protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill, windowMs, skip });
   for (const sub of queue.slice(0, maxLookups)) {
     if (clock() - started > budgetMs) { summary.stopped = "budget"; break; }
     const previous = lookups[sub.requestId] || null;
@@ -322,19 +325,34 @@ export async function runProtectedLookups({
   return { lookups, ...summary };
 }
 
-// Request rows for the resolved notes from after the switch-on that the read
-// does not hold. Every field the send path needs is present, or no row.
-export function syntheticProtectedRequests({ subs, lookups = {}, historyIds, notBeforeMs, now = Date.now() } = {}) {
+// Request rows for the resolved notes from the send cutoff on that the read
+// does not hold and are not skipped. Every field the send path needs is
+// present, or no row.
+export function syntheticProtectedRequests({ subs, lookups = {}, historyIds, notBeforeMs, now = Date.now(), windowMs = PROTECTED_LOOKUP_WINDOW_MS, skip = null, states = [] } = {}) {
   if (notBeforeMs == null) return [];
+  // A person already emailed about this role under another request is not
+  // emailed again (the backlog, 2026-11-05, holds notes for such roles).
+  const emailedRoles = new Map();
+  for (const state of states || []) {
+    for (const match of Object.values(state?.matches || {})) {
+      if (!match?.sentAt || !clean(match.roleId)) continue;
+      const key = `${clean(state.candidateUserId)}\0${clean(match.roleId)}`;
+      if (!emailedRoles.has(key)) emailedRoles.set(key, new Set());
+      emailedRoles.get(key).add(clean(match.requestId));
+    }
+  }
   const rows = [];
   for (const sub of subs?.values?.() || []) {
     const lookup = lookups[sub.requestId];
     if (lookup?.status !== "resolved") continue;
     if (historyIds?.has?.(sub.requestId)) continue;
+    if (skip?.has?.(sub.requestId)) continue;
     const receivedMs = Date.parse(sub.receivedAt || "");
-    if (!Number.isFinite(receivedMs) || receivedMs < notBeforeMs || receivedMs < now - PROTECTED_LOOKUP_WINDOW_MS) continue;
+    if (!Number.isFinite(receivedMs) || receivedMs < notBeforeMs || receivedMs < now - windowMs) continue;
     const required = [sub.requestId, lookup.candidateUserId, sub.roleId, lookup.roleName, lookup.companyName, sub.submitUrl];
     if (required.some((value) => !clean(value))) continue;
+    const emailedFor = emailedRoles.get(`${clean(lookup.candidateUserId)}\0${clean(sub.roleId)}`);
+    if (emailedFor && !emailedFor.has(sub.requestId)) continue;
     rows.push({
       id: sub.requestId,
       status: "pending",
