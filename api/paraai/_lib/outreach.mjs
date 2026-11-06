@@ -253,6 +253,14 @@ const finiteDate = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+function protectedSendFrom(env) {
+  if (!protectedSubsEnabled(env)) return null;
+  const switchOn = finiteDate(env.PARAAI_PROTECTED_SUBS_NOT_BEFORE);
+  if (switchOn == null) return null;
+  const backlog = finiteDate(env.PARAAI_PROTECTED_SUBS_BACKLOG_FROM);
+  return backlog != null && backlog < switchOn ? backlog : switchOn;
+}
+
 export function outreachConfig(env = process.env) {
   const notBeforeMs = finiteDate(env.PARAAI_OUTREACH_NOT_BEFORE);
   const candidateRecipientNotBeforeMs = finiteDate(
@@ -269,6 +277,14 @@ export function outreachConfig(env = process.env) {
     protectedNotBeforeMs: protectedSubsEnabled(env)
       ? finiteDate(env.PARAAI_PROTECTED_SUBS_NOT_BEFORE)
       : null,
+    // The backlog (David, 2026-11-05: "send the older ones asap"): notes from
+    // PARAAI_PROTECTED_SUBS_BACKLOG_FROM on are looked up and sent too. The
+    // unsent-note page stays on the switch-on, so the backlog pages nobody.
+    protectedSendFromMs: protectedSendFrom(env),
+    protectedWindowMs: Math.max(1, Math.min(21, Number(env.PARAAI_PROTECTED_SUBS_WINDOW_DAYS ?? 7) || 7)) * 24 * 60 * 60 * 1000,
+    protectedMaxLookups: Math.max(1, Math.min(3, Number(env.PARAAI_PROTECTED_LOOKUPS_PER_SCAN ?? 1) || 1)),
+    // Notes never to send (comma-separated request ids), e.g. already emailed by hand.
+    protectedSkip: new Set(String(env.PARAAI_PROTECTED_SUBS_SKIP || "").split(",").map((id) => id.trim()).filter(Boolean)),
     // Earlier notes looked up once each, recorded only and never sent, so the
     // lookup's accuracy is measured before the first new note (2026-11-04).
     protectedLookupBackfill: Math.max(0, Math.min(50, Number(env.PARAAI_PROTECTED_LOOKUP_BACKFILL ?? 12) || 0)),
@@ -385,10 +401,12 @@ function automaticRequestMarkerEligible(request, config) {
 // hand send and still blocks it.
 export function protectedSubAdmissible(request, config) {
   const receivedMs = finiteDate(request?.protectedSub?.receivedAt);
+  // The backlog cutoff when set (2026-11-05), else the switch-on.
+  const fromMs = config?.protectedSendFromMs ?? config?.protectedNotBeforeMs;
   if (
     receivedMs == null ||
-    config?.protectedNotBeforeMs == null ||
-    receivedMs < config.protectedNotBeforeMs
+    fromMs == null ||
+    receivedMs < fromMs
   ) return false;
   if (request?.reachedOut !== true) return true;
   const deltaMs = Number(request?.reachedOutAtMs) - Number(request?.createdAtMs);
@@ -4444,7 +4462,10 @@ export async function runOutreachTick({
         subs: protectedScan.subs,
         lookups: storedLookups,
         historyIds: readIds,
-        notBeforeMs: config.protectedNotBeforeMs,
+        notBeforeMs: config.protectedSendFromMs ?? config.protectedNotBeforeMs,
+        windowMs: config.protectedWindowMs,
+        skip: config.protectedSkip,
+        states,
         now,
       })
       : [];
@@ -4566,10 +4587,14 @@ export async function runOutreachTick({
       ? await protectedLookupImpl({
         subs: protectedScan.subs,
         historyIds: readIds,
-        notBeforeMs: config.protectedNotBeforeMs,
+        notBeforeMs: config.protectedSendFromMs ?? config.protectedNotBeforeMs,
         now,
         trpcGetImpl: trpcGet,
         backfill: config.protectedLookupBackfill,
+        maxLookups: config.protectedMaxLookups,
+        firstFromMs: config.protectedNotBeforeMs,
+        windowMs: config.protectedWindowMs,
+        skip: config.protectedSkip,
       }).catch((error) => ({ lookups: storedLookups, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))
       : null;
     // A protected sub nobody emailed an hour after its note pages once, with
