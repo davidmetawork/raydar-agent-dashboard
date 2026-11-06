@@ -401,10 +401,12 @@ function automaticRequestMarkerEligible(request, config) {
 // hand send and still blocks it.
 export function protectedSubAdmissible(request, config) {
   const receivedMs = finiteDate(request?.protectedSub?.receivedAt);
+  // The backlog cutoff when set (2026-11-05), else the switch-on.
+  const fromMs = config?.protectedSendFromMs ?? config?.protectedNotBeforeMs;
   if (
     receivedMs == null ||
-    config?.protectedNotBeforeMs == null ||
-    receivedMs < config.protectedNotBeforeMs
+    fromMs == null ||
+    receivedMs < fromMs
   ) return false;
   if (request?.reachedOut !== true) return true;
   const deltaMs = Number(request?.reachedOutAtMs) - Number(request?.createdAtMs);
@@ -4590,6 +4592,7 @@ export async function runOutreachTick({
         trpcGetImpl: trpcGet,
         backfill: config.protectedLookupBackfill,
         maxLookups: config.protectedMaxLookups,
+        firstFromMs: config.protectedNotBeforeMs,
         windowMs: config.protectedWindowMs,
         skip: config.protectedSkip,
       }).catch((error) => ({ lookups: storedLookups, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))

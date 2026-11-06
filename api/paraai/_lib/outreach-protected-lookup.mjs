@@ -134,7 +134,8 @@ function applicationTimeMs(row) {
 // that the request read does not hold, never looked up or due a retry, and
 // not skipped. Notes from the send cutoff on come first (oldest first); then
 // at most `backfill` earlier ones (newest first), only recorded, never sent.
-export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBeforeMs, now = Date.now(), backfill = 0, windowMs = PROTECTED_LOOKUP_WINDOW_MS, skip = null } = {}) {
+// Notes from `firstFromMs` on (the switch-on) go before the backlog's.
+export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBeforeMs, now = Date.now(), backfill = 0, windowMs = PROTECTED_LOOKUP_WINDOW_MS, skip = null, firstFromMs = null } = {}) {
   const due = (sub) => {
     const record = lookups[sub.requestId];
     if (!record) return true;
@@ -161,7 +162,8 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
       earlier.push(sub);
     }
   }
-  fresh.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
+  const backlog = (sub) => (firstFromMs != null && Date.parse(sub.receivedAt) < firstFromMs ? 1 : 0);
+  fresh.sort((a, b) => backlog(a) - backlog(b) || Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
   earlier.sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt));
   return [...fresh, ...earlier.slice(0, Math.max(0, backfill - earlierRecorded))];
 }
@@ -275,6 +277,7 @@ export async function runProtectedLookups({
   maxLookups = 1,
   windowMs = PROTECTED_LOOKUP_WINDOW_MS,
   skip = null,
+  firstFromMs = null,
   budgetMs = 25_000,
   clock = Date.now,
   store = {},
@@ -293,7 +296,7 @@ export async function runProtectedLookups({
   });
   if (stale.length) await s.prune(stale).catch(() => {});
   const started = clock();
-  const queue = protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill, windowMs, skip });
+  const queue = protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill, windowMs, skip, firstFromMs });
   for (const sub of queue.slice(0, maxLookups)) {
     if (clock() - started > budgetMs) { summary.stopped = "budget"; break; }
     const previous = lookups[sub.requestId] || null;
@@ -353,6 +356,8 @@ export function syntheticProtectedRequests({ subs, lookups = {}, historyIds, not
     if (required.some((value) => !clean(value))) continue;
     const emailedFor = emailedRoles.get(`${clean(lookup.candidateUserId)}\0${clean(sub.roleId)}`);
     if (emailedFor && !emailedFor.has(sub.requestId)) continue;
+    // Two notes for one person and role in one read: only the first.
+    if (!emailedFor) emailedRoles.set(`${clean(lookup.candidateUserId)}\0${clean(sub.roleId)}`, new Set([sub.requestId]));
     rows.push({
       id: sub.requestId,
       status: "pending",

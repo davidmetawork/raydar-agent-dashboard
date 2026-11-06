@@ -10,7 +10,7 @@ import {
   watchUnsentProtectedSubs,
 } from "../api/paraai/_lib/outreach-protected.mjs";
 import { protectedSubCopy } from "../api/paraai/_lib/outreach-copy.mjs";
-import { attachProtectedSubs, outreachConfig, protectedSubMatch } from "../api/paraai/_lib/outreach.mjs";
+import { attachProtectedSubs, outreachConfig, protectedSubAdmissible, protectedSubMatch } from "../api/paraai/_lib/outreach.mjs";
 
 const REQ = "cprotectedreq0000000000001";
 const CTAR = "cprotectedctar000000000001";
@@ -585,4 +585,34 @@ test("the backlog cutoff only ever moves the send cutoff earlier, and needs the 
   assert.deepEqual([...config.protectedSkip], ["a", "b"]);
   // The unsent-note page stays on the switch-on.
   assert.equal(config.protectedNotBeforeMs, Date.parse("2026-11-04T17:46:07Z"));
+});
+
+test("review fixes (backlog): its rows pass the send filter, new notes are looked up first, one row per person and role", () => {
+  const env = {
+    PARAAI_PROTECTED_SUBS_NOT_BEFORE: "2026-11-04T17:46:07Z",
+    PARAAI_PROTECTED_SUBS_BACKLOG_FROM: "2026-10-28T00:00:00Z",
+    PARAAI_PROTECTED_SUBS_WINDOW_DAYS: "14",
+  };
+  const config = outreachConfig(env);
+  const now = Date.parse("2026-11-06T03:00:00Z");
+  const lookups = {
+    "req-old": { status: "resolved", candidateUserId: "cu-1", roleName: "Founding Engineer", companyName: "Acme" },
+    "req-dup": { status: "resolved", candidateUserId: "cu-1", roleName: "Founding Engineer", companyName: "Acme" },
+  };
+  const subs = new Map([
+    ["req-old", { ...NOTE, requestId: "req-old", receivedAt: "2026-10-29T12:00:00Z" }],
+    ["req-dup", { ...NOTE, requestId: "req-dup", receivedAt: "2026-10-30T12:00:00Z" }],
+  ]);
+  const rows = syntheticProtectedRequests({ subs, lookups, historyIds: new Set(), notBeforeMs: config.protectedSendFromMs, windowMs: config.protectedWindowMs, now });
+  assert.deepEqual(rows.map((row) => row.id), ["req-old"]);
+  // The send filter admits a backlog row; without the backlog it would not.
+  assert.equal(protectedSubAdmissible(rows[0], config), true);
+  assert.equal(protectedSubAdmissible(rows[0], outreachConfig({ PARAAI_PROTECTED_SUBS_NOT_BEFORE: env.PARAAI_PROTECTED_SUBS_NOT_BEFORE })), false);
+  // A note from after the switch-on is looked up before the older backlog.
+  const queueSubs = new Map([
+    ["old", { ...NOTE, requestId: "old", receivedAt: "2026-10-29T12:00:00Z" }],
+    ["new", { ...NOTE, requestId: "new", receivedAt: "2026-11-05T19:00:00Z" }],
+  ]);
+  const queue = protectedLookupQueue({ subs: queueSubs, historyIds: new Set(), notBeforeMs: config.protectedSendFromMs, windowMs: config.protectedWindowMs, firstFromMs: config.protectedNotBeforeMs, now });
+  assert.deepEqual(queue.map((sub) => sub.requestId), ["new", "old"]);
 });
