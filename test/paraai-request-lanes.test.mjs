@@ -616,6 +616,8 @@ test("the tick reads protected-sub notes, admits the request they name, and runs
     protectedMatchRecordImpl: async (record) => { matched = record; },
     protectedLookupImpl: async () => ({ lookups: {}, looked: 0 }),
     protectedLookupsReadImpl: async () => ({}),
+    // This fake KV has no hashes; an unreadable picks store makes no rows.
+    protectedPicksReadImpl: async () => ({}),
   });
   // The protected request is attempted (this process cannot reach Paraform,
   // so it errors); the plain one is still held back by the not-before.
@@ -666,6 +668,7 @@ test("a note the request list lacks is looked up, becomes this tick's row, and s
     protectedScanImpl: async () => ({ scanned: true, subs, added: [], unparsed: [] }),
     protectedMatchRecordImpl: async () => {},
     // Resolved on an earlier tick; this tick's lookup runs after the sends.
+    protectedPicksReadImpl: async () => ({}),
     protectedLookupsReadImpl: async () => ({
       "request-missing": { requestId: "request-missing", status: "resolved", candidateUserId: "cu-m", roleName: "Engineer", companyName: "Acme" },
     }),

@@ -597,6 +597,10 @@ const PROTECTED_META_KEY = "paraai:outreach:protected:meta";
 const PROTECTED_SCAN_SLOT_KEY = "paraai:outreach:protected:scan-slot";
 const PROTECTED_MATCH_KEY = "paraai:outreach:protected:last-match";
 const PROTECTED_LOOKUP_KEY = "paraai:outreach:protected:lookup";
+// Staff picks (2026-11-06): who a held note is about, chosen by a person on
+// protected-subs.html. A hash of its own, so a tick saving a lookup can never
+// overwrite a pick.
+const PROTECTED_PICKS_KEY = "paraai:outreach:protected:picks";
 
 function hashPairs(raw) {
   if (!raw) return {};
@@ -659,6 +663,66 @@ export async function saveProtectedLookup(record, { kvImpl = kv } = {}) {
 export async function pruneProtectedLookups(requestIds, { kvImpl = kv } = {}) {
   const ids = (requestIds || []).map((id) => String(id || "").trim()).filter(Boolean);
   if (ids.length) await kvImpl(["HDEL", PROTECTED_LOOKUP_KEY, ...ids]);
+}
+
+// Every stored staff pick by request id; a torn value is skipped. Throws when
+// the store cannot be read, so a caller can tell "no picks" from "unreadable".
+export async function getProtectedPicks({ kvImpl = kv } = {}) {
+  const out = {};
+  for (const [requestId, raw] of Object.entries(hashPairs(await kvImpl(["HGETALL", PROTECTED_PICKS_KEY])))) {
+    try {
+      const value = JSON.parse(raw);
+      if (value && typeof value === "object" && ["send", "skip"].includes(value.action)) out[requestId] = value;
+    } catch { /* skip a torn value */ }
+  }
+  return out;
+}
+
+// One note's pick, read again by the send path just before it claims the
+// email (2026-11-06 review). null when there is none; throws when unreadable.
+export async function getProtectedPick(requestId, { kvImpl = kv } = {}) {
+  const raw = await kvImpl(["HGET", PROTECTED_PICKS_KEY, String(requestId || "")]);
+  if (raw == null) return null;
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" && ["send", "skip"].includes(value.action) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+// Replaces a pick only while the stored one is still the one the caller read.
+const REPLACE_PICK_SCRIPT = "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then redis.call('HSET', KEYS[1], ARGV[1], ARGV[3]) return 1 end return 0";
+
+// One pick. `onlyIfAbsent` writes it only when the note has no pick yet
+// (HSETNX), so two people picking at once cannot both win; `expected` (the
+// pick the caller read, as getProtectedPicks returned it) replaces only that
+// pick, so two people replacing one at once cannot both win either
+// (2026-11-06 review). Returns whether it was written.
+export async function saveProtectedPick(record, { kvImpl = kv, onlyIfAbsent = false, expected = null } = {}) {
+  const requestId = String(record?.requestId || "").trim();
+  if (!requestId) throw new Error("requestId required");
+  if (!["send", "skip"].includes(record?.action)) throw new Error("action must be send or skip");
+  if (record.action === "send" && !String(record.candidateUserId || "").trim()) {
+    throw new Error("candidateUserId required for a send pick");
+  }
+  const value = JSON.stringify({ ...record, requestId });
+  if (onlyIfAbsent) {
+    return Number(await kvImpl(["HSETNX", PROTECTED_PICKS_KEY, requestId, value])) === 1;
+  }
+  if (expected) {
+    // Stored values are JSON.stringify output, so the parsed pick written
+    // back the same way is byte for byte the stored string.
+    return Number(await kvImpl(["EVAL", REPLACE_PICK_SCRIPT, "1", PROTECTED_PICKS_KEY, requestId, JSON.stringify(expected), value])) === 1;
+  }
+  await kvImpl(["HSET", PROTECTED_PICKS_KEY, requestId, value]);
+  return true;
+}
+
+export async function pruneProtectedPicks(requestIds, { kvImpl = kv } = {}) {
+  const ids = (requestIds || []).map((id) => String(id || "").trim()).filter(Boolean);
+  if (ids.length) await kvImpl(["HDEL", PROTECTED_PICKS_KEY, ...ids]);
+  return ids.length;
 }
 
 export async function acquireProtectedScanSlot({ ttlSeconds = 300, kvImpl = kv } = {}) {
