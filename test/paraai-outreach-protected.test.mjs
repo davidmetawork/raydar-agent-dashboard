@@ -409,11 +409,12 @@ test("the queue takes new notes first, retries not-found three times, and backfi
   const historyIds = new Set(["in-read"]);
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, notBeforeMs, now, backfill: 1 })), ["new-b", "new-a", "old-a"]);
   const lookups = {
-    "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z" },
-    "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z" },
-    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z", version: 2 },
+    "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z", version: 3 },
+    "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z", version: 3 },
+    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z", version: 3 },
   };
-  // new-b is not due for 10 minutes, new-a is out of attempts, old-a used the backfill.
+  // new-b is not due for 10 minutes, new-a is out of attempts (its daily
+  // re-check is not due yet), old-a used the backfill.
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill: 1 })), []);
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, lookups, notBeforeMs, now, backfill: 2 })), ["old-b"]);
 });
@@ -427,7 +428,7 @@ test("a throttle refusal stops the lookups without spending an attempt", async (
     notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
     now: Date.parse("2026-11-04T18:05:00Z"),
     trpcGetImpl: async () => { throw refused; },
-    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {} },
+    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {}, getPick: async () => null },
   });
   assert.equal(result.stopped, "PARAFORM_REQUEST_LANES_RATE_LIMITED");
   assert.equal(saved.length, 1);
@@ -489,7 +490,7 @@ test("review fixes: a pacing refusal mid-lookup is recorded, keeps its attempts,
     notBeforeMs: Date.parse("2026-11-04T17:46:07Z"),
     now,
     trpcGetImpl: impl,
-    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {} },
+    store: { list: async () => ({}), save: async (record) => { saved.push(record); }, prune: async () => {}, getPick: async () => null },
   });
   assert.equal(result.stopped, "PARAFORM_REQUEST_LANES_RATE_LIMITED");
   assert.equal(saved[0].status, "throttled");
@@ -519,6 +520,8 @@ test("the role on the person's CRM row confirms them when it is dated near the n
   const dated = fakeParaform({ crm: [{ id: "cu-1", candidate: { name: "Jane Doe" }, roles: [{ role_id: "role-1", created_at: "2026-11-04T17:54:00Z" }] }] });
   const record = await lookupProtectedSub(NOTE, { trpcGetImpl: dated.impl });
   assert.equal(record.status, "resolved");
+  // v3 review (2026-11-06): one holder from the role-scoped search is never
+  // the answer alone; the name search confirms it on the CRM row.
   assert.equal(record.via, "crm_row");
   assert.equal(record.crmRolePath, ".roles[].role_id");
   assert.equal(dated.calls.filter((proc) => proc === "candidateUser.getCandidateUserApplications").length, 0);
@@ -541,7 +544,10 @@ test("earlier notes looked up by an older lookup are measured again", () => {
   const subs = new Map([["old-a", { ...NOTE, requestId: "old-a", receivedAt: "2026-11-04T16:00:00Z" }]]);
   const args = { subs, historyIds: new Set(), notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: Date.parse("2026-11-04T19:00:00Z"), backfill: 12 };
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1 } } }).length, 1);
-  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 2 } } }).length, 0);
+  // v3 (2026-11-06): a version-2 failure is measured again too; a v3 one is not.
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 2 } } }).length, 1);
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 3 } } }).length, 0);
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "resolved", attempts: 1, version: 2 } } }).length, 0);
 });
 
 test("the backlog (2026-11-05): earlier notes send from the backlog cutoff, skipped ids and roles already emailed never do", () => {

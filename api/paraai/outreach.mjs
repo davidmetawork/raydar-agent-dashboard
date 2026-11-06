@@ -25,10 +25,17 @@ import {
   reviewHeldOutreach,
   runOutreachTick,
 } from "./_lib/outreach.mjs";
+import { requireSameOrigin } from "../_lib/operator-access.mjs";
 import {
   mailroomMatchBundleConfirmation,
   mailroomReliefConfirmation,
 } from "./_lib/outreach-mailroom.mjs";
+import {
+  listHeldProtectedSubs,
+  pickProtectedSub,
+  skipProtectedSub,
+  staffActor,
+} from "./_lib/outreach-protected-picks.mjs";
 import {
   listOutreachExceptions,
   listOutreachStates,
@@ -48,7 +55,11 @@ async function authorized(req, res) {
     [process.env.PARAAI_AUTOMATION_RUNNER_KEY, process.env.CRON_SECRET]
       .filter(Boolean)
       .some((secret) => equalSecret(bearer, secret))
-  ) return true;
+  ) {
+    // Marked so a human-only action (a protected-sub pick) can refuse it.
+    req.automationBearer = true;
+    return true;
+  }
   return requireAuth(req, res);
 }
 
@@ -85,6 +96,39 @@ export default async function handler(req, res) {
     const action = String(body.action || "");
     if (action === "tick") {
       return res.status(200).json({ ok: true, tick: await runOutreachTick() });
+    }
+    // Rating-protected subs held for a staff pick (2026-11-06,
+    // protected-subs.html). Listing is read-only; the two picks are human
+    // only and send nothing themselves: the next tick does, with every guard.
+    if (action === "list-protected-held") {
+      const config = outreachConfig();
+      return res.status(200).json({
+        ok: true,
+        action,
+        // The page says a pick waits on a shut lane (2026-11-06 review).
+        outreachOpen: outreachExecutionEnabled(config),
+        ...(await listHeldProtectedSubs({ config })),
+      });
+    }
+    if (action === "pick-protected-sub" || action === "skip-protected-sub") {
+      const run = action === "pick-protected-sub" ? pickProtectedSub : skipProtectedSub;
+      const actor = staffActor(req);
+      // The session cookie rides any raydar.xyz subdomain, so a signed-in
+      // pick must come from the dashboard's own origin (2026-11-06 review).
+      if (actor && !requireSameOrigin(req, res)) return;
+      const config = outreachConfig();
+      const result = await run({ actor, body, config });
+      // A pick saved while the lane is shut waits for it to open; say so.
+      const open = outreachExecutionEnabled(config);
+      return res.status(result.status).json(
+        result.body.ok && action === "pick-protected-sub"
+          ? {
+            ...result.body,
+            outreachOpen: open,
+            ...(open ? {} : { next: "saved, but the outreach lane is shut, so it sends once the lane is open again" }),
+          }
+          : result.body,
+      );
     }
     if (action === "draft-request") {
       const requestId = String(body.requestId || "").trim();

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Protected subs to pick · Raydar</title>
+<link rel="icon" type="image/png" href="https://webview-lake.vercel.app/assets/raydar-favicon.png?v=3" />
+<link rel="stylesheet" href="/fonts/pp-grafier.css" />
+<script src="/auth-session.js"></script>
+<!--
+  Rating-protected subs held for a person (David, 2026-11-06). The lookup
+  holds a note it cannot settle (a surname shown as an initial, degree letters
+  after the name, a very common name) instead of guessing; this page shows who
+  it might be and lets a signed-in staff member pick one or skip the note.
+  Picking sends nothing itself: the next outreach tick does, with every check.
+  Every string from the server is escaped: names come from Gmail subjects and
+  Paraform.
+-->
+<style>
+  :root{--cream:#F6F3E9;--ink:#16140F;--ink2:#57534A;--ink3:#8C877B;--card:#fff;--line:#E9E3D5;--soft:#EFEADE;--orange:#FF5E00;--good:#119865;--goodbg:#E4F4EC;--warn:#B66A10;--warnbg:#FAEEDC;--bad:#D84242;--badbg:#FBE9E9;--violet:#6658DA;--violetbg:#ECEAFE;--shadow:0 1px 2px rgba(20,16,8,.04),0 12px 30px -18px rgba(20,16,8,.22)}
+  *{box-sizing:border-box}html,body{margin:0}body{background:var(--cream);color:var(--ink);font:14px "Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding:28px clamp(14px,3.5vw,46px) 80px}
+  .wrap{max-width:860px;margin:0 auto}h1,h2{font-family:"PP Grafier Display",Georgia,serif;font-weight:400}a{color:var(--violet)}
+  .eyebrow{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--orange)}
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}h1{font-size:34px;line-height:1.05;margin:4px 0 0}
+  .summary{font-size:16px;color:var(--ink2);margin:10px 0 0}
+  .button{appearance:none;border:0;border-radius:10px;padding:9px 13px;font:750 12.5px "Inter Variable",-apple-system,sans-serif;cursor:pointer}
+  .button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}.button.primary{background:var(--orange);color:#fff}.button.quiet{background:var(--soft);color:var(--ink2)}
+  .button:disabled{opacity:.45;cursor:default}
+  .banner{display:none;border-radius:11px;padding:11px 13px;margin-bottom:14px}.banner.on{display:block}.banner.bad{background:var(--badbg);color:var(--bad)}.banner.warn{background:var(--warnbg);color:var(--warn)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:16px 18px;margin-bottom:14px}
+  .card h2{font-size:21px;margin:0 0 3px;overflow-wrap:anywhere}
+  .meta{color:var(--ink2);font-size:13px;overflow-wrap:anywhere}.meta+.meta{margin-top:2px}
+  .why{margin:10px 0 0;padding:9px 11px;border-radius:10px;background:var(--warnbg);color:var(--warn);font-size:13px}
+  .done{margin:10px 0 0;padding:9px 11px;border-radius:10px;background:var(--goodbg);color:var(--good);font-size:13px;font-weight:650;overflow-wrap:anywhere}
+  .done.skipped{background:var(--soft);color:var(--ink2)}
+  .options{margin-top:12px;display:grid;gap:8px}
+  .option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:11px 12px}
+  .option b{display:block;font-size:14.5px;overflow-wrap:anywhere}
+  .option .facts{display:block;font-size:12px;color:var(--ink3);margin-top:3px;overflow-wrap:anywhere}
+  .option .facts .on{color:var(--good);font-weight:700}
+  .option .facts .old{color:var(--warn);font-weight:650}
+  .empty-options{margin-top:12px;color:var(--ink2);font-size:13px}
+  .card-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .empty{padding:26px;text-align:center;color:var(--ink3);background:var(--card);border:1px solid var(--line);border-radius:16px}
+  .toast{position:fixed;right:16px;left:16px;bottom:16px;max-width:460px;margin-left:auto;background:var(--ink);color:#fff;border-radius:11px;padding:11px 14px;box-shadow:var(--shadow);z-index:50}
+  .toast[hidden]{display:none}.toast.bad{background:var(--bad)}
+  @media(max-width:560px){body{padding:16px 16px 60px}header{flex-direction:column}h1{font-size:28px}.option{grid-template-columns:1fr}.option .button{width:100%}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">Para AI</div>
+      <h1>Protected subs to pick</h1>
+      <p class="summary" id="summary">Loading…</p>
+    </div>
+    <button class="button ghost" id="refresh">Refresh</button>
+  </header>
+  <div class="banner" id="banner" role="status" aria-live="polite"></div>
+  <div id="list"></div>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+const $=(id)=>document.getElementById(id);
+const esc=(value)=>String(value??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const PACIFIC="America/Los_Angeles";
+const STATE={items:[],busy:false,outreachOpen:true};
+// A send pick not gone this long after it was made says so (2026-11-06 review).
+const PICK_LATE_MS=10*60*1000;
+// Plain words for the refusals the pick actions can give.
+const ERRORS={
+  staff_sign_in_required:"Sign in with your Raydar Google account to pick.",
+  confirmation_required:"The confirmation did not match. Refresh and try again.",
+  protected_subs_off:"Protected subs are switched off right now.",
+  protected_sub_not_found:"That note is no longer stored.",
+  protected_sub_on_skip_list:"That note is on the do-not-send list.",
+  protected_sub_outside_window:"That note is too old to send now.",
+  protected_sub_already_emailed:"This person was already emailed about it.",
+  protected_sub_already_picked:"Someone already picked for this note. Refresh to see who.",
+  protected_sub_already_skipped:"This note is already skipped.",
+  protected_sub_busy:"A send for this person is running right now. Wait a minute, refresh, and try again.",
+  protected_sub_resolved_automatically:"The system already matched this note to that person; it sends on its own.",
+  protected_sub_resolved_elsewhere:"The system already matched this note to someone else, so a pick cannot change it. Tell Claude if that match is wrong.",
+  role_not_active:"Paraform shows the role as closed, so it will not send.",
+  role_unreadable:"The role could not be read on Paraform, so it cannot send yet.",
+  candidate_not_an_option:"That person is not one of the options any more. Refresh and try again.",
+  candidateUserId_required:"Pick a person first.",
+  same_origin_required:"Open this page on monitor.raydar.xyz to pick.",
+};
+
+function showBanner(message,kind="warn"){const el=$("banner");el.className=`banner on ${kind}`;el.textContent=message}
+function clearBanner(){$("banner").className="banner"}
+function toast(message,bad=false){const el=$("toast");el.textContent=message;el.className="toast"+(bad?" bad":"");el.hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>{el.hidden=true},7000)}
+
+function signInLink(){
+  const login=new URL("/login",location.origin);login.searchParams.set("return_to",location.href);
+  return login.toString();
+}
+function showSignIn(){
+  $("summary").textContent="";
+  $("list").innerHTML=`<div class="empty">Sign in to see the notes. <a href="${esc(signInLink())}">Sign in</a></div>`;
+}
+
+async function api(body){
+  const response=await fetch("/api/paraai/outreach",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  const data=await response.json().catch(()=>({}));
+  if(response.status===401){showSignIn();const error=new Error("auth");error.status=401;throw error}
+  return {status:response.status,body:data};
+}
+
+// A date without the time shows its year, so an old link never reads as recent.
+function pacificDate(iso,withTime=true){
+  const d=new Date(iso||"");
+  if(Number.isNaN(d.getTime()))return "an unknown time";
+  const options={timeZone:PACIFIC,month:"short",day:"numeric",...(withTime?{hour:"numeric",minute:"2-digit"}:{year:"numeric"})};
+  return new Intl.DateTimeFormat("en-US",options).format(d)+(withTime?" PT":"");
+}
+const safeHandle=(value)=>/^[A-Za-z0-9_-]{2,100}$/.test(String(value||""))?String(value):null;
+const safeSubmitUrl=(value)=>String(value||"").startsWith("https://www.paraform.com/")?String(value):null;
+
+function pickLine(item){
+  const pick=item.pick;
+  if(!pick)return "";
+  // A delivery first: a note emailed before a skip took effect never reads
+  // as skipped (2026-11-06 second review).
+  if(pick.action==="skip"&&item.delivery)return `<div class="why">Skipped by ${esc(pick.pickedBy||"staff")}, but the email had already ${item.delivery==="sent"?"gone out":"been queued"}. Tell Claude.</div>`;
+  if(pick.action==="skip")return `<div class="done skipped">Skipped by ${esc(pick.pickedBy||"staff")}${pick.pickedAt?` on ${esc(pacificDate(pick.pickedAt))}`:""}.</div>`;
+  if(item.delivery==="sent")return `<div class="done">Sent to ${esc(pick.name||"the person picked")}. Picked by ${esc(pick.pickedBy||"staff")}.</div>`;
+  if(item.delivery==="queued")return `<div class="done">Picked by ${esc(pick.pickedBy||"staff")}: ${esc(pick.name||"the person picked")}. The email is queued and goes out in the Mailroom's sending hours (5:00 AM to 7:30 PM PT).</div>`;
+  const who=`Picked by ${esc(pick.pickedBy||"staff")}: ${esc(pick.name||"the person picked")}`;
+  // Never "sends soon" for a pick that will not go (2026-11-06 review).
+  if(item.pickBlocked)return `<div class="why">${who}, but it will not send: ${esc(item.pickBlocked)}. Tell Claude.</div>`;
+  if(!STATE.outreachOpen)return `<div class="why">${who}. The outreach lane is shut, so it sends once the lane opens again.</div>`;
+  const pickedMs=Date.parse(pick.pickedAt||"");
+  if(Number.isFinite(pickedMs)&&Date.now()-pickedMs>PICK_LATE_MS)return `<div class="why">${who}, not sent yet. The Mailroom sends 5:00 AM to 7:30 PM PT; tell Claude if it stays like this.</div>`;
+  return `<div class="done">${who}, sends within about 5 minutes.</div>`;
+}
+
+function optionRow(item,option,index,canPick){
+  const handle=safeHandle(option.linkedinUser);
+  const linkedin=handle?` · <a href="https://www.linkedin.com/in/${esc(encodeURIComponent(handle))}" target="_blank" rel="noopener noreferrer">LinkedIn</a>`:"";
+  // Only a link from around the note is green; an older one is the reason the
+  // lookup did not take it, and a person whose role was never read is "not
+  // checked", never "not on this role" (2026-11-06 review).
+  const role=option.roleOnRecord&&option.roleRecent
+    ?`<span class="on">on this role on Paraform${option.roleAt?` since ${esc(pacificDate(option.roleAt,false))}`:""}</span>`
+    :option.roleOnRecord
+      ?`<span class="old">had this role before${option.roleAt?`, dated ${esc(pacificDate(option.roleAt,false))}`:""}</span>`
+      :option.checked===false?"role not checked":"not on this role";
+  const button=canPick?`<button class="button primary" data-send="${esc(item.requestId)}" data-option="${index}">Send to this person</button>`:"";
+  return `<div class="option"><div><b>${esc(option.name||"Unnamed person")}</b><span class="facts">${role}${linkedin}</span></div>${button}</div>`;
+}
+
+// What the send confirm says: the role, the LinkedIn handle to tell identical
+// names apart, and a warning when this person is not a recent role holder.
+function confirmSendText(item,option){
+  const lines=[`Email ${option.name||"this person"} about the protected sub for ${item.roleName||"this role"} at ${item.companyName||"this company"}?`];
+  const handle=safeHandle(option.linkedinUser);
+  lines.push(handle?`LinkedIn: ${handle}`:"No LinkedIn on Paraform.");
+  if(!option.roleRecent)lines.push(option.roleOnRecord
+    ?"Warning: this person's link to this role is old, not from around the note."
+    :"Warning: this person is NOT shown on this role on Paraform.");
+  return lines.join("\n");
+}
+
+function card(item){
+  // A skipped note can still be picked, and a send pick stopped, until an
+  // email is claimed (2026-11-06 review).
+  const canPick=!item.delivery&&(!item.pick||item.pick.action==="skip");
+  const canStop=!item.delivery&&item.pick?.action==="send";
+  const title=item.candidateName||"A note without a name";
+  const where=[item.companyName,item.roleName].filter(Boolean).join(" · ")||"Role not read yet";
+  const reason=String(item.reason||"the lookup has not finished");
+  // The lookup's reason already says so for most held notes.
+  const initial=item.nameForm==="initial"&&!/initial/i.test(reason)?" The note shows the surname only as its first letter.":"";
+  const partial=item.status==="incomplete"?" The search did not finish, so this list may be missing people.":"";
+  const why=canPick&&!item.pick?`<div class="why">Why it is held: ${esc(reason)}.${esc(initial)}${esc(partial)}</div>`:"";
+  let options="";
+  if(item.options&&item.options.length){
+    options=`<div class="options">${item.options.map((option,index)=>optionRow(item,option,index,canPick)).join("")}</div>`;
+  }else if(canPick){
+    options=item.lookupPending
+      ?`<div class="empty-options">Still looking this person up on Paraform; check back in a few minutes.</div>`
+      :`<div class="empty-options">Nobody by a matching name was found; skip it or tell Claude.</div>`;
+  }
+  const submit=safeSubmitUrl(item.submitUrl);
+  const actions=[
+    canPick&&!item.pick?`<button class="button quiet" data-skip="${esc(item.requestId)}">Skip this note</button>`:"",
+    canStop?`<button class="button quiet" data-skip="${esc(item.requestId)}" data-stop="1">Stop this send</button>`:"",
+    submit?`<a href="${esc(submit)}" target="_blank" rel="noopener noreferrer">Paraform submit page ↗</a>`:"",
+  ].filter(Boolean).join("");
+  return `<article class="card">
+    <h2>${esc(title)}</h2>
+    <div class="meta">${esc(where)}</div>
+    <div class="meta">Came in ${esc(pacificDate(item.receivedAt))}${item.expiresAt?` · Paraform expires it about ${esc(pacificDate(item.expiresAt,false))}`:""}</div>
+    ${why}${pickLine(item)}${options}
+    ${actions?`<div class="card-actions">${actions}</div>`:""}
+  </article>`;
+}
+
+function render(data){
+  STATE.items=Array.isArray(data.items)?data.items:[];
+  STATE.outreachOpen=data.outreachOpen!==false;
+  const handled=Number(data.handledAutomatically||0),need=Number(data.needYou||0);
+  $("summary").textContent=data.laneOn===false
+    ?"Protected subs are switched off, so nothing is held."
+    :`${handled} ${handled===1?"note":"notes"} handled automatically; ${need} ${need===1?"needs":"need"} you.`;
+  $("list").innerHTML=STATE.items.length
+    ?STATE.items.map(card).join("")
+    :`<div class="empty">Nothing is waiting on you.</div>`;
+}
+
+async function load(){
+  if(STATE.busy)return;
+  clearBanner();
+  try{
+    const {status,body}=await api({action:"list-protected-held"});
+    if(status!==200||!body.ok){showBanner(`The list could not be loaded (${body.error||status}). Refresh to try again.`,"bad");return}
+    render(body);
+  }catch(error){
+    if(error.status!==401)showBanner("The list could not be loaded. Refresh to try again.","bad");
+  }
+}
+
+async function act(payload,button){
+  STATE.busy=true;
+  document.querySelectorAll("button[data-send],button[data-skip]").forEach((el)=>{el.disabled=true});
+  try{
+    const {status,body}=await api(payload);
+    if(status===200&&body.ok){toast(body.next?`Done. ${body.next.charAt(0).toUpperCase()}${body.next.slice(1)}.`:"Done.")}
+    else toast(ERRORS[body.error]||`That did not work (${body.error||status}).`,true);
+  }catch(error){
+    if(error.status!==401)toast("That did not work. Check your connection and try again.",true);
+  }finally{
+    STATE.busy=false;
+    await load();
+  }
+}
+
+$("list").addEventListener("click",(event)=>{
+  const send=event.target.closest("button[data-send]");
+  const skip=event.target.closest("button[data-skip]");
+  if(send){
+    const item=STATE.items.find((row)=>row.requestId===send.dataset.send);
+    const option=item&&item.options[Number(send.dataset.option)];
+    if(!item||!option)return;
+    // confirm() shows plain text, so no escaping is needed in it.
+    if(!confirm(confirmSendText(item,option)))return;
+    act({action:"pick-protected-sub",requestId:item.requestId,candidateUserId:option.candidateUserId,confirmation:`SEND ${item.requestId}`},send);
+  }else if(skip){
+    const item=STATE.items.find((row)=>row.requestId===skip.dataset.skip);
+    if(!item)return;
+    const stop=skip.dataset.stop==="1";
+    if(!confirm(stop
+      ?`Stop the email to ${item.pick?.name||"the person picked"} at ${item.companyName||"this company"}? It is stopped unless it was already claimed for sending.`
+      :`Skip the note about ${item.candidateName||"this person"} at ${item.companyName||"this company"}? Nobody will be emailed about it.`))return;
+    act({action:"skip-protected-sub",requestId:item.requestId,confirmation:`SKIP ${item.requestId}`},skip);
+  }
+});
+$("refresh").onclick=()=>load();
+
+async function init(){
+  const config=await fetch("/api/auth/config",{cache:"no-store"}).then((r)=>r.json()).catch(()=>({}));
+  // Picks need a known person, so with sign-in unconfigured the page is shut.
+  if(config.authRequired===false){$("summary").textContent="";showBanner("Google sign-in is not configured, so picking is switched off.","bad");return}
+  const session=await RaydarAuth.session().catch(()=>null);
+  if(!session?.authenticated)return showSignIn();
+  await load();
+}
+init();
+</script>
+</body>
+</html>

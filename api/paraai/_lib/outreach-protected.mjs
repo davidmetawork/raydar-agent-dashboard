@@ -21,7 +21,7 @@
 // protected sub but carries no such link posts one Slack line instead of being
 // dropped; a protected sub nobody emailed within an hour posts one Slack line.
 
-import { lookupReason } from "./outreach-protected-lookup.mjs";
+import { lookupReason, protectedPickBlocked } from "./outreach-protected-lookup.mjs";
 import {
   acquireProtectedScanSlot,
   claimProtectedMeta,
@@ -50,6 +50,8 @@ export const PROTECTED_NOTE_QUERY =
 export const PROTECTED_UNSENT_ALERT_MS = HOUR_MS;
 // Notes older than this are history (Paraform expires a request in 7 days).
 export const PROTECTED_WATCH_WINDOW_MS = 7 * DAY_MS;
+// Where staff pick the right person for a held note (2026-11-06).
+export const PROTECTED_PICKS_PAGE_URL = "https://monitor.raydar.xyz/protected-subs.html";
 
 export function protectedSubsEnabled(env = process.env) {
   return !["off", "0", "false"].includes(clean(env.PARAAI_PROTECTED_SUBS).toLowerCase());
@@ -305,8 +307,16 @@ export async function watchUnsentProtectedSubs({
   // Who each note is about (outreach-protected-lookup.mjs): says why a note
   // the request read does not hold has no row.
   lookups = {},
+  // Staff picks (2026-11-06): a note a person chose to skip is decided, so
+  // it does not page as unsent.
+  picks = {},
   // Notes from before protected subs were switched on are not this lane's.
   notBeforeMs = null,
+  // The do-not-send list (PARAAI_PROTECTED_SUBS_SKIP): decided like a staff
+  // skip, so never paged. And the send cutoff the picks page lists from: the
+  // pick link only goes with a note that page lists (2026-11-06 second review).
+  skip = null,
+  sendFromMs = null,
   now = Date.now(),
   claimImpl = claimProtectedMeta,
   notifyImpl,
@@ -335,19 +345,43 @@ export async function watchUnsentProtectedSubs({
     if (notBeforeMs != null && receivedMs < notBeforeMs) continue;
     if (receivedMs > now - PROTECTED_UNSENT_ALERT_MS) continue;
     if (delivered.has(sub.requestId)) continue;
+    if (picks?.[sub.requestId]?.action === "skip") continue;
+    if (skip?.has?.(sub.requestId)) continue;
     if (!(await claimImpl(`unsent:${sub.requestId}`).catch(() => false))) continue;
     const row = rows.get(sub.requestId);
-    const why = !row
-      ? lookupReason(lookups[sub.requestId]) || "Paraform's request list does not show this request"
+    // A note staff already picked a person for is decided: with no row, say
+    // why the pick did not send, never "held for a staff pick" (2026-11-06 review).
+    const sendPick = picks?.[sub.requestId]?.action === "send" ? picks[sub.requestId] : null;
+    const pickWhy = !row && sendPick
+      ? `staff picked ${sendPick.name || "a person"}, but it was not sent because ${
+        protectedPickBlocked({ sub, lookup: lookups[sub.requestId], pick: sendPick, states })
+        || "a send guard dropped it (the note may be on the do-not-send list or before the send cutoff)"}`
+      : null;
+    const lookup = lookups[sub.requestId];
+    // A resolved note with no row: say why, e.g. the person was already
+    // emailed about this role under another request (2026-11-06 second review).
+    const resolvedWhy = !row && lookup?.status === "resolved"
+      ? protectedPickBlocked({ sub, lookup, pick: { action: "send", candidateUserId: lookup.candidateUserId }, states })
+      : null;
+    const why = pickWhy || (!row
+      ? resolvedWhy || lookupReason(lookup) || "Paraform's request list does not show this request"
       : row.status !== "pending"
         ? `Paraform shows the request as ${row.status || "unknown"}`
         : openException.get(sub.requestId)
           ? `it is held (${openException.get(sub.requestId)})`
-          : "it is pending and was not sent yet";
+          : "it is pending and was not sent yet");
     alerted.push({ requestId: sub.requestId, why });
     if (notifyImpl) {
+      // A note with no row is one the lookup did not settle: a person can
+      // pick who it is on the page (2026-11-06). No more names or emails here.
+      // Only for a note the picks page lists: not one the lookup resolved
+      // (the page counts it as handled) and not one from before the send
+      // cutoff (2026-11-06 second review).
+      const listed = !row && !sendPick && lookup?.status !== "resolved"
+        && (sendFromMs == null || receivedMs >= sendFromMs);
+      const pickLine = listed ? `\nPick the right person: ${PROTECTED_PICKS_PAGE_URL}` : "";
       await notifyImpl(
-        `🛡️ Para AI: the candidate for the rating-protected sub ${sub.candidateName || sub.requestId} → ${sub.companyName || "a role"} has not been emailed an hour after the note, because ${why}. Submit link: ${sub.submitUrl}`,
+        `🛡️ Para AI: the candidate for the rating-protected sub ${sub.candidateName || sub.requestId} → ${sub.companyName || "a role"} has not been emailed an hour after the note, because ${why}. Submit link: ${sub.submitUrl}${pickLine}`,
       ).catch(() => false);
     }
   }

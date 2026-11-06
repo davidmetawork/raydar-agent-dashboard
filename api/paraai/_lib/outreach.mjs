@@ -107,9 +107,11 @@ import {
 import { requestLaneKv } from "./request-lane-store.mjs";
 import {
   getProtectedLookupsSafe,
+  protectedPickStillSends,
   runProtectedLookups,
   syntheticProtectedRequests,
 } from "./outreach-protected-lookup.mjs";
+import { staleProtectedPicks } from "./outreach-protected-picks.mjs";
 import { protectedRecruiterForRoleTitle } from "../../seq/_lib/protected.mjs";
 import { paraformBackgroundPauseState } from "../../_lib/paraform-background-pause.mjs";
 import {
@@ -123,9 +125,12 @@ import {
   getContactCapability,
   getMailroomScopeRefusal,
   getOutreachState,
+  getProtectedPick,
+  getProtectedPicks,
   listOutreachExceptions,
   listOutreachStates,
   probeOutreachStore,
+  pruneProtectedPicks,
   recordContactCapability,
   recordProtectedMatch,
   recordMailroomScopeRefusal,
@@ -866,6 +871,18 @@ export function eligibleNewRequests(
   // otherwise a second role would open its own conversation before the first
   // exists to thread onto.
   const inFlightCandidates = queuedMailroomCandidateIds(states, { now });
+  // Exceptions are keyed by request id. A protected note's row names whoever
+  // the lookup or a staff pick says it is about, so a hold recorded for one
+  // person (a first, wrong pick) never holds the row for another (2026-11-06
+  // second review): staff re-picking B after A was held off-market or
+  // do-not-contact would otherwise never email B.
+  const syntheticCandidate = new Map((history || [])
+    .filter((request) => request?.synthetic)
+    .map((request) => [clean(request.id), clean(request.candidateUserId)]));
+  exceptions = (exceptions || []).filter((row) => {
+    const candidate = syntheticCandidate.get(clean(row?.requestId));
+    return !(candidate && clean(row?.candidateUserId) && clean(row.candidateUserId) !== candidate);
+  });
   const recoverable = (exceptions || []).filter((row) => (
     row?.status === "open" && (
       row?.retryable === true ||
@@ -1957,6 +1974,8 @@ export async function processMatchRequest(
     mailroomThreadImpl = mailroomReplyThread,
     mailroomBounceImpl = mailroomConversationBounce,
     mailroomStatusImpl = readMailroomOutreachStatus,
+    // A protected row's pick, read again just before the claim.
+    protectedPickReadImpl = getProtectedPick,
   } = {},
 ) {
   // INCIDENT 2026-07-20 defense-in-depth: refuse any live candidate send while
@@ -2441,6 +2460,21 @@ export async function processMatchRequest(
     });
     const anchoredThreadId = context?.threadId
       || (anchorStatus === "draft" ? previousThreadId : null);
+    // A staff skip or a new pick can land while this tick works from the
+    // picks it read at its start (2026-11-06 review), so a protected row
+    // reads its note's pick again here, under the candidate's lock, just
+    // before the claim, and sends nothing unless the pick still says so. An
+    // unreadable pick sends nothing. Every row a note names, not only a
+    // looked-up one (2026-11-06 second review): a note whose request is in
+    // Paraform's own read was emailed after a staff skip. skipProtectedSub
+    // takes this same lock, so a skip and this claim never interleave.
+    if (mode === "send" && clean(request?.protectedSub?.submitUrl) &&
+        !["claimed", "queued", "uncertain"].includes(previousOutbox.status)) {
+      const currentPick = await protectedPickReadImpl(request.id).catch(() => undefined);
+      if (!protectedPickStillSends(request, currentPick)) {
+        return { action: "protected_pick_changed", request, state };
+      }
+    }
     const claimed = appendOutreachJournal({
       ...state,
       ...(digest?.digestId ? {
@@ -4382,6 +4416,8 @@ export async function runOutreachTick({
   protectedMatchRecordImpl = recordProtectedMatch,
   protectedLookupImpl = runProtectedLookups,
   protectedLookupsReadImpl = getProtectedLookupsSafe,
+  protectedPicksReadImpl = getProtectedPicks,
+  protectedPicksPruneImpl = pruneProtectedPicks,
 } = {}) {
   const tickStartedAt = Date.now();
   if (!outreachExecutionEnabled(config)) {
@@ -4457,10 +4493,22 @@ export async function runOutreachTick({
     // sends, below. An unreadable lookup store only means no rows.
     const readIds = new Set(readHistory.map((request) => request.id));
     const storedLookups = protectedScan?.subs?.size ? await protectedLookupsReadImpl() : {};
-    const protectedRows = protectedScan?.subs?.size
+    // Staff picks (2026-11-06, protected-subs.html): a "send" pick is a row
+    // for the person picked, a "skip" pick no row. An unreadable picks store
+    // makes NO protected rows this tick, not rows without picks: a note a
+    // person skipped must never send because one read failed. The lookups
+    // and the unsent watch below sit that tick out too (2026-11-06 review):
+    // without picks they would re-look decided notes and page skipped ones.
+    const protectedPicks = protectedScan?.subs?.size
+      ? await protectedPicksReadImpl().catch(() => null)
+      : {};
+    const picksUnreadable = protectedPicks == null;
+    const picks = protectedPicks || {};
+    const protectedRows = protectedScan?.subs?.size && !picksUnreadable
       ? syntheticProtectedRequests({
         subs: protectedScan.subs,
         lookups: storedLookups,
+        picks,
         historyIds: readIds,
         notBeforeMs: config.protectedSendFromMs ?? config.protectedNotBeforeMs,
         windowMs: config.protectedWindowMs,
@@ -4469,6 +4517,12 @@ export async function runOutreachTick({
         now,
       })
       : [];
+    const pickedRows = protectedRows.filter((request) => request.protectedSub?.via === "staff_pick").length;
+    // Picks for notes no longer stored (or two windows old) go, with the scan.
+    if (protectedScan?.scanned && !picksUnreadable) {
+      const stalePicks = staleProtectedPicks({ picks, subs: protectedScan.subs, now, windowMs: config.protectedWindowMs });
+      if (stalePicks.length) await protectedPicksPruneImpl(stalePicks).catch(() => {});
+    }
     const history = protectedRows.length ? [...readHistory, ...protectedRows] : readHistory;
     const visibleRequestIds = new Set(history.map((request) => request.id));
     const teammatesPaused = history.some((request) => request.ownRequest === false)
@@ -4482,7 +4536,12 @@ export async function runOutreachTick({
       ? await retryTeammateReachedOutMarks({ history, states: await listOutreachStates().catch(() => states) })
         .catch(() => [])
       : [];
-    const eligibleRequests = eligibleNewRequests(history, config, states, exceptions, { now });
+    // A row of Paraform's own read that a note names, whose note staff
+    // skipped (or picked someone else for), is not worked this tick
+    // (2026-11-06 second review); the send path re-reads the pick anyway.
+    const eligibleRequests = eligibleNewRequests(history, config, states, exceptions, { now })
+      .filter((request) => request.synthetic || !request.protectedSub
+        || (!picksUnreadable && protectedPickStillSends(request, picks[request.id] ?? null)));
     const teammateEligibleCount = eligibleRequests.filter((request) => request.ownRequest === false).length;
     for (const request of outreachBatch(
       eligibleRequests,
@@ -4583,7 +4642,7 @@ export async function runOutreachTick({
     }).catch(() => ({ escalated: [] }));
     // At most one new protected-sub lookup, with the scan (every five minutes)
     // and after the sends, so it never takes the pace cap from them.
-    const protectedLookup = protectedScan?.scanned && protectedScan.subs?.size
+    const protectedLookup = protectedScan?.scanned && protectedScan.subs?.size && !picksUnreadable
       ? await protectedLookupImpl({
         subs: protectedScan.subs,
         historyIds: readIds,
@@ -4595,13 +4654,14 @@ export async function runOutreachTick({
         firstFromMs: config.protectedNotBeforeMs,
         windowMs: config.protectedWindowMs,
         skip: config.protectedSkip,
+        picks,
       }).catch((error) => ({ lookups: storedLookups, error: clean(error?.code || error?.message).slice(0, 120) || "lookup_failed" }))
       : null;
     // A protected sub nobody emailed an hour after its note pages once, with
     // the reason this read shows (2026-11-04).
     // It runs with the scan, every five minutes, on the states read at the
     // top of this tick plus what this tick just sent.
-    const protectedUnsent = protectedScan?.scanned && protectedScan.subs
+    const protectedUnsent = protectedScan?.scanned && protectedScan.subs && !picksUnreadable
       ? await protectedWatchImpl({
         subs: protectedScan.subs,
         history,
@@ -4611,7 +4671,10 @@ export async function runOutreachTick({
           .map((result) => result.requestId),
         exceptions,
         lookups: protectedLookup?.lookups || storedLookups,
+        picks,
         notBeforeMs: config.protectedNotBeforeMs,
+        skip: config.protectedSkip,
+        sendFromMs: config.protectedSendFromMs ?? config.protectedNotBeforeMs,
         now,
         notifyImpl: notifySlack,
       }).catch(() => [])
@@ -4663,6 +4726,8 @@ export async function runOutreachTick({
             admissible: protectedMatch.admissible,
           } : {}),
           rows: protectedRows.length,
+          ...(pickedRows ? { pickedRows } : {}),
+          ...(picksUnreadable ? { picksError: "picks_store_unreadable" } : {}),
           ...(protectedLookup ? {
             looked: protectedLookup.looked || 0,
             ...(protectedLookup.stopped ? { lookupStopped: protectedLookup.stopped } : {}),

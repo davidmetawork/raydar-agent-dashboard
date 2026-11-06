@@ -42,6 +42,7 @@ process.env.GOOGLE_SA_KEY_JSON = JSON.stringify({
 // ── Fakes ────────────────────────────────────────────────────────────────────
 let kv;
 let zsets;
+let protectedPicks;
 let calls;
 let gmail;
 let mailroom;
@@ -52,6 +53,7 @@ let slackFailing;
 function reset() {
   kv = new Map();
   zsets = new Map();
+  protectedPicks = new Map();
   calls = [];
   slack = [];
   slackFailing = false;
@@ -153,6 +155,8 @@ function command([name, ...args]) {
     case "ZADD": zadd(args[0], args[args.length - 1]); return 1;
     case "ZREVRANGE": return [...(zsets.get(args[0]) || [])].reverse();
     case "EVAL": return evalScript(args);
+    // The staff-picks hash, read again by a protected row before its claim.
+    case "HGET": return args[0] === "paraai:outreach:protected:picks" ? protectedPicks.get(args[1]) ?? null : null;
     default: throw new Error(`unexpected KV command in test: ${name}`);
   }
 }
@@ -1622,6 +1626,87 @@ test("a looked-up protected sub (not in the request list) sends with no digest, 
   const state = await getOutreachState("cu-p9");
   assert.equal(state.matches["req-p9"].deliveryMode, "protected_sub");
   assert.equal(state.matches["req-p9"].copyVariant, "protected_initial");
+});
+
+test("review fix (2026-11-06): a skip or new pick saved mid-tick stops a looked-up row at its claim", async () => {
+  const { syntheticProtectedRequests } = await import("../api/paraai/_lib/outreach-protected-lookup.mjs");
+  const subFor = (id) => ({
+    requestId: id,
+    roleId: `role-${id}`,
+    candidateName: "Trish J.",
+    companyName: "Acme",
+    submitUrl: `https://www.paraform.com/company/acme/role-${id}/recruit/submit_candidate?from_submission_request=true&submission_request_id=${id}`,
+    receivedAt: "2026-09-28T16:05:00.000Z",
+    sender: "staff@paraform.com",
+  });
+  const rowFor = (id, { pick = null, resolvedTo = null } = {}) => syntheticProtectedRequests({
+    subs: new Map([[id, subFor(id)]]),
+    lookups: { [id]: { requestId: id, status: resolvedTo ? "resolved" : "ambiguous", candidateUserId: resolvedTo, roleName: "Software Engineer", companyName: "Acme" } },
+    picks: pick ? { [id]: pick } : {},
+    historyIds: new Set(),
+    notBeforeMs: Date.parse("2026-09-28T00:00:00Z"),
+    now: Date.parse("2026-09-28T17:00:00Z"),
+  })[0];
+  const send = (id, candidateUserId) => ({ requestId: id, action: "send", candidateUserId, pickedBy: "staff@raydar.xyz", pickedAt: "2026-09-28T16:30:00.000Z" });
+  const skip = (id) => ({ requestId: id, action: "skip", pickedBy: "staff@raydar.xyz", pickedAt: "2026-09-28T16:40:00.000Z" });
+  // The tick built a staff-pick row; staff then pressed Skip.
+  const picked = rowFor("req-pk1", { pick: send("req-pk1", "cu-pk1") });
+  protectedPicks.set("req-pk1", JSON.stringify(skip("req-pk1")));
+  const enqueued = mailroom.enqueued.length;
+  const stopped = await processMatchRequest(picked, [...history(), picked], sendOptions());
+  assert.equal(stopped.action, "protected_pick_changed");
+  // A replacement pick for someone else stops it too.
+  protectedPicks.set("req-pk1", JSON.stringify(send("req-pk1", "cu-other")));
+  assert.equal((await processMatchRequest(picked, [...history(), picked], sendOptions())).action, "protected_pick_changed");
+  // An automatic row stops once any pick exists.
+  const auto = rowFor("req-pk2", { resolvedTo: "cu-pk2" });
+  protectedPicks.set("req-pk2", JSON.stringify(skip("req-pk2")));
+  assert.equal((await processMatchRequest(auto, [...history(), auto], sendOptions())).action, "protected_pick_changed");
+  assert.equal(mailroom.enqueued.length, enqueued, "nothing enqueued");
+  assert.equal((await getOutreachState("cu-pk1"))?.outbox?.["match:req-pk1"], undefined, "no claim");
+  // An unreadable pick sends nothing either.
+  const unread = await processMatchRequest(picked, [...history(), picked], { ...sendOptions(), protectedPickReadImpl: async () => { throw new Error("down"); } });
+  assert.equal(unread.action, "protected_pick_changed");
+  // The same pick still stored: it sends.
+  protectedPicks.set("req-pk1", JSON.stringify(send("req-pk1", "cu-pk1")));
+  assert.equal((await processMatchRequest(picked, [...history(), picked], sendOptions())).action, "sent");
+});
+
+test("second review (2026-11-06): a staff skip stops a protected row from Paraform's own read at its claim", async () => {
+  const request = seedProtectedRequest("req-pr1", "cu-pr1");
+  assert.equal(request.synthetic, undefined, "a row of the request read, not a looked-up one");
+  protectedPicks.set("req-pr1", JSON.stringify({ requestId: "req-pr1", action: "skip", pickedBy: "staff@raydar.xyz", pickedAt: "2026-09-28T16:40:00.000Z" }));
+  const enqueued = mailroom.enqueued.length;
+  assert.equal((await processMatchRequest(request, history(), sendOptions())).action, "protected_pick_changed");
+  // A pick of someone else stops it too.
+  protectedPicks.set("req-pr1", JSON.stringify({ requestId: "req-pr1", action: "send", candidateUserId: "cu-other", pickedBy: "staff@raydar.xyz", pickedAt: "2026-09-28T16:45:00.000Z" }));
+  assert.equal((await processMatchRequest(request, history(), sendOptions())).action, "protected_pick_changed");
+  assert.equal(mailroom.enqueued.length, enqueued, "nothing enqueued");
+  assert.equal((await getOutreachState("cu-pr1"))?.outbox?.["match:req-pr1"], undefined, "no claim");
+  // With the pick gone it sends as before.
+  protectedPicks.delete("req-pr1");
+  assert.equal((await processMatchRequest(request, history(), sendOptions())).action, "sent");
+});
+
+test("second review (2026-11-06): a hold recorded for a first, wrong pick never holds the corrected pick's row", () => {
+  const protectedConfig = { ...config, notBeforeMs: Date.parse("2030-01-01T00:00:00Z"), protectedNotBeforeMs: Date.parse("2026-09-28T00:00:00Z") };
+  const base = normalizeSubmissionRequest(historyRow("req-x", "cu-b"));
+  const picked = { ...base, synthetic: true, protectedSub: { ...PROTECTED_SUB, via: "staff_pick" } };
+  const held = (candidateUserId, code = "OUTREACH_CANDIDATE_OFF_MARKET") => [{
+    requestId: "req-x", candidateUserId, code, status: "open", retryable: false, lastSeenAt: "2026-09-28T16:10:00.000Z",
+  }];
+  const ids = (exceptions, rows = [picked]) => eligibleNewRequests(rows, protectedConfig, [], exceptions).map((row) => row.id);
+  assert.deepEqual(ids([]), ["req-x"]);
+  // Held for A (off market, do not contact, or a non-retryable system code): B still goes.
+  assert.deepEqual(ids(held("cu-a")), ["req-x"]);
+  assert.deepEqual(ids(held("cu-a", "OUTREACH_CANDIDATE_DO_NOT_CONTACT")), ["req-x"]);
+  assert.deepEqual(ids(held("cu-a", "OUTREACH_FAILED")), ["req-x"]);
+  // Held for B, or a hold that names nobody: still held.
+  assert.deepEqual(ids(held("cu-b")), []);
+  assert.deepEqual(ids(held("")), []);
+  // A row of Paraform's own read keeps every hold on its request id.
+  const inRead = { ...base, protectedSub: { ...PROTECTED_SUB } };
+  assert.deepEqual(ids(held("cu-a"), [inRead]), []);
 });
 
 test("a looked-up row that is not a protected send never reaches the digest write", async () => {
