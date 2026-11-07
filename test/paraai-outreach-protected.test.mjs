@@ -318,6 +318,7 @@ test("the match record says which stored subs the request read holds, and their 
 });
 
 import {
+  PROTECTED_LOOKUP_VERSION,
   lookupProtectedSub,
   lookupReason,
   protectedLookupQueue,
@@ -409,9 +410,9 @@ test("the queue takes new notes first, retries not-found three times, and backfi
   const historyIds = new Set(["in-read"]);
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds, notBeforeMs, now, backfill: 1 })), ["new-b", "new-a", "old-a"]);
   const lookups = {
-    "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z", version: 3 },
-    "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z", version: 3 },
-    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z", version: 3 },
+    "new-b": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:55:00Z", version: PROTECTED_LOOKUP_VERSION },
+    "new-a": { status: "not_found", attempts: 3, lastTriedAt: "2026-11-04T18:00:00Z", version: PROTECTED_LOOKUP_VERSION },
+    "old-a": { status: "not_found", attempts: 1, lastTriedAt: "2026-11-04T18:00:00Z", version: PROTECTED_LOOKUP_VERSION },
   };
   // new-b is not due for 10 minutes, new-a is out of attempts (its daily
   // re-check is not due yet), old-a used the backfill.
@@ -452,7 +453,7 @@ test("rows are made only for resolved notes from after the switch-on, with every
   assert.deepEqual(syntheticProtectedRequests({ ...args, notBeforeMs: null, subs: new Map([["req-1", NOTE]]) }), []);
 });
 
-test("review fixes: too many namesakes, an unfinished search, an old application or a closed role never resolves", async () => {
+test("review fixes: too many namesakes, an unfinished search or an old application never resolves; a closed role goes on (v4)", async () => {
   const jane = (n) => ({ id: `cu-${n}`, candidate: { name: "Jane Doe" } });
   const recent = [{ role_id: "role-1", created_at: "2026-11-04T17:54:00Z" }];
   const five = fakeParaform({ crm: [1, 2, 3, 4, 5].map(jane), apps: { "cu-5": recent } });
@@ -473,7 +474,12 @@ test("review fixes: too many namesakes, an unfinished search, an old application
   assert.equal(exactRecord.status, "resolved");
   assert.equal(exactRecord.ctarMatch, true);
   const closed = fakeParaform({ role: { id: "role-1", status: "PAUSED", title: "Founding Engineer", company: { name: "Acme" } } });
-  assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: closed.impl })).status, "role_inactive");
+  // v4 (2026-11-07, David's rule 3): a paused role is recorded and the
+  // lookup goes on (v3 stopped here as role_inactive).
+  const closedRecord = await lookupProtectedSub(NOTE, { trpcGetImpl: closed.impl });
+  assert.equal(closedRecord.roleStatus, "PAUSED");
+  assert.equal(closedRecord.status, "not_found");
+  assert.ok(closed.calls.length > 1, "the name search ran");
   const otherRole = fakeParaform({ role: { id: "role-2", status: "ACTIVE", title: "Founding Engineer", company: { name: "Acme" } } });
   assert.equal((await lookupProtectedSub(NOTE, { trpcGetImpl: otherRole.impl })).status, "role_unreadable");
   assert.match(lookupReason({ status: "too_many" }), /too many people/);
@@ -544,9 +550,11 @@ test("earlier notes looked up by an older lookup are measured again", () => {
   const subs = new Map([["old-a", { ...NOTE, requestId: "old-a", receivedAt: "2026-11-04T16:00:00Z" }]]);
   const args = { subs, historyIds: new Set(), notBeforeMs: Date.parse("2026-11-04T17:46:07Z"), now: Date.parse("2026-11-04T19:00:00Z"), backfill: 12 };
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1 } } }).length, 1);
-  // v3 (2026-11-06): a version-2 failure is measured again too; a v3 one is not.
+  // v3 (2026-11-06): a version-2 failure is measured again too; v4
+  // (2026-11-07): so is a v3 one, and a current-version one is not.
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 2 } } }).length, 1);
-  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 3 } } }).length, 0);
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: 3 } } }).length, 1);
+  assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "not_found", attempts: 1, version: PROTECTED_LOOKUP_VERSION } } }).length, 0);
   assert.equal(protectedLookupQueue({ ...args, lookups: { "old-a": { status: "resolved", attempts: 1, version: 2 } } }).length, 0);
 });
 
