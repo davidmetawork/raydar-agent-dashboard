@@ -121,19 +121,15 @@ async function paraformHeaders() {
 
 function vendorError(response, body) {
   if (response.status === 401) {
-    return authExpired();
+    clearCookieCache();
+    const error = new Error("AUTH_EXPIRED");
+    error.code = "AUTH_EXPIRED";
+    return error;
   }
   const message = body?.error?.json?.message || body?.message || `Paraform HTTP ${response.status}`;
   const error = new Error(String(message));
   error.code = body?.error?.json?.code || `HTTP_${response.status}`;
   error.status = response.status;
-  return error;
-}
-
-function authExpired() {
-  clearCookieCache();
-  const error = new Error("AUTH_EXPIRED");
-  error.code = "AUTH_EXPIRED";
   return error;
 }
 
@@ -294,7 +290,6 @@ export function scoreIdentity(candidate, crmItem) {
   const rightLinkedin = linkedinHandle(crmItem?.linkedin_user || crmItem?.linkedinUrl || crmItem?.linkedin_url);
   if (leftLinkedin && rightLinkedin && leftLinkedin === rightLinkedin) signals.push("linkedin");
   if (phonesMatch(candidate?.phone, crmItem?.phone_number)) signals.push("phone");
-  if (normalizeEmail(candidate?.email) && hasEmail(crmItem, candidate.email)) signals.push("email");
 
   const scheduled = Date.parse(candidate?.scheduledStart || "");
   const crmScheduled = Date.parse(
@@ -367,6 +362,7 @@ export async function scanCrm({
 function candidateReadRow(value) {
   return value?.candidate_user
     || value?.candidateUser
+    || value?.candidate
     || value?.item
     || value
     || null;

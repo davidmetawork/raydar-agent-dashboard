@@ -917,14 +917,6 @@
         return { cls:"amber", border:true, label:"not auto-evaluated",
           title:"No durable lifecycle decision is attached to this call. Review the exact call in Paraform." };
       const stage = String(e.stage||"");
-      if (c.verdict==="no_show" && e.definitiveNoShow!==true
-        && !(stage==="enrolled" || stage==="manual_enrolled" || stage==="stopped_replied" || stage.startsWith("skipped_"))){
-        if (stage.startsWith("paused") || stage.startsWith("removed"))
-          return { cls:"", label:"outreach stopped: unverified",
-            title:"The recorder's no-show label lacked explicit no-one-ever-joined proof, so sequence outreach was stopped. The action history is retained for audit." };
-        return { cls:"amber", border:true, label:"attendance unverified",
-          title:"The recorder labelled this call a no-show without explicit no-one-ever-joined proof. No human trace was found on the call either, so the reschedule email still goes out automatically (2026-08-22 rebuild)." };
-      }
       if (stage==="enrolled" || stage==="manual_enrolled"){
         if (e.deliveryReady!==true)
           return { cls:"amber", border:true, label:"verification pending",
@@ -950,6 +942,15 @@
       if (stage==="enrolling" || stage==="manual_enrolling" || stage==="enrolled_unverified" || stage==="manual_enrolled_unverified")
         return { cls:"amber", label:"verification pending",
           title:"Paraform may already contain this lead. Automatic readback is reconciling membership and email; do not add it again." };
+      if (fuStageIs(stage,["failed_add_unverified"]))
+        return { cls:"amber", border:true, label:"needs review: possible live lead",
+          title:`The engine exhausted its enrollment attempts without proving a sequence lead${e.lastError?`: ${e.lastError}`:""}. It will not try again — check Paraform for a live lead before acting.` };
+      if (stage==="manual_review_timeout")
+        return { cls:"", label:"too old to auto-email",
+          title:"This call is past the automatic follow-up window, so no apology or reschedule email will be sent. Reach out by hand if it still matters." };
+      if (stage==="dry_run")
+        return { cls:"amber", label:"dry run: would enroll",
+          title:"The engine cleared every guard for this candidate but is running in DRY_RUN, so nothing was sent." };
       if (stage==="expired_window")
         return { cls:"amber", border:true, label:"recovery required",
           title:"The original automatic window expired without a verified enrollment. Confirmed calls recover automatically; otherwise review the exact call." };
@@ -966,6 +967,11 @@
         const why = stage.slice(8).replace(/_/g," ");
         return { cls:"", label:"blocked: "+why, title:`The engine evaluated this candidate and held off — ${why}${e.rule?` (rule: ${e.rule})`:""}.` };
       }
+      // Attendance-unverified is a FALLBACK, never a mask: every stage above
+      // describes what actually happened to this person and wins over it.
+      if (c.verdict==="no_show" && e.definitiveNoShow!==true)
+        return { cls:"amber", border:true, label:"attendance unverified",
+          title:"The recorder labelled this call a no-show without explicit no-one-ever-joined proof. No human trace was found on the call either, so the reschedule email still goes out automatically (2026-08-22 rebuild)." };
       if (stage==="manual_oracle_blocked")
         return { cls:"", label:"blocked by call evidence",
           title:"The lifecycle oracle found evidence that makes outreach unsafe. Review the exact profile in Paraform." };

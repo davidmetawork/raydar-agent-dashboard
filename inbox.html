@@ -338,7 +338,7 @@ function updateCounts(){
     complete:STATE.replies.filter(reply=>replyBucket(reply)==="complete").length,
   };
   document.querySelectorAll("[data-count]").forEach(node=>{node.textContent=values[node.dataset.count]??0;});
-  $("replyCount").textContent=STATE.replies.length+" repl"+(STATE.replies.length===1?"y":"ies");
+  $("replyCount").textContent=values.all+" repl"+(values.all===1?"y":"ies");
   $("interestedCount").textContent=values.interested+" interested";
   $("interestedCount").classList.toggle("hidden",values.interested===0);
   return values;

@@ -5,12 +5,6 @@ import { getAutoQueueStats, storeConfigured } from "./_lib/store.mjs";
 
 export const config = { maxDuration: 30 };
 
-function envEnabled(name) {
-  return ["1", "true", "yes", "on"].includes(
-    String(process.env[name] || "").toLowerCase(),
-  );
-}
-
 export default async function handler(req, res) {
   if (cors(req, res)) return;
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "GET only" });
@@ -46,27 +40,7 @@ export default async function handler(req, res) {
       autoSubmitApproved: auto.autoSubmitApproved,
       dryRun: auto.dryRun,
       notBeforePinned: auto.notBeforeMs != null,
-      phase1CutoffPinned: auto.phase1DeployedAtMs != null,
-      organicExceptionCount: auto.organicExceptionBotIds?.size || 0,
-      resumeWaitMinutes: auto.resumeWaitMinutes,
-      resumeWaitEnabled: auto.resumeWaitEnabled,
-      resumeRetryDays: auto.resumeRetryDays,
-      resumeWait: {
-        enabled: auto.resumeWaitEnabled,
-        scheduledChecks: auto.resumeRetryDays + 1,
-        terminalAfterDays: auto.resumeRetryDays,
-        terminalAckOpsDeadlineHours: auto.resumeTerminalAckHours,
-        backfillTerminalAckDeadlineDays:
-          auto.resumeBackfillTerminalAckDays,
-      },
-      resumeSignalConfigured: auto.resumeSignalConfigured,
-      humanCallSignalEnabled: envEnabled(
-        "PARAAI_HUMAN_CALL_SIGNAL_ENABLED",
-      ),
-      humanIntroSignalEnabled: envEnabled(
-        "PARAAI_HUMAN_INTRO_SIGNAL_ENABLED",
-      ),
-      maxStepAttempts: auto.maxStepAttempts,
+      consentCutoffPinned: auto.consentRequiredAtMs != null,
       runnerConfigured: Boolean(process.env.PARAAI_AUTOMATION_RUNNER_KEY),
       recallVerificationConfigured: String(
         process.env.RECALL_SVIX_WEBHOOK_SECRET || process.env.RECALL_WORKSPACE_VERIFICATION_SECRET || "",
@@ -115,11 +89,9 @@ export default async function handler(req, res) {
     health.automation.ready = Boolean(
       health.submitReady &&
       automationExecutionEnabled(auto) &&
-      auto.phase1DeployedAtMs != null &&
+      auto.consentRequiredAtMs != null &&
       health.automation.runnerConfigured &&
       health.automation.recallVerificationConfigured &&
-      (!auto.resumeWaitEnabled || health.automation.resumeSignalConfigured) &&
-      health.automation.slackConfigured &&
       health.automation.queue !== null,
     );
     health.ok = health.submitReady;

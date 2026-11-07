@@ -808,6 +808,10 @@ test("standalone page, dashboard tab, and Vercel routing are wired together", as
   assert.match(inboxHtml, /data-filter="archived"/);
   assert.match(inboxHtml, /data-filter="complete"/);
   assert.match(inboxHtml, /class="mailbox-nav" aria-label="Inbox views"/);
+  assert.match(
+    inboxHtml,
+    /\$\("replyCount"\)\.textContent=values\.all\+" repl"\+\(values\.all===1\?"y":"ies"\)/,
+  );
   assert.match(inboxHtml, /\.reply-open\{[^}]*display:grid/);
   assert.match(inboxHtml, /body\.reading \.detail\{display:block\}/);
   assert.match(inboxHtml, /className="back-control"/);
