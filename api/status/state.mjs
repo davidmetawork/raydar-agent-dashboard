@@ -264,6 +264,9 @@ function flowContext(row, feeds) {
 }
 
 const HISTOGRAM_TOP = 4;
+// A pool stage renders at most this many per-reason tiles; the rest roll up
+// into one "Other" tile so a noisy ledger cannot stretch the diagram.
+export const POOL_TILE_CAP = 6;
 
 /** Resolve a catalog row's declarative flow into drawable stages+counts. */
 export function flowFor(row, feeds) {
@@ -295,12 +298,69 @@ export function flowFor(row, feeds) {
         if (out.count == null) out.count = entries.reduce((sum, [, v]) => sum + v, 0);
       }
     }
+    // BUCKET ROW (2026-08-23): a stage that is a short stack of small tiles
+    // between chain nodes — the interview lane's call-outcome buckets. Each
+    // bucket resolves its own countKey; a missing path is a "—" tile, and
+    // the stage only counts as resolved when every bucket did (so a pre-v2
+    // feed honestly flags the flow as missing data).
+    if (Array.isArray(st.buckets) && st.buckets.length) {
+      out.kind = "buckets";
+      out.tiles = st.buckets.map((b) => ({
+        id: b.id,
+        label: b.label,
+        count: b.countKey ? resolvePath(ctx, b.countKey) : null,
+        ...(b.accent ? { accent: b.accent } : {}),
+      }));
+      if (out.count == null) {
+        const counts = out.tiles.map((t) => t.count);
+        out.count = counts.every((c) => c != null)
+          ? counts.reduce((a, c) => a + c, 0)
+          : null;
+      }
+    }
+    // POOL BY REASON (same redesign): one tile per entry of a feed-published
+    // {token: count} object, labeled by the feed's own labels map with the
+    // raw token as the fallback, sorted by count, capped at POOL_TILE_CAP
+    // with an "Other" rollup. A missing pool object stays null ("—"), never
+    // zero; a present-but-empty one is an honest 0 with no tiles.
+    if (st.poolKey) {
+      const pool = objectAt(ctx, st.poolKey);
+      if (pool) {
+        const labels = objectAt(ctx, st.labelsKey) ?? {};
+        const entries = Object.entries(pool)
+          .map(([k, v]) => [k, finiteOrNull(v)])
+          .filter(([, v]) => v != null)
+          .sort((a, b) => b[1] - a[1]);
+        const cap = Number.isInteger(st.cap) && st.cap > 0 ? st.cap : POOL_TILE_CAP;
+        out.kind = "pool";
+        out.tiles = entries.slice(0, cap).map(([k, v]) => ({
+          id: k,
+          label: typeof labels[k] === "string" && labels[k].trim() ? labels[k] : k,
+          count: v,
+          ...(st.tileAccent ? { accent: st.tileAccent } : {}),
+        }));
+        const rest = entries.slice(cap);
+        if (rest.length) {
+          out.tiles.push({
+            id: "overflow",
+            label: "Other",
+            count: rest.reduce((a, [, v]) => a + v, 0),
+            ...(st.tileAccent ? { accent: st.tileAccent } : {}),
+          });
+        }
+        if (out.count == null) out.count = entries.reduce((a, [, v]) => a + v, 0);
+        if (st.tileAccent && !out.accent) out.accent = st.tileAccent;
+      } else {
+        out.kind = "pool"; // no pool published yet: header "—", no tiles
+      }
+    }
     return out;
   });
   // counted: this flow is expected to show numbers (so a missing one renders
   // an honest "—"). A purely structural flow (interview-invites) opts in via
   // countsNote; generic client-drawn flows show labels only.
-  const counted = flow.stages.some((st) => st.countKey || st.histogramKey) || Boolean(flow.countsNote);
+  const counted = flow.stages.some((st) => st.countKey || st.histogramKey || st.buckets || st.poolKey)
+    || Boolean(flow.countsNote);
   const missing = counted && stages.some((st) => st.count == null);
   let note = flow.countsNote || null;
   if (!note && row.feed === "paraai-curated-fit-heartbeat") {

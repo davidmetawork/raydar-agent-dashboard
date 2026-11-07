@@ -166,7 +166,7 @@ export const SYSTEMS = [
       // Counts resolve from the lane's own published funnel feed
       // (clients.raydar.xyz/interview-lane-status.json — Postgres ledger
       // aggregates plus the plan's pool numbers, counts only). Until the
-      // first publish lands, every stage renders "—", never zero.
+      // v2 publish lands, the new stages render "—", never zero.
       stages: [
         { id: "applicants", label: "Applicants", countKey: "feed.funnel.applicants" },
         { id: "invited", label: "Invited", countKey: "feed.funnel.enrolled" },
@@ -178,14 +178,35 @@ export const SYSTEMS = [
           id: "booked", label: "Booked", countKey: "feed.funnel.bookedPeople",
           secondary: { label: "bookings", countKey: "feed.funnel.bookings" },
         },
+        {
+          // David's 2026-08-23 ruling: what actually happened on the call,
+          // between Booked and Follow-up sent — four buckets as small
+          // stacked tiles. Amber only where the call itself went wrong;
+          // asking for a human is a normal outcome. The feed also carries
+          // undetermined/notOurs remainders so the six sum to bookings.
+          id: "outcome", label: "Call outcome",
+          buckets: [
+            { id: "ok", label: "Successful call", countKey: "feed.outcomes.successfulCall" },
+            { id: "noshow", label: "No-show", countKey: "feed.outcomes.noShow", accent: "warn-when-positive" },
+            { id: "broke", label: "Call broke", countKey: "feed.outcomes.callBroke", accent: "warn-when-positive" },
+            { id: "human", label: "Asked for a human", countKey: "feed.outcomes.askedForHuman" },
+          ],
+        },
         { id: "fit", label: "Follow-up sent", countKey: "feed.funnel.followupsSent" },
-        { id: "in-review", label: "In review", countKey: "feed.funnel.followupsParked", accent: "bad-when-positive" },
+        {
+          // The old vague "In review" pool is gone (same ruling): one amber
+          // tile per hold reason, labeled by the feed's own frozen labels
+          // map (raw token fallback), capped at 6 plus an Other rollup.
+          id: "held", label: "Waiting on David", poolKey: "feed.parkedByReason",
+          labelsKey: "feed.labels", tileAccent: "warn-when-positive",
+        },
       ],
       edges: [
         ["applicants", "invited"], ["invited", "emailed"],
-        ["emailed", "booked"], ["booked", "fit"], ["booked", "in-review"],
+        ["emailed", "booked"], ["booked", "outcome"],
+        ["outcome", "fit"], ["outcome", "held"],
       ],
-      sourceNote: "Counts from the lane's own published status feed.",
+      sourceNote: "Counts from the lane's own published status feed. No-shows and broken calls are counted here; rebooking them belongs to the lifecycle no-show lane.",
     },
     links: { health: HEALTH, emails: EMAILS, registry: null },
     davidAction: null,
