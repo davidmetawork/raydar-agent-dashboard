@@ -82,7 +82,6 @@ const ERRORS={
   protected_sub_busy:"A send for this person is running right now. Wait a minute, refresh, and try again.",
   protected_sub_resolved_automatically:"The system already matched this note to that person; it sends on its own.",
   protected_sub_resolved_elsewhere:"The system already matched this note to someone else, so a pick cannot change it. Tell Claude if that match is wrong.",
-  role_not_active:"Paraform shows the role as closed, so it will not send.",
   role_unreadable:"The role could not be read on Paraform, so it cannot send yet.",
   candidate_not_an_option:"That person is not one of the options any more. Refresh and try again.",
   candidateUserId_required:"Pick a person first.",
@@ -148,8 +147,11 @@ function optionRow(item,option,index,canPick){
     :option.roleOnRecord
       ?`<span class="old">had this role before${option.roleAt?`, dated ${esc(pacificDate(option.roleAt,false))}`:""}</span>`
       :option.checked===false?"role not checked":"not on this role";
+  // The employers the note's background names on this person's record (v4).
+  const worked=Array.isArray(option.backgroundHits)&&option.backgroundHits.length
+    ?` · <span class="on">worked at ${esc(option.backgroundHits.join(", "))}, as the note says</span>`:"";
   const button=canPick?`<button class="button primary" data-send="${esc(item.requestId)}" data-option="${index}">Send to this person</button>`:"";
-  return `<div class="option"><div><b>${esc(option.name||"Unnamed person")}</b><span class="facts">${role}${linkedin}</span></div>${button}</div>`;
+  return `<div class="option"><div><b>${esc(option.name||"Unnamed person")}</b><span class="facts">${role}${worked}${linkedin}</span></div>${button}</div>`;
 }
 
 // What the send confirm says: the role, the LinkedIn handle to tell identical

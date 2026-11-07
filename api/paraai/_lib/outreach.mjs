@@ -4473,7 +4473,7 @@ export async function runOutreachTick({
     // most every five minutes, then mark the rows of this read they name. A
     // failed scan only means no protected sub is admitted this tick.
     const protectedScan = config.protectedNotBeforeMs != null
-      ? await protectedScanImpl({ mailbox: config.mailbox, now, notifyImpl: notifySlack })
+      ? await protectedScanImpl({ mailbox: config.mailbox, now, notifyImpl: notifySlack, windowMs: config.protectedWindowMs })
         .catch((error) => ({ subs: null, error: clean(error?.code || error?.message).slice(0, 120) || "scan_failed" }))
       : null;
     // Paraform's own rows, before any protected-sub row is added below.
