@@ -173,16 +173,18 @@ test("a note with degree letters resolves on the cleaned name", async () => {
   assert.equal(nameSearch.input.filters.general_search, "Avery Quill");
 });
 
-test("an initial surname is held with its one compatible role holder first, and is ambiguous with two", async () => {
+test("an initial surname resolves on its one compatible role holder (v4), and is ambiguous with two", async () => {
   const people = [person("cu-1", "Trish Jo", "recent"), person("cu-2", "Trish Jameson"), person("cu-3", "Trish Smith", "recent")];
   // Role-scoped search honoured: its one holder is still confirmed by the
   // name search and the namesakes' applications (2026-11-06 review).
   const scoped = fakeParaform({ people });
   const one = await lookupProtectedSub(note("Trish J."), { trpcGetImpl: scoped.impl, now: NOW });
-  // The surname is not known in full, so even one holder waits for a staff
-  // pick (2026-11-06 design), offered first.
-  assert.equal(one.status, "unconfirmed_name");
-  assert.equal(one.candidateUserId, undefined);
+  // v4 (2026-11-07, David's rule 2): the one person with the role is the
+  // person, though the surname is only an initial (v3 held it as
+  // unconfirmed_name for a staff pick).
+  assert.equal(one.status, "resolved");
+  assert.equal(one.candidateUserId, "cu-1");
+  assert.equal(one.confirmedBy, "role");
   assert.equal(one.options[0].candidateUserId, "cu-1");
   assert.equal(one.nameForm, "initial");
   assert.equal(one.roleSearch, "scoped");
@@ -192,8 +194,8 @@ test("an initial surname is held with its one compatible role holder first, and 
   // Ignored: the name search "Trish J" and the CRM rows decide.
   const ignored = fakeParaform({ people, honourRoles: false });
   const viaName = await lookupProtectedSub(note("Trish J."), { trpcGetImpl: ignored.impl, now: NOW });
-  assert.equal(viaName.status, "unconfirmed_name");
-  assert.equal(viaName.options[0].candidateUserId, "cu-1");
+  assert.equal(viaName.status, "resolved", "v4: was unconfirmed_name");
+  assert.equal(viaName.candidateUserId, "cu-1");
   assert.equal(ignored.count(APPS), 1, "only Trish Jameson needed an applications read");
   assert.equal(viaName.nameMatches, 2, "Trish Smith is not compatible with J.");
   // Two compatible people on the role: never a guess, both offered.
@@ -208,8 +210,8 @@ test("an initial surname is held with its one compatible role holder first, and 
 test("an initial surname falls back to the first name alone only when the initial search finds nobody", async () => {
   const fake = fakeParaform({ people: [person("cu-1", "Trish Jo", "recent"), person("cu-2", "Trish Lane")], honourRoles: false, initialSearchEmpty: true });
   const record = await lookupProtectedSub(note("Trish J."), { trpcGetImpl: fake.impl, now: NOW });
-  assert.equal(record.status, "unconfirmed_name");
-  assert.equal(record.options[0].candidateUserId, "cu-1");
+  assert.equal(record.status, "resolved", "v4: was unconfirmed_name");
+  assert.equal(record.candidateUserId, "cu-1");
   const terms = fake.calls.filter((call) => call.proc === CRM && !call.input.filters.roles).map((call) => call.input.filters.general_search);
   assert.deepEqual(terms, ["Trish J", "Trish"]);
   // Found on the initial search: no first-name search.
@@ -280,16 +282,19 @@ test("a pacing refusal on the role-scoped search still throws and is recorded as
   assert.ok(!memory.saved[0].attempts);
 });
 
-test("six namesakes with one row-linked role holder are held with that holder offered first", async () => {
-  // 2026-11-06 review: the five unread namesakes could have the role in
-  // their applications, so this is never resolved; staff confirm it.
+test("six namesakes with one row-linked role holder resolve on that holder (v4)", async () => {
+  // v3 (2026-11-06 review) held this: the five unread namesakes could have
+  // the role in their applications. v4 (2026-11-07, David's rules 2 and 4):
+  // the one person with the role attached is the person, not held.
   const people = [1, 2, 3, 4, 5, 6].map((n) => person(`cu-${n}`, "Rowan Lark", n === 4 ? "recent" : null));
   const fake = fakeParaform({ people, honourRoles: false });
   const record = await lookupProtectedSub(note("Rowan Lark"), { trpcGetImpl: fake.impl, now: NOW });
-  assert.equal(record.status, "too_many");
-  assert.equal(record.candidateUserId, undefined);
+  assert.equal(record.status, "resolved");
+  assert.equal(record.candidateUserId, "cu-4");
+  assert.equal(record.via, "crm_row");
+  assert.equal(record.confirmedBy, "role");
   assert.equal(record.confirmed, 1);
-  assert.match(lookupReason(record), /one has this role on their CRM row \(listed first\)/);
+  assert.match(lookupReason({ status: "too_many", confirmed: 1 }), /one has this role on their CRM row \(listed first\)/);
   assert.equal(record.namesakesUnchecked, 5);
   assert.equal(record.nameMatches, 6);
   assert.equal(fake.count(APPS), 0);
@@ -346,8 +351,8 @@ test("the worst case stays within seven reads, leaving the tick room in the pace
   // Two compatible people fit the budget: read and resolved.
   const two = fakeParaform({ people: [...crowd, ...compatible(2)], initialSearchEmpty: true, apps: { "j-1": [{ role_id: ROLE, created_at: RECENT }] } });
   const resolved = await lookupProtectedSub(note("Trish J."), { trpcGetImpl: two.impl, now: NOW });
-  assert.equal(resolved.status, "unconfirmed_name", "one holder, but only an initial: held");
-  assert.equal(resolved.options[0].candidateUserId, "j-1");
+  assert.equal(resolved.status, "resolved", "one holder with only an initial: resolved in v4 (was unconfirmed_name)");
+  assert.equal(resolved.candidateUserId, "j-1");
   assert.equal(resolved.reads, 7);
   assert.equal(two.calls.length, 7);
   // A first-name search past its page limit is never a match.
@@ -361,7 +366,9 @@ test("options are capped at ten, role holders first", async () => {
   const people = Array.from({ length: 12 }, (_, n) => person(`cu-${n}`, "Rowan Lark", n === 10 ? "recent" : n === 11 ? "old" : null));
   const fake = fakeParaform({ people, honourRoles: false });
   const record = await lookupProtectedSub(note("Rowan Lark"), { trpcGetImpl: fake.impl, now: NOW });
-  assert.equal(record.status, "too_many");
+  // v4: the one recent row holder resolves (was too_many); the options are kept all the same.
+  assert.equal(record.status, "resolved");
+  assert.equal(record.candidateUserId, "cu-10");
   assert.equal(record.options.length, 10);
   assert.equal(record.options[0].candidateUserId, "cu-10");
   assert.equal(record.options[0].roleAt, new Date(RECENT).toISOString());
@@ -372,14 +379,16 @@ test("options are capped at ten, role holders first", async () => {
   assert.ok(record.options.slice(2).every((option) => !option.roleOnRecord && !option.checked));
 });
 
-test("closed roles and unresolved notes are checked again once a day; resolved stays final", () => {
+test("unresolved notes are checked again once a day; resolved stays final", () => {
   const notBeforeMs = Date.parse("2026-11-05T00:00:00Z");
   const now = Date.parse("2026-11-07T18:00:00Z");
   const subs = new Map([["req-v3", note("Jane Doe")]]);
   const at = (hoursAgo) => new Date(now - hoursAgo * 3_600_000).toISOString();
-  const due = (record) => protectedLookupQueue({ subs, historyIds: new Set(), lookups: { "req-v3": { version: 3, ...record } }, notBeforeMs, now }).length === 1;
-  assert.equal(due({ status: "role_inactive", attempts: 5, lastTriedAt: at(23) }), false);
-  assert.equal(due({ status: "role_inactive", attempts: 5, lastTriedAt: at(25) }), true, "no attempts cap");
+  const due = (record) => protectedLookupQueue({ subs, historyIds: new Set(), lookups: { "req-v3": { version: PROTECTED_LOOKUP_VERSION, ...record } }, notBeforeMs, now }).length === 1;
+  // v4: a closed role no longer stops the lookup (role_inactive is not made);
+  // a background conflict is the new daily re-check.
+  assert.equal(due({ status: "background_conflict", attempts: 5, lastTriedAt: at(23) }), false);
+  assert.equal(due({ status: "background_conflict", attempts: 5, lastTriedAt: at(25) }), true, "no attempts cap");
   assert.equal(due({ status: "not_found", attempts: 3, lastTriedAt: at(23) }), false);
   assert.equal(due({ status: "not_found", attempts: 3, lastTriedAt: at(25) }), true);
   assert.equal(due({ status: "not_found", attempts: 1, lastTriedAt: at(0.5) }), true, "first retries stay ten minutes apart");
@@ -419,10 +428,10 @@ test("version-2 failures are looked up once more with attempts from 0, earlier n
   const memory = memoryStore(v2);
   await runProtectedLookups({ subs, historyIds: new Set(), notBeforeMs, now: NOW, trpcGetImpl: fake.impl, backfill: 1, maxLookups: 2, store: memory.store });
   const byId = Object.fromEntries(memory.saved.map((record) => [record.requestId, record]));
-  assert.equal(byId["req-v3"].version, 3);
+  assert.equal(byId["req-v3"].version, PROTECTED_LOOKUP_VERSION);
   assert.equal(byId["req-v3"].attempts, 1, "attempts counted from 0");
   assert.equal(byId["req-v3"].status, "not_found");
-  assert.equal(byId["req-early"].version, 3);
+  assert.equal(byId["req-early"].version, PROTECTED_LOOKUP_VERSION);
   // Measured once: the earlier note no longer takes a backfill slot, and the
   // new one waits its ten minutes.
   assert.deepEqual(ids(protectedLookupQueue({ subs, historyIds: new Set(), lookups: byId, notBeforeMs, now: NOW + 60_000, backfill: 1 })), []);
@@ -430,13 +439,13 @@ test("version-2 failures are looked up once more with attempts from 0, earlier n
   const refused = Object.assign(new Error("cap"), { code: "PARAFORM_REQUEST_LANES_COOLING_DOWN" });
   const throttledStore = memoryStore(v2);
   await runProtectedLookups({ subs, historyIds: new Set(), notBeforeMs, now: NOW, trpcGetImpl: async () => { throw refused; }, store: throttledStore.store });
-  assert.equal(throttledStore.saved[0].version, 3);
+  assert.equal(throttledStore.saved[0].version, PROTECTED_LOOKUP_VERSION);
   assert.equal(throttledStore.saved[0].status, "throttled");
   assert.ok(!throttledStore.saved[0].attempts);
   // An earlier note whose v3 lookup was only refused is still owed its look.
   assert.equal(protectedLookupQueue({
     subs, historyIds: new Set(), notBeforeMs, now: NOW, backfill: 1,
-    lookups: { "req-v3": byId["req-v3"], "req-early": { requestId: "req-early", status: "throttled", throttled: 1, version: 3 } },
+    lookups: { "req-v3": byId["req-v3"], "req-early": { requestId: "req-early", status: "throttled", throttled: 1, version: PROTECTED_LOOKUP_VERSION } },
   }).length, 1);
 });
 
@@ -511,7 +520,7 @@ test("staff picks still pass every guard: window, skip list, send cutoff, read, 
 });
 
 test("every lookup status has a reason (resolved has none)", () => {
-  const statuses = ["resolved", "ambiguous", "too_many", "incomplete", "not_found", "role_inactive", "role_unreadable", "no_name", "error", "throttled"];
+  const statuses = ["resolved", "ambiguous", "background_conflict", "too_many", "incomplete", "not_found", "unconfirmed_name", "role_inactive", "role_unreadable", "no_name", "error", "throttled"];
   for (const status of statuses) {
     const reason = lookupReason({ status });
     if (status === "resolved") assert.equal(reason, null);
@@ -541,13 +550,14 @@ test("review fix: a Paraform name is cleaned like the note's, so a suffixed name
   assert.equal(found.candidateUserId, "cu-1");
 });
 
-test("review fix: over the namesake cap a single row holder is held, not resolved, whatever the other namesakes' applications say", async () => {
+test("over the namesake cap a single row holder resolves (v4; held in v3), and read namesakes with the role still make it ambiguous", async () => {
   const people = [1, 2, 3, 4, 5, 6].map((n) => person(`p${n}`, "Avery Quill", n === 1 ? "recent" : null));
   const apps = { p2: [{ role_id: ROLE, created_at: "2026-11-04T18:00:00Z" }] };
   const many = await lookupProtectedSub(note("Avery Quill"), { trpcGetImpl: fakeParaform({ people, apps, honourRoles: false }).impl, now: NOW });
-  assert.equal(many.status, "too_many");
-  assert.equal(many.candidateUserId, undefined);
-  assert.equal(many.options[0].candidateUserId, "p1", "the row holder is offered first");
+  // v4 (David's rules 2 and 4): the unread namesakes do not hold it.
+  assert.equal(many.status, "resolved");
+  assert.equal(many.candidateUserId, "p1");
+  assert.equal(many.options[0].candidateUserId, "p1", "the row holder is listed first");
   // Three namesakes with the same facts: read and held too.
   const few = await lookupProtectedSub(note("Avery Quill"), { trpcGetImpl: fakeParaform({ people: people.slice(0, 3), apps, honourRoles: false }).impl, now: NOW });
   assert.equal(few.status, "ambiguous");
@@ -555,12 +565,24 @@ test("review fix: over the namesake cap a single row holder is held, not resolve
 
 test("review fix: the role-scoped search's one holder is not the answer while another person on the role applied near the note", async () => {
   const people = [person("cu-1", "Avery Quill", "recent"), person("cu-2", "Avery Quill", "old")];
-  const apps = { "cu-2": [{ id: "ctar-v3", role_id: ROLE, created_at: "2026-11-06T17:54:00Z" }] };
+  // v4 review fix (2026-11-07): this used to carry the note's own ctar id;
+  // that now names cu-2 outright (below), so a near-note application without
+  // it is what keeps two people on the role.
+  const apps = { "cu-2": [{ id: "ctar-other", role_id: ROLE, created_at: "2026-11-06T17:54:00Z" }] };
   for (const honourRoles of [true, false]) {
     const fake = fakeParaform({ people, apps, honourRoles });
     const record = await lookupProtectedSub(note("Avery Quill"), { trpcGetImpl: fake.impl, now: NOW });
     assert.equal(record.status, "ambiguous", `honourRoles ${honourRoles}`);
     assert.equal(fake.count(APPS), 1);
+  }
+  // The note's own id on cu-2's application: cu-2 is the person.
+  const ctarApps = { "cu-2": [{ id: "ctar-v3", role_id: ROLE, created_at: "2026-11-06T17:54:00Z" }] };
+  for (const honourRoles of [true, false]) {
+    const record = await lookupProtectedSub(note("Avery Quill"), { trpcGetImpl: fakeParaform({ people, apps: ctarApps, honourRoles }).impl, now: NOW });
+    assert.equal(record.status, "resolved", `honourRoles ${honourRoles}`);
+    assert.equal(record.candidateUserId, "cu-2");
+    assert.equal(record.confirmedBy, "ctar");
+    assert.equal(record.ctarMatch, true);
   }
   // The name search runs even when the scoped search found a holder, so a
   // compatible person the role filter left out is still seen.
@@ -585,20 +607,20 @@ test("review fix: a finished check resets the pacing count, refusals never end t
   const now = Date.parse("2026-11-07T18:00:00Z");
   const subs = new Map([["req-v3", note("Jane Doe")]]);
   const at = (hoursAgo) => new Date(now - hoursAgo * 3_600_000).toISOString();
-  const due = (record) => protectedLookupQueue({ subs, historyIds: new Set(), lookups: { "req-v3": { version: 3, ...record } }, notBeforeMs, now }).length === 1;
+  const due = (record) => protectedLookupQueue({ subs, historyIds: new Set(), lookups: { "req-v3": { version: PROTECTED_LOOKUP_VERSION, ...record } }, notBeforeMs, now }).length === 1;
   assert.equal(due({ status: "too_many", throttled: 12, checkedAt: at(50), lastTriedAt: at(1) }), false, "refusals spent: waits a day");
   assert.equal(due({ status: "too_many", throttled: 12, checkedAt: at(50), lastTriedAt: at(25) }), true, "then tried again");
   assert.equal(due({ status: "throttled", throttled: 12, lastTriedAt: at(25) }), true);
   // A finished check starts the count over.
   const fake = fakeParaform({ people: [person("cu-1", "Jane Doe")] });
-  const finished = await lookupProtectedSub(note("Jane Doe"), { trpcGetImpl: fake.impl, now: NOW, previous: { version: 3, status: "too_many", throttled: 11, attempts: 1 } });
+  const finished = await lookupProtectedSub(note("Jane Doe"), { trpcGetImpl: fake.impl, now: NOW, previous: { version: PROTECTED_LOOKUP_VERSION, status: "too_many", throttled: 11, attempts: 1 } });
   assert.equal(finished.throttled, 0);
   // A v2 record refused under v3 keeps its role, company and options.
   const memory = memoryStore({ "req-v3": { requestId: "req-v3", version: 2, status: "ambiguous", roleName: "Founding Engineer", companyName: "Acme", options: [{ candidateUserId: "cu-1" }] } });
   const refused = Object.assign(new Error("cap"), { code: "PARAFORM_REQUEST_LANES_RATE_LIMITED" });
   await runProtectedLookups({ subs: new Map([["req-v3", note("Jane Doe")]]), historyIds: new Set(), notBeforeMs: Date.parse("2026-11-06T00:00:00Z"), now: NOW, trpcGetImpl: async () => { throw refused; }, store: memory.store });
   assert.equal(memory.saved[0].status, "throttled");
-  assert.equal(memory.saved[0].version, 3);
+  assert.equal(memory.saved[0].version, PROTECTED_LOOKUP_VERSION);
   assert.equal(memory.saved[0].roleName, "Founding Engineer");
   assert.equal(memory.saved[0].companyName, "Acme");
   assert.deepEqual(memory.saved[0].options, [{ candidateUserId: "cu-1" }]);
@@ -623,7 +645,7 @@ test("review fix: a note never looked up goes before re-checks and re-queues of 
   assert.deepEqual(ids, ["req-refused", "req-new", "req-old-2", "req-old-3", "req-old-4"]);
 });
 
-test("review fix: a send pick makes no row over a closed or unreadable role or a lookup naming someone else, and says why", () => {
+test("review fix: a send pick makes no row over an unreadable role or a lookup naming someone else, and says why; a closed role sends (v4)", () => {
   const notBeforeMs = Date.parse("2026-11-06T00:00:00Z");
   const sub = note("Trish J.");
   const subs = new Map([[sub.requestId, sub]]);
@@ -631,11 +653,12 @@ test("review fix: a send pick makes no row over a closed or unreadable role or a
   const rows = (lookup) => syntheticProtectedRequests({ subs, lookups: { [sub.requestId]: lookup }, picks: { [sub.requestId]: pick }, historyIds: new Set(), notBeforeMs, now: NOW });
   const base = { status: "ambiguous", roleName: "Founding Engineer", companyName: "Acme" };
   assert.equal(rows(base).length, 1);
-  assert.deepEqual(rows({ ...base, status: "role_inactive", roleStatus: "CLOSED" }), []);
+  // v4 (David's rule 3): a closed role still sends (v3 made no row).
+  assert.equal(rows({ ...base, status: "role_inactive", roleStatus: "CLOSED" }).length, 1);
   assert.deepEqual(rows({ ...base, status: "role_unreadable" }), []);
   assert.deepEqual(rows({ ...base, status: "resolved", candidateUserId: "cu-a" }), []);
   assert.equal(rows({ ...base, status: "resolved", candidateUserId: "cu-b" }).length, 1);
-  assert.match(pickLookupProblem({ ...base, status: "role_inactive", roleStatus: "CLOSED" }, pick), /CLOSED/);
+  assert.equal(pickLookupProblem({ ...base, status: "role_inactive", roleStatus: "CLOSED" }, pick), null);
   assert.equal(pickLookupProblem(base, pick), null);
   const states = [{ candidateUserId: "cu-b", matches: { other: { requestId: "other", roleId: ROLE, sentAt: "2026-11-05T00:00:00Z" } } }];
   assert.match(protectedPickBlocked({ sub, lookup: base, pick, states }), /already emailed about this role/);
@@ -714,7 +737,8 @@ test("second review: a lookup never saves over a staff pick made after the tick 
 // 2026-11-06: Conor's notes carry the full name, but Paraform shows about 13%
 // of its own people as "First L.". Such a row fits the note, is found by the
 // "<first> <initial>" search, and resolves on its own only when the person's
-// LinkedIn handle spells the note's surname.
+// LinkedIn handle spells the note's surname. v4 (2026-11-07): the handle no
+// longer gates a lone role holder; nameFullyConfirmed is kept as a measure.
 test("a Paraform name cut to an initial fits the full note name, and needs the LinkedIn handle to resolve", () => {
   assert.equal(compatibleName("Avery Quillon", "Avery Q."), true);
   assert.equal(compatibleName("Avery Quillon", "Avery R."), false);
@@ -734,13 +758,14 @@ test("a person Paraform shows as First L. is found by the short-form search", as
   assert.equal(resolved.status, "resolved");
   assert.equal(resolved.candidateUserId, "cu-q");
   assert.equal(resolved.shortFormSearch, "done");
-  // Handle does not spell it: held, the cut-short person offered first.
+  // Handle does not spell it: v3 held it (unconfirmed_name); v4 resolves
+  // the one person with the role (David's rule 2).
   const unspelled = fakeParaform({ people: [short("aq-1988"), person("cu-x", "Avery Quist")], honourRoles: false });
   const held = await lookupProtectedSub(note("Avery Quillon"), { trpcGetImpl: unspelled.impl, now: NOW });
-  assert.equal(held.status, "unconfirmed_name");
-  assert.equal(held.candidateUserId, undefined);
+  assert.equal(held.status, "resolved");
+  assert.equal(held.candidateUserId, "cu-q");
   assert.equal(held.options[0].candidateUserId, "cu-q");
-  assert.match(lookupReason(held), /only as an initial/);
+  assert.match(lookupReason({ status: "unconfirmed_name" }), /only as an initial/, "older records keep their reason");
   // Two cut-short people on the role: ambiguous.
   const twin = fakeParaform({ people: [short("avery-quillon-1"), { ...person("cu-q2", "Avery Q.", "recent"), linkedin_user: "avery-q-2" }], honourRoles: false });
   assert.equal((await lookupProtectedSub(note("Avery Quillon"), { trpcGetImpl: twin.impl, now: NOW })).status, "ambiguous");
@@ -780,7 +805,7 @@ test("the short-form search never takes reads the full-name namesakes need", asy
   assert.equal(record.shortFormSearch, "skipped");
 });
 
-test("a cut-short holder found by an unfinished short-form search is held", async () => {
+test("a cut-short holder found by an unfinished short-form search is held, unless the background names them", async () => {
   const crowd = Array.from({ length: 140 }, (_, n) => person(`f-${n}`, `Mira S${String.fromCharCode(97 + (n % 26))}x${n}`));
   const people = [
     { ...person("cu-a", "Mira S.", "recent"), linkedin_user: "mirasmithson" },
@@ -788,17 +813,40 @@ test("a cut-short holder found by an unfinished short-form search is held", asyn
     { ...person("cu-b", "Mira S.", "recent"), linkedin_user: "mira-77" },
   ];
   const record = await lookupProtectedSub(note("Mira Smith"), { trpcGetImpl: fakeParaform({ people, honourRoles: false }).impl, now: NOW });
+  // v4 review fix (2026-11-07): a second cut-short person with the role sits
+  // past the short-form search's page cap, so the one seen is not the answer
+  // ("incomplete", as v3 held it). With the role-scoped search honoured,
+  // both are seen and it is ambiguous.
   assert.notEqual(record.status, "resolved");
+  assert.equal(record.status, "incomplete");
+  assert.equal(record.shortFormSearch, "unfinished");
+  // The note's background naming cu-a's employer settles it.
+  const named = people.map((row) => (row.id === "cu-a" ? { ...row, experiences: [{ company_name: "Globex" }] } : row));
+  const confirmed = await lookupProtectedSub(note("Mira Smith", { fitText: "Led payments at Globex for five years." }), { trpcGetImpl: fakeParaform({ people: named, honourRoles: false }).impl, now: NOW });
+  assert.equal(confirmed.status, "resolved");
+  assert.equal(confirmed.candidateUserId, "cu-a");
+  assert.equal(confirmed.confirmedBy, "role+background");
+  const scoped = await lookupProtectedSub(note("Mira Smith"), { trpcGetImpl: fakeParaform({ people }).impl, now: NOW });
+  assert.equal(scoped.status, "ambiguous");
 });
 
-test("a cut-short holder is held while another cut-short namesake is unread, and a handle must spell the surname as a word", async () => {
+test("a cut-short holder's unread cut-short namesakes are read with the budget left (v4), and a handle must spell the surname as a word", async () => {
   const people = [
     { ...person("cu-a", "Ray L.", "recent"), linkedin_user: "raylinden" },
     { ...person("cu-b", "Ray L."), linkedin_user: "ray-l-1" },
   ];
   const fake = fakeParaform({ people, apps: { "cu-b": [{ role_id: ROLE, id: "ctar-v3", created_at: RECENT }] } });
   const record = await lookupProtectedSub(note("Ray Lin"), { trpcGetImpl: fake.impl, now: NOW });
-  assert.equal(record.status, "unconfirmed_name");
+  // v4: cu-b's applications are read (the budget had room) and show the
+  // note's own id, which names cu-b outright (v4 review fix, 2026-11-07;
+  // v3: unconfirmed_name).
+  assert.equal(record.status, "resolved");
+  assert.equal(record.candidateUserId, "cu-b");
+  assert.equal(record.confirmedBy, "ctar");
+  assert.equal(record.cutShortRead, 1);
+  // Near the note but without the note's id: two people have the role.
+  const near = fakeParaform({ people, apps: { "cu-b": [{ role_id: ROLE, id: "ctar-other", created_at: RECENT }] } });
+  assert.equal((await lookupProtectedSub(note("Ray Lin"), { trpcGetImpl: near.impl, now: NOW })).status, "ambiguous");
   assert.equal(nameFullyConfirmed("Ray Lin", "Ray L.", "raylinden"), false);
   assert.equal(nameFullyConfirmed("Ray Lin", "Ray L.", "ray-lin-4"), true);
   assert.equal(nameFullyConfirmed("Avery Quillon", "Avery Q.", "averyquillon88"), true);

@@ -21,7 +21,7 @@
 // protected sub but carries no such link posts one Slack line instead of being
 // dropped; a protected sub nobody emailed within an hour posts one Slack line.
 
-import { lookupReason, protectedPickBlocked } from "./outreach-protected-lookup.mjs";
+import { lookupReason, PROTECTED_FIT_TEXT_MAX_TRIES, protectedPickBlocked } from "./outreach-protected-lookup.mjs";
 import {
   acquireProtectedScanSlot,
   claimProtectedMeta,
@@ -151,6 +151,47 @@ export function paraformSender(message) {
   return /^[^@\s]+@paraform\.com$/i.test(from) ? from.toLowerCase() : null;
 }
 
+// The note's "Why I think it fits:" paragraph, which names the person's past
+// employers (v4 lookup, 2026-11-07: David's rule that Conor's background
+// identifies the person). Only that paragraph: the rest of the note names
+// the hiring company and Paraform, so a note without the marker gives "".
+// HTML tags and links go, whitespace is collapsed, at most 1200 characters.
+const FIT_TEXT_MAX = 1200;
+const FIT_START = /why i think (?:it|they|he|she) fits?[*_\s]*:/i;
+const FIT_END = /[*_\s]*why the role is worth/i;
+
+function htmlToText(value) {
+  return String(value ?? "")
+    .replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&(rsquo|lsquo|#8217|#8216|#39|apos);/gi, "'")
+    .replace(/&(rdquo|ldquo|quot|#8220|#8221);/gi, '"')
+    .replace(/&(mdash|ndash|#8212|#8211);/gi, "-")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&amp;/gi, "&");
+}
+
+export function protectedFitText(body) {
+  const text = htmlToText(body);
+  const start = text.match(FIT_START);
+  if (!start) return "";
+  const rest = text.slice(start.index + start[0].length);
+  const end = rest.search(FIT_END);
+  return (end >= 0 ? rest.slice(0, end) : rest.slice(0, FIT_TEXT_MAX))
+    // A link goes; punctuation closing the sentence after it stays.
+    .replace(/<?\b(?:https?:\/\/|www\.)[^\s<>]+>?/gi, (url) => ` ${url.match(/[).,;:!?'"]+$/)?.[0] || ""}`)
+    .replace(/\*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, FIT_TEXT_MAX)
+    .trim();
+}
+
 // Only a subject that names a protected sub makes a link-less note worth a
 // page; "protected submission" in Paraform's own mail bodies does not.
 const MENTIONS_PROTECTED = /protected sub\b/i;
@@ -175,10 +216,12 @@ export function parseProtectedNote(message, { threadId = null } = {}) {
   // The subject's name belongs to the note's request only when it names one.
   const names = links.length === 1 ? parseProtectedSubject(subject) : {};
   const internal = Number(message?.internalDate);
+  const fitText = protectedFitText(body);
   const records = links.map((link) => ({
     ...link,
     candidateName: names.candidateName || null,
     companyName: names.companyName || null,
+    fitText,
     sender,
     subject,
     noteMessageId: clean(message?.id) || null,
@@ -208,6 +251,10 @@ export async function scanProtectedNotes({
   // A burst (Paraform sends about 20 in a morning) is read over a few scans
   // rather than in one tick.
   maxReads = 25,
+  // The lookup's window (PARAAI_PROTECTED_SUBS_WINDOW_DAYS, 1 to 21 days):
+  // the fitText backfill reads every note the lookup queue would wait on
+  // (2026-11-07 review: a fixed week left older notes deferred for good).
+  windowMs = PROTECTED_WATCH_WINDOW_MS,
 } = {}) {
   const s = {
     acquireSlot: acquireProtectedScanSlot,
@@ -256,6 +303,42 @@ export async function scanProtectedNotes({
   }
   // Seeded once the backlog has been read through, so no old note pages.
   if (!seeded && !summary.capped) await s.claimMeta("seeded").catch(() => false);
+  // v4 lookup (2026-11-07): notes stored before the background was kept get
+  // it read from their note, with the reads this scan has left, closest to
+  // expiring first. A failed read counts a try on the note and is tried
+  // again next scan; after PROTECTED_FIT_TEXT_MAX_TRIES the lookup goes on
+  // without the background.
+  const backfill = [...existing.values()]
+    .filter((sub) => {
+      const receivedMs = Date.parse(clean(sub?.receivedAt));
+      return sub?.fitText === undefined && clean(sub?.noteMessageId)
+        && Number(sub?.fitTextTries || 0) < PROTECTED_FIT_TEXT_MAX_TRIES
+        && Number.isFinite(receivedMs) && receivedMs >= now - (Number(windowMs) > 0 ? Number(windowMs) : PROTECTED_WATCH_WINDOW_MS);
+    })
+    .sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
+  const fetched = new Map();
+  for (const sub of backfill) {
+    const messageId = clean(sub.noteMessageId);
+    if (!fetched.has(messageId)) {
+      if (reads >= maxReads) { summary.fitTextCapped = true; break; }
+      reads += 1;
+      fetched.set(messageId, await Promise.resolve()
+        .then(() => getMessageImpl(mailbox, messageId))
+        .then((message) => {
+          if (!message) throw new Error("note message not found");
+          return protectedFitText(messageText(message));
+        })
+        .catch(() => null));
+    }
+    const fitText = fetched.get(messageId);
+    const updated = fitText == null
+      ? { ...sub, fitTextTries: Number(sub.fitTextTries || 0) + 1 }
+      : { ...sub, fitText };
+    await s.save(updated).catch(() => {});
+    existing.set(sub.requestId, updated);
+    if (fitText == null) summary.fitTextFailed = (summary.fitTextFailed || 0) + 1;
+    else summary.fitTextRead = (summary.fitTextRead || 0) + 1;
+  }
   return { subs: existing, ...summary };
 
   async function scanOneMessage(messageId, ref) {
