@@ -9,6 +9,7 @@ import {
   invalidateParaformSessionCache,
   notifyParaformSessionRejected,
   paraformCookieValue,
+  paraformSessionStoreStatus,
   resolvedParaformSession,
 } from "../../_lib/paraform-session-store.mjs";
 
@@ -74,7 +75,8 @@ export function paraAIConfig() {
 // Cookie resolution lives in the shared store
 // (api/_lib/paraform-session-store.mjs), used by both this file and
 // api/seq/_lib/core.mjs — one process cache, one ordered candidate list
-// (shared generational/chunked n8n variables, then the 'david' account
+// (PARAFORM_SESSION_STORE picks n8n variables, the default, or the Postgres
+// session store; shared generational/chunked rows, then the 'david' account
 // generational namespace, then the static env value last — reordered only by
 // an explicit PARAFORM_SESSION_ACCOUNT) instead of this file's previous
 // env-first / legacy-two-chunk-only fallback. clearCookieCache() is kept as
@@ -87,6 +89,11 @@ export async function paraformCookie() {
   await ensureParaformSession();
   const value = paraformCookieValue();
   if (!value) {
+    // pg mode is fail-closed (no static-env fallback), so name the store and why.
+    const store = paraformSessionStoreStatus();
+    if (store.mode !== "n8n") {
+      throw new Error(`no Paraform session cookie from the ${store.mode} session store${store.lastError ? ` (${store.lastError.code})` : ""}`);
+    }
     throw new Error("no Paraform session cookie or n8n variable fallback configured");
   }
   return value;
