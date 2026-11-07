@@ -95,6 +95,11 @@ function optionsOf(lookup) {
     // namesakes, an unfinished search): the page says "role not checked",
     // not "not on this role" (2026-11-06 review).
     checked: option?.checked !== false,
+    // v4 (2026-11-07): the employers on this person's record that the note's
+    // background names, so staff see who worked where. Only when there are any.
+    ...(Array.isArray(option?.backgroundHits) && option.backgroundHits.length
+      ? { backgroundHits: option.backgroundHits.map((name) => clean(name)).filter(Boolean).slice(0, 5) }
+      : {}),
   })).filter((option) => option.candidateUserId);
 }
 
@@ -223,7 +228,8 @@ export async function pickProtectedSub({ actor, body = {}, config, now = Date.no
       ? "protected_sub_resolved_automatically"
       : "protected_sub_resolved_elsewhere");
   }
-  if (lookup?.status === "role_inactive") return refuse(409, "role_not_active");
+  // A role on hold, paused or closed no longer refuses a pick (v4,
+  // 2026-11-07, David's rule 3: those notes still get the email).
   if (!candidateUserId) return refuse(400, "candidateUserId_required");
   const option = optionsOf(lookup).find((row) => row.candidateUserId === candidateUserId);
   if (!option) return refuse(409, "candidate_not_an_option");

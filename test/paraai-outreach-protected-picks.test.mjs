@@ -73,6 +73,7 @@ const {
 const { outreachConfig, runOutreachTick } = await import("../api/paraai/_lib/outreach.mjs");
 const { watchUnsentProtectedSubs, PROTECTED_PICKS_PAGE_URL } = await import("../api/paraai/_lib/outreach-protected.mjs");
 const { default: handler } = await import("../api/paraai/outreach.mjs");
+const { PROTECTED_LOOKUP_VERSION } = await import("../api/paraai/_lib/outreach-protected-lookup.mjs");
 
 test.beforeEach(() => {
   kvStore.clear();
@@ -155,7 +156,7 @@ const note = (requestId, extra = {}) => ({
 });
 const heldLookup = (requestId, extra = {}) => ({
   requestId,
-  version: 3,
+  version: PROTECTED_LOOKUP_VERSION,
   status: "ambiguous",
   nameForm: "initial",
   roleName: "Staff Engineer",
@@ -306,10 +307,12 @@ test("a pick is refused once the note was emailed, already picked, or matched au
     await run({ lookups: { "req-held": heldLookup("req-held", { status: "resolved", candidateUserId: "cu-trish" }) } }),
     [409, "protected_sub_resolved_automatically"],
   );
-  assert.deepEqual(
-    await run({ lookups: { "req-held": heldLookup("req-held", { status: "role_inactive" }) } }),
-    [409, "role_not_active"],
-  );
+  // v4 (2026-11-07, David's rule 3): a closed role no longer refuses a pick
+  // (v3 answered 409 role_not_active); the pick is saved.
+  const closed = memoryStore({ subs: [note("req-held")], lookups: { "req-held": heldLookup("req-held", { status: "role_inactive", roleStatus: "CLOSED" }) } });
+  const saved = await pickProtectedSub({ actor: "staff@raydar.xyz", body: good, config: CONFIG, now: NOW, store: closed.store });
+  assert.equal(saved.status, 200);
+  assert.equal(closed.saved.length, 1);
 });
 
 test("two people picking at once: only the first is saved", async () => {

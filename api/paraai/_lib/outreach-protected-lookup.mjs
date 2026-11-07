@@ -19,6 +19,31 @@
 // has no id read for these requests (application.getQuickSubmitFormData
 // returned nothing, 2026-11-06), so identity is still name plus role.
 //
+// Lookup v4 (2026-11-07, David's rules): of 56 notes, 11 were held. In all 6
+// held with options, option 0 was the ONLY namesake with the note's role on
+// their record, held only because Paraform showed the surname cut short
+// ("Avery Q.") or because too many namesakes could not all be
+// application-read; the other 5 were stopped on a PAUSED or closed role.
+// David's rules, binding: (1) the note's "Why I think it fits" background
+// identifies the person: if only one namesake worked at an employer the note
+// names, that is the person; (2) the person who has the role attached is
+// likely the person; (3) a role on hold, paused or closed still gets the
+// email; (4) these situations are never held for David to pick. So v4:
+//   - one person with the role (row link or a near-note application)
+//     resolves, whatever their surname looks like and however many namesakes
+//     were left unread, unless the background names another namesake's
+//     employer and not theirs ("background_conflict", held);
+//   - several with the role: the one whose employers the note names, if
+//     exactly one namesake matches; otherwise "ambiguous";
+//   - nobody with the role: the one namesake whose employers the note names,
+//     when the name search finished ("background_only"); several: ambiguous;
+//   - a role that is not ACTIVE is recorded (roleStatus) and the lookup goes
+//     on; a resolved note on it sends.
+// The background is matched by employer name (employersOf, backgroundHits:
+// conservative whole-phrase, capitalised matches, the role's own company and
+// Paraform excluded). Still held: ambiguous, background_conflict, too_many,
+// incomplete, not_found (offered on protected-subs.html).
+//
 // A resolved note (or a staff "send" pick) becomes a request row of the tick
 // (`synthetic: true`), so the normal send path applies every guard. Such a
 // row never gets Paraform's reached-out marker, never reaches the digest
@@ -71,11 +96,18 @@ export const PROTECTED_LOOKUP_MAX_READS = 7;
 const APPLICATION_BEFORE_NOTE_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLICATION_AFTER_NOTE_MS = 60 * 60 * 1000;
 // Bumped when the lookup changes, so the earlier notes are measured again.
-export const PROTECTED_LOOKUP_VERSION = 3;
+// v4 (2026-11-07): background match, one role holder resolves, closed roles go on.
+export const PROTECTED_LOOKUP_VERSION = 4;
+// A note whose "Why I think it fits" text was not read yet (stored before v4)
+// waits for the scan to read it, this many failed reads at most
+// (outreach-protected.mjs backfills it), so the first v4 lookup sees it.
+export const PROTECTED_FIT_TEXT_MAX_TRIES = 3;
 // A pacing refusal is retried later without using an attempt, this many times.
 const MAX_THROTTLED = 12;
-// Not resolved by v3, checked again once a day rather than retried soon.
-const DAILY_STATUSES = new Set(["ambiguous", "too_many", "incomplete", "role_inactive", "unconfirmed_name"]);
+// Not resolved, checked again once a day rather than retried soon. v4 no
+// longer makes role_inactive or unconfirmed_name (2026-11-07); older records
+// with them are re-run once as an older version.
+const DAILY_STATUSES = new Set(["ambiguous", "background_conflict", "too_many", "incomplete"]);
 
 // The same refusals that stop the tick's other Paraform work.
 const STOP_CODES = new Set([
@@ -226,6 +258,141 @@ function crmLinkedin(item) {
   return clean(item?.linkedin_user || person.linkedin_user) || null;
 }
 
+// ── Background match (v4, 2026-11-07) ───────────────────────────────────────
+// Conor's notes say where the person worked ("Why I think it fits: senior
+// backend engineer on Apple's iMessage ... Oracle Cloud storage APIs"), and
+// Paraform's CRM rows list each person's experiences (99% of rows). A
+// namesake whose employer the note names is the person (David's rule 1).
+// Kept conservative: an employer counts only as a whole phrase written with
+// a capital (or a digit) in the note, so "block" or "meta" as ordinary words
+// never match a company called Block or Meta.
+
+// Accents off, case kept ("Zürich" is "Zurich", "Łódź" is "Lodz").
+function foldKeepCase(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[łøđħıßæœþðŁØĐĦÆŒÞÐ]/g, (letter) => {
+      const lower = letter.toLowerCase();
+      const folded = LETTER_FOLD[lower] || lower;
+      return letter === lower ? folded : folded.charAt(0).toUpperCase() + folded.slice(1);
+    });
+}
+
+// Not an employer anyone can be told apart by.
+const GENERIC_EMPLOYERS = new Set([
+  "stealth", "stealth mode", "stealth startup", "self employed", "freelance", "freelancer",
+  "independent", "independent consultant", "consultant", "confidential", "various", "n a", "none",
+  "startup", "unemployed", "open to work", "career break",
+]);
+// Legal suffixes, stripped (repeatedly) from the end of a name for matching.
+const LEGAL_SUFFIX = /[\s,]+(?:inc|llc|l\.l\.c|ltd|limited|corp|corporation|co|gmbh|plc|s\.?\s?a)\.?\s*$/i;
+// The first-word rule below never uses these: words that start sentences or
+// job titles in a note, or that many employers share.
+const FIRST_WORD_STOP = new Set([
+  "about", "after", "american", "before", "building", "capital", "central", "cloud", "college", "consulting",
+  "currently", "digital", "during", "earlier", "engineering", "executive", "financial", "first", "founding",
+  "general", "global", "group", "health", "independent", "institute", "international", "media", "mobile",
+  "national", "network", "networks", "north", "partners", "platform", "previously", "principal", "product",
+  "royal", "school", "senior", "services", "smart", "software", "solutions", "south", "staff", "state",
+  "stealth", "strategic", "studio", "systems", "technologies", "technology", "united", "university",
+  "ventures", "where", "which", "while", "world",
+]);
+
+const letterCount = (value) => value.replace(/[^\p{L}]/gu, "").length;
+
+// The ways an employer name can be written in a note, as lowercase token
+// lists: the name without legal suffixes and without a parenthesised part
+// (main), then each parenthesised part ("Meta (Facebook)"). Generic names
+// and names under 3 letters give nothing.
+function employerForms(name) {
+  const folded = foldKeepCase(clean(name));
+  const parts = [{ text: folded.replace(/\([^)]*\)/g, " "), main: true }];
+  for (const match of folded.matchAll(/\(([^)]*)\)/g)) parts.push({ text: match[1], main: false });
+  const forms = [];
+  for (const part of parts) {
+    let text = part.text.trim();
+    for (let next = text.replace(LEGAL_SUFFIX, ""); next !== text && next.trim(); next = text.replace(LEGAL_SUFFIX, "")) text = next.trim();
+    const tokens = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const key = tokens.join(" ");
+    if (!tokens.length || letterCount(key) < 3 || GENERIC_EMPLOYERS.has(key)) continue;
+    forms.push({ tokens, key, main: part.main });
+  }
+  return forms;
+}
+
+function experienceEmployer(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  const company = entry.company;
+  return clean(
+    entry.company_name
+    || (company && typeof company === "object" ? company.name : company)
+    || entry.companyName
+    || entry.name,
+  );
+}
+
+// Every distinct employer on a CRM row's experiences (on the row, or under
+// row.candidate), as written on Paraform; generic ones left out.
+export function employersOf(item) {
+  const lists = [item?.experiences, item?.candidate?.experiences].filter(Array.isArray);
+  const seen = new Set();
+  const names = [];
+  for (const entry of lists.flat()) {
+    const name = experienceEmployer(entry);
+    const forms = employerForms(name);
+    if (!forms.length) continue;
+    const key = forms.map((form) => form.key).join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Does the (folded) note text name these tokens as a whole phrase, starting
+// with a capital or a digit? A possessive "'s" may follow ("Apple's").
+function phraseInText(text, tokens) {
+  const body = tokens.map(escapeRegex).join("[^\\p{L}\\p{N}]{1,3}");
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}])(${body})(?:['’]s)?(?![\\p{L}\\p{N}])`, "giu");
+  for (const match of text.matchAll(pattern)) {
+    if (/^[\p{Lu}\p{N}]/u.test(match[1])) return true;
+  }
+  return false;
+}
+
+// The employers on this row that the note's background names. The role's
+// own company and Paraform never count (`exclude`, compared without case,
+// accents or legal suffixes). An employer counts when its name (or a
+// parenthesised alias) is in the text as a whole, capitalised phrase; or,
+// for a name of more than one word, when its first word alone is, provided
+// that word has at least 5 letters and is not a common word that starts
+// sentences or titles ("Oracle Cloud Infrastructure" counts for "Oracle
+// Cloud storage APIs"; "Strategic Education" never counts for "Strategic
+// Account Executive").
+export function backgroundHits(item, fitText, { exclude = [] } = {}) {
+  const text = foldKeepCase(fitText);
+  if (!text.trim()) return [];
+  const excluded = new Set(["paraform", ...exclude.flatMap((name) => employerForms(name).map((form) => form.key))]);
+  const hits = [];
+  for (const name of employersOf(item)) {
+    const forms = employerForms(name);
+    if (forms.some((form) => excluded.has(form.key))) continue;
+    let hit = forms.some((form) => phraseInText(text, form.tokens));
+    const main = forms.find((form) => form.main);
+    if (!hit && main && main.tokens.length > 1) {
+      const first = main.tokens[0];
+      hit = letterCount(first) >= 5 && !FIRST_WORD_STOP.has(first) && !excluded.has(first) && phraseInText(text, [first]);
+    }
+    if (hit) hits.push(name);
+  }
+  return hits;
+}
+
 function applicationRoleId(row) {
   return clean(row?.role_id || row?.role?.id || row?.roleId);
 }
@@ -273,6 +440,15 @@ function applicationTimeMs(row) {
 function carriedLookup(previous) {
   if (!previous || previous.status === "resolved") return previous || null;
   return Number(previous.version || 1) < PROTECTED_LOOKUP_VERSION ? null : previous;
+}
+
+// A stored note whose "Why I think it fits" text has not been read yet
+// (undefined; "" means read and absent) and can still be: its note message
+// is known and fewer than PROTECTED_FIT_TEXT_MAX_TRIES reads failed.
+export function awaitingFitText(sub) {
+  return sub?.fitText === undefined
+    && Boolean(clean(sub?.noteMessageId))
+    && Number(sub?.fitTextTries || 0) < PROTECTED_FIT_TEXT_MAX_TRIES;
 }
 
 // Which subs to look up this tick: notes in the window (a week unless set)
@@ -327,6 +503,9 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
     if (skip?.has?.(sub.requestId)) continue;
     // Staff picked (or skipped) this note: never looked up again.
     if (picks?.[sub.requestId]) continue;
+    // v4 (2026-11-07): a note stored before its background was read waits
+    // for the scan to read it (a few tries), so its lookup can use it.
+    if (awaitingFitText(sub)) continue;
     const afterSwitchOn = notBeforeMs != null && receivedMs >= notBeforeMs;
     if (afterSwitchOn) {
       if (due(sub)) fresh.push(sub);
@@ -349,7 +528,9 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
   return [...fresh, ...earlier.slice(0, Math.max(0, backfill - earlierRecorded))];
 }
 
-// The people a lookup saw, role holders first, for staff to pick from.
+// The people a lookup saw, role holders first (then those whose employers
+// the note names), for staff to pick from. v4 adds `backgroundHits`: the
+// employers on the person's record that the note's background names.
 function lookupOptions(people) {
   const rank = (option) => (option.roleRecent ? 0 : option.roleOnRecord ? 1 : 2);
   return [...people.values()]
@@ -363,10 +544,13 @@ function lookupOptions(people) {
         roleRecent: Boolean(person.link?.recent) || Boolean(person.appConfirmed),
         roleAt: atMs != null ? iso(atMs) : null,
         checked: Boolean(person.link?.recent) || person.onRole != null,
+        ...(person.bg?.length ? { backgroundHits: person.bg } : {}),
       };
     })
     .map((option, index) => ({ option, index }))
-    .sort((a, b) => rank(a.option) - rank(b.option) || a.index - b.index)
+    .sort((a, b) => rank(a.option) - rank(b.option)
+      || Number(!a.option.backgroundHits) - Number(!b.option.backgroundHits)
+      || a.index - b.index)
     .slice(0, PROTECTED_LOOKUP_MAX_OPTIONS)
     .map(({ option }) => option);
 }
@@ -399,8 +583,9 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
   const companyName = clean(role?.company?.name ?? role?.company_name ?? role?.companyName) || clean(sub.companyName);
   const returnedId = clean(role?.id || role?.role_id || role?.roleId);
   if (!roleName || !companyName || returnedId !== base.roleId) return { ...base, reads, status: "role_unreadable" };
+  // v4 (2026-11-07, David's rule 3): a role on hold, paused or closed still
+  // gets the email, so its status is only recorded and the lookup goes on.
   const roleStatus = clean(role?.status).toUpperCase();
-  if (roleStatus && roleStatus !== "ACTIVE") return { ...base, roleName, companyName, roleStatus, reads, status: "role_inactive" };
 
   const receivedMs = Date.parse(clean(sub.receivedAt));
   const nearNote = (at) => Number.isFinite(receivedMs) && at != null
@@ -424,14 +609,32 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
     people.set(candidateUserId, { candidateUserId, item, link: rowLink(item) });
     return true;
   };
-  const evidence = { roleName, companyName, roleStatus: roleStatus || null, nameForm: parsed.nameForm };
+  // The note's background (v4): "" when the note has none, so nobody matches.
+  const fitText = clean(sub.fitText);
+  const bgExclude = [companyName, clean(sub.companyName)].filter(Boolean);
+  const hitsOf = (person) => {
+    if (!person.bg) person.bg = fitText ? backgroundHits(person.item, fitText, { exclude: bgExclude }) : [];
+    return person.bg;
+  };
+  // Every namesake seen so far whose employers the note names.
+  const bgPeople = () => [...people.values()].filter((person) => hitsOf(person).length);
+  const evidence = {
+    roleName,
+    companyName,
+    roleStatus: roleStatus || null,
+    nameForm: parsed.nameForm,
+    background: fitText ? "read" : sub.fitText === undefined ? "missing" : "none",
+  };
   const chosen = (person, via) => ({
     candidateUserId: person.candidateUserId,
     linkedinUser: crmLinkedin(person.item),
     ctarMatch: Boolean(person.ctarMatch),
     via,
   });
-  const finish = (status, extra = {}) => ({ ...base, ...evidence, reads, ...extra, status, options: lookupOptions(people) });
+  const finish = (status, extra = {}) => {
+    const bgMatches = bgPeople().length;
+    return { ...base, ...evidence, reads, bgMatches, ...extra, status, options: lookupOptions(people) };
+  };
 
   // 1. Role-scoped search by first name. Paraform has not been measured
   // honouring filters.roles here (2026-11-06), so it counts only when every
@@ -463,13 +666,15 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
   }
   Object.assign(evidence, { roleSearch, roleSearchPages });
   if (roleSearch === "scoped" || roleSearch === "unfinished") for (const item of scopedRows) addPerson(item);
-  // Two recent holders on the role is already a hold. One is never resolved
+  // Two recent holders on the role is already a hold, unless the note's
+  // background names exactly one of them (v4: the search goes on, and the
+  // rules below decide on every namesake). One is never resolved
   // here (2026-11-06 review): Paraform's handling of filters.roles is not
   // measured, and someone on the role with an older link may have applied
   // just now, so the name search and the applications reads below still run.
   if (roleSearch === "scoped") {
     const holders = [...people.values()].filter((person) => person.link?.recent);
-    if (holders.length > 1) {
+    if (holders.length > 1 && holders.filter((person) => hitsOf(person).length).length !== 1) {
       Object.assign(evidence, { nameMatches: people.size, confirmed: holders.length, crmRoleLinks: people.size, crmRolePath: holders[0]?.link.path || null });
       return finish("ambiguous");
     }
@@ -549,20 +754,57 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
   // not take applications reads or block a full-name match, so the extra
   // search never turns a note that resolved before into a hold (2026-11-06).
   const unchecked = all.filter((person) => !person.link?.recent && !cutShort(person));
-  const cutShortUnchecked = all.filter((person) => !person.link?.recent && cutShort(person)).length;
+  const cutShortUncheckedPeople = all.filter((person) => !person.link?.recent && cutShort(person));
+  const cutShortUnchecked = cutShortUncheckedPeople.length;
   if (cutShortUnchecked) evidence.cutShortUnchecked = cutShortUnchecked;
+
+  // 4. The decision, v4 (2026-11-07, David's rules; see the header).
+  // `holders` are the people with the role near the note: a recent CRM row
+  // link, or an application read near the note (or with the note's own id).
+  // `bg` are the namesakes whose employers the note's background names.
+  //   One holder: resolved ("role", or "role+background" when the note names
+  //     their employer), whatever their surname looks like and however many
+  //     namesakes were left unread; held as "background_conflict" only when
+  //     the note names another namesake's employer and not theirs.
+  //   Several holders: resolved on the one the note's background names, if
+  //     exactly one namesake matches it ("background"); else "ambiguous".
+  //   No holder: resolved on the one namesake the background names, the name
+  //     search having finished ("background_only", via "background"); two or
+  //     more: "ambiguous"; none: null, and the caller's status stands.
+  const decide = (holders, extra = {}) => {
+    const bg = bgPeople();
+    const only = bg.length === 1 ? bg[0] : null;
+    if (holders.length === 1) {
+      const [{ person, via }] = holders;
+      if (bg.length && !bg.includes(person)) return finish("background_conflict", extra);
+      return finish("resolved", { ...extra, ...chosen(person, via), confirmedBy: bg.includes(person) ? "role+background" : "role" });
+    }
+    if (holders.length > 1) {
+      const holder = only && holders.find((entry) => entry.person === only);
+      if (holder) return finish("resolved", { ...extra, ...chosen(holder.person, holder.via), confirmedBy: "background" });
+      return finish("ambiguous", extra);
+    }
+    if (only && complete) return finish("resolved", { ...extra, ...chosen(only, "background"), confirmedBy: "background_only" });
+    if (bg.length > 1) return finish("ambiguous", extra);
+    return null;
+  };
+
   const appsBudget = Math.max(0, Math.min(MAX_NAME_MATCHES, PROTECTED_LOOKUP_MAX_READS - reads));
   if (unchecked.length > appsBudget) {
-    // Namesakes whose applications cannot all be read: never resolved, even
-    // on one row holder (2026-11-06 review: an unread namesake may have the
-    // role in their applications). Held, the row holder offered first, so
-    // staff confirm it with one click.
+    // Namesakes whose applications cannot all be read. v3 held even one row
+    // holder here (an unread namesake might have the role in applications
+    // only); v4 decides on what is free to see, the row holders and the
+    // background, with no applications reads: one row holder resolves (rule
+    // 2) unless the background contradicts it, and with no row holder the
+    // one namesake the background names resolves (rule 1: the background
+    // beats a role link that might sit unread in someone's applications).
     const extra = { confirmed: rowHolders.length, namesakesUnchecked: unchecked.length };
-    if (rowHolders.length > 1) return finish("ambiguous", extra);
+    const decided = decide(rowHolders.map((person) => ({ person, via: "crm_row" })), extra);
+    if (decided) return decided;
     return finish("too_many", extra);
   }
   let onRoleRows = 0;
-  for (const person of unchecked) {
+  const readApplications = async (person) => {
     const rows = await read("candidateUser.getCandidateUserApplications", { candidate_user_id: person.candidateUserId });
     const onRole = (Array.isArray(rows) ? rows : []).filter((row) => applicationRoleId(row) === base.roleId);
     onRoleRows += onRole.length;
@@ -574,27 +816,28 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
     person.ctarMatch = exact;
     person.appConfirmed = exact || times.some(nearNote);
     person.appAtMs = times.length ? Math.max(...times) : null;
-  }
-  const confirmed = [
-    ...rowHolders.map((person) => chosen(person, "crm_row")),
-    ...unchecked.filter((person) => person.appConfirmed).map((person) => chosen(person, "application")),
+  };
+  for (const person of unchecked) await readApplications(person);
+  const holders = [
+    ...rowHolders.map((person) => ({ person, via: "crm_row" })),
+    ...unchecked.filter((person) => person.appConfirmed).map((person) => ({ person, via: "application" })),
   ];
-  Object.assign(evidence, { onRoleRows, confirmed: confirmed.length });
-  if (confirmed.length === 1) {
-    const person = people.get(confirmed[0].candidateUserId);
-    // A match on a cut-short name also needs the search that found it to
-    // have finished (or the role-scoped search), and no other cut-short
-    // namesake left unread, who could hold the role in applications only.
-    const cutShortMatch = person && cutShort(person);
-    const searchProved = roleSearch === "scoped" || shortFormSearch === "done";
-    if (!nameFullyConfirmed(parsed, crmName(person?.item), confirmed[0].linkedinUser)
-        || (cutShortMatch && (!searchProved || cutShortUnchecked > 0))) {
-      return finish("unconfirmed_name", { nameConfirm: "initial" });
+  // One holder whose surname Paraform cut short: any reads the budget has
+  // left go to the other cut-short namesakes not yet read, so a second person
+  // with the role there is seen (then rule 2 above, not a guess). Those the
+  // budget cannot reach do not hold the note (rule 1 of v4).
+  if (holders.length === 1 && cutShort(holders[0].person) && cutShortUnchecked) {
+    let cutShortRead = 0;
+    for (const person of cutShortUncheckedPeople) {
+      if (reads >= PROTECTED_LOOKUP_MAX_READS) break;
+      await readApplications(person);
+      cutShortRead += 1;
+      if (person.appConfirmed) holders.push({ person, via: "application" });
     }
-    return finish("resolved", confirmed[0]);
+    evidence.cutShortRead = cutShortRead;
   }
-  if (confirmed.length > 1) return finish("ambiguous");
-  return finish("not_found");
+  Object.assign(evidence, { onRoleRows, confirmed: holders.length });
+  return decide(holders) || finish("not_found");
 }
 
 // Looks up at most `maxLookups` notes (one by default: a lookup is up to
@@ -709,8 +952,8 @@ export function syntheticProtectedRequests({ subs, lookups = {}, historyIds, not
     const pick = picks?.[sub.requestId] || null;
     if (pick && (pick.action !== "send" || !clean(pick.candidateUserId))) continue;
     // A send pick is no looser than the pick check (2026-11-06 review): a
-    // role since read as closed or unreadable, or a lookup that now names
-    // someone else, means no row.
+    // role since read as unreadable, or a lookup that now names someone
+    // else, means no row (a closed role does not, v4).
     if (pick && pickLookupProblem(lookup, pick)) continue;
     if (!pick && lookup.status !== "resolved") continue;
     const candidateUserId = pick ? clean(pick.candidateUserId) : lookup.candidateUserId;
@@ -758,9 +1001,10 @@ export function syntheticProtectedRequests({ subs, lookups = {}, historyIds, not
 }
 
 // Why the lookup record stops a staff "send" pick, or null (2026-11-06 review).
+// A role on hold, paused or closed no longer stops one (v4, 2026-11-07,
+// David's rule 3: those notes still get the email).
 export function pickLookupProblem(lookup, pick) {
   if (!lookup) return "the note's lookup record is missing";
-  if (lookup.status === "role_inactive") return `Paraform shows the role as ${lookup.roleStatus || "not active"}`;
   if (lookup.status === "role_unreadable" || !clean(lookup.roleName) || !clean(lookup.companyName)) {
     return "the role could not be read on Paraform";
   }
@@ -818,9 +1062,11 @@ export function lookupReason(lookup) {
   switch (lookup?.status) {
     case "not_found": return `no one on Paraform by that name has this role on their record${initial}${held}`;
     case "ambiguous": return `more than one person on Paraform by that name has this role on their record${initial}${held}`;
+    case "background_conflict": return `the one person on Paraform by that name with this role on their record did not work at the employers the note names, while another person by that name did${held}`;
+    // Older lookups only (v3 and before); v4 decides these itself.
     case "unconfirmed_name": return `one person has this role on their record, but their last name is shown only as an initial, so it is not certain they are the person in the note${held}`;
     case "role_unreadable": return "the role in the note could not be read on Paraform";
-    case "role_inactive": return `Paraform shows the role as ${lookup.roleStatus || "not active"} (checked again daily)`;
+    case "role_inactive": return `an older lookup stopped because Paraform shows the role as ${lookup.roleStatus || "not active"}; it is looked up again and still sends`;
     case "too_many": return Number(lookup.confirmed || 0) > 0
       ? `too many people on Paraform share that name to check every one; one has this role on their CRM row (listed first), so confirm it${held}`
       : `too many people on Paraform share that name, and none has this role on their CRM row, to be sure who it is${held}`;
