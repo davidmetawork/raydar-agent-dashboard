@@ -54,6 +54,7 @@ const EVENT_TTL_SECONDS = 180 * 24 * 3600;
 //     in the main Raydar repo) by copying them into this dashboard's env.
 // See the PR body's "Docs follow-up" for what still needs confirming with
 // whoever owns the Scheduler webhook producer.
+const PRODUCTION_MONITOR_SOURCE = /^scheduler_monitor_v1\.[a-z0-9]+\.[a-f0-9]{12}$/u;
 const DEFAULT_TEST_SOURCE_ATTRIBUTIONS = "scheduler_test,scheduler_canary,cutover_canary";
 
 function parsedCsvSet(value) {
@@ -70,6 +71,12 @@ function isTestOrCanaryBooking(event, env = process.env) {
     env.RAYDAR_BOOKING_TEST_SOURCE_ATTRIBUTIONS ?? DEFAULT_TEST_SOURCE_ATTRIBUTIONS,
   );
   if (event.sourceAttribution && markers.has(event.sourceAttribution)) return true;
+  // The Scheduler's production book/verify/cancel monitor books with
+  // ?src=scheduler_monitor_v1.<lane>.<12 hex> (scheduler/lib/
+  // production-monitor-identity.mjs in the main repo). Its random suffix can
+  // never sit in the exact-match list above, so every canary cancel used to
+  // post "Raydar booking cancelled" to #paraform-actions about every 45 min.
+  if (PRODUCTION_MONITOR_SOURCE.test(event.sourceAttribution || "")) return true;
   const testBookingIds = parsedCsvSet(env.RAYDAR_BOOKING_TEST_BOOKING_IDS);
   if (testBookingIds.has(event.bookingId)) return true;
   return false;

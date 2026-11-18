@@ -434,6 +434,47 @@ test("a booking tagged with a reserved test/canary sourceAttribution is recorded
   assert.equal(writes.some((entry) => entry.value.state === "done" && entry.value.skippedTest), true);
 });
 
+test("a Scheduler production-monitor canary cancel is skipped and never alerts", async () => {
+  let alerts = 0;
+  let enqueueCalls = 0;
+  const event = booking({
+    event: "booking.cancelled",
+    eventId: "bevt_test_monitor_cancel",
+    status: "cancelled",
+    sourceAttribution: "scheduler_monitor_v1.agent.0123456789ab",
+  });
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(event),
+    handlerDeps({
+      enqueue: async () => { enqueueCalls++; },
+      alert: async () => { alerts++; },
+      alertAllowed: async () => true,
+    }),
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(payload.skippedTest, true);
+  assert.equal(enqueueCalls, 0);
+  assert.equal(alerts, 0);
+});
+
+test("a real cancel with a look-alike source still alerts", async () => {
+  let alerts = 0;
+  const event = booking({
+    event: "booking.cancelled",
+    eventId: "bevt_test_lookalike_cancel",
+    status: "cancelled",
+    sourceAttribution: "scheduler_monitor_v1.agent",
+  });
+  const response = await handleRaydarBookingWebhook(
+    signedRequest(event),
+    handlerDeps({ alert: async () => { alerts++; }, alertAllowed: async () => true }),
+  );
+  const payload = await response.json();
+  assert.notEqual(payload.skippedTest, true);
+  assert.equal(alerts, 1);
+});
+
 test("a booking whose id is in the configured test-booking-id allow-list is recorded but never enqueued", async () => {
   const prev = process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS;
   process.env.RAYDAR_BOOKING_TEST_BOOKING_IDS = "bk_other,bk_test_001";
