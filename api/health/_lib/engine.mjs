@@ -40,8 +40,14 @@ async function runHoldProbe(check) {
     startMs: (Math.floor(Date.now() / 1000) + 4 * 86400) * 1000 + 37000,
     browserKey: globalThis.crypto.randomUUID(),
   };
+  const describe = (e, withCode) => {
+    const code = withCode && e?.cause?.code ? ` (${e.cause.code})` : "";
+    return String(e?.name === "TimeoutError" ? "timeout" : `${e?.message || e}${code}`).slice(0, 140);
+  };
+  let holdRes;
+  let healthRes;
   try {
-    const [holdRes, healthRes] = await Promise.all([
+    [holdRes, healthRes] = await Promise.all([
       fetch(p.url, {
         method: "POST",
         headers: { "content-type": "application/json", "user-agent": "raydar-health/1" },
@@ -53,20 +59,25 @@ async function runHoldProbe(check) {
         signal: AbortSignal.timeout(p.timeoutMs || 12000),
       }).catch(() => null),
     ]);
+  } catch (e) {
+    // Only the hold request can land here (the health GET has its own catch),
+    // and it got no answer at all: DNS, the secure connection, a refused or
+    // dropped connection, or nothing inside the time limit. `unreachable`
+    // says so explicitly, so a check that opts in (downWhenUnreachable) can
+    // judge it. The cause code ("ENOTFOUND", a certificate error) is the
+    // useful half of Node's bare "fetch failed".
+    return { transport: describe(e, true), status: 0, body: null, unreachable: true };
+  }
+  try {
     const holdBody = await holdRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } });
     const healthBody = healthRes
       ? await healthRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } })
       : null;
     return { transport: null, status: holdRes.status, body: { hold: holdBody, holdStatus: holdRes.status, health: healthBody } };
   } catch (e) {
-    // The hold request itself failed: DNS, the secure connection, a refused
-    // or dropped connection, or no answer inside the time limit. `unreachable`
-    // says so explicitly, so a check that opts in (downWhenUnreachable) can
-    // judge it. The cause code ("ENOTFOUND", a certificate error) is the
-    // useful half of Node's bare "fetch failed".
-    const code = e?.cause?.code ? ` (${e.cause.code})` : "";
-    const msg = String(e?.name === "TimeoutError" ? "timeout" : `${e?.message || e}${code}`).slice(0, 140);
-    return { transport: msg, status: 0, body: null, unreachable: true };
+    // The site answered and a body then failed to arrive. That is not
+    // "unreachable" (the door may well be open): UNKNOWN, as it always was.
+    return { transport: describe(e, false), status: 0, body: null };
   }
 }
 
@@ -173,7 +184,14 @@ export async function runTick({ now = Date.now() } = {}) {
     // opts in with probe.downWhenUnreachable: there, no connection at all IS
     // the outage, so the evaluator gets to call it. Only the booking door
     // opts in (2026-11-18: the parked domain sat in UNKNOWN for four hours).
-    const judgeUnreachable = r.unreachable === true && check.probe.downWhenUnreachable === true;
+    // It also needs last tick's state for the tile in hand. A failed
+    // connection only counts as the second in a row if we remember the
+    // first; on a first sighting, or when the KV read came back empty, one
+    // blip would otherwise stick at once and page. Then it is UNKNOWN, as
+    // before, and the next tick can start the count.
+    const judgeUnreachable = r.unreachable === true
+      && check.probe.downWhenUnreachable === true
+      && Boolean(prev.tiles?.[check.id]?.state);
     if (r.transport && !r.keyMissing && !judgeUnreachable) {
       results[check.id] = { state: "UNKNOWN", reason: r.transport, raw: null };
       return;

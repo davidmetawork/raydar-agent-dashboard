@@ -19,7 +19,9 @@
 // healthy booking site, then at a local port with nothing listening (a real
 // refused connection, not a mock), then back. Every request that would leave
 // this machine is refused before it is sent and counted, so the real booking
-// site is never touched and every other tile reads UNKNOWN. Hold probes only.
+// site is never touched. The other tiles therefore say nothing true about the
+// real systems in this mode (a pulled check that tries to connect is refused
+// and reads UNKNOWN). Hold probes only.
 //
 // It never sets HEALTH_ALERTS_ENABLED and never loads the pager, so a drill
 // cannot page anyone.
@@ -27,9 +29,18 @@ import http from "node:http";
 
 const args = process.argv.slice(2);
 const flag = (name, dflt) => {
+  const eq = args.find((a) => a.startsWith(`--${name}=`));
+  if (eq) return eq.slice(name.length + 3);
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : dflt;
 };
+const has = (name) => args.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+// Asked for the offline drill but gave no id (or a typo): stop here. Falling
+// through to the default drill would probe the live endpoints instead.
+if (has("unreachable") && !flag("unreachable", null)) {
+  console.error("--unreachable needs a check id, e.g. --unreachable booking-door");
+  process.exit(1);
+}
 
 // ---- in-memory Upstash REST stand-in -------------------------------------
 const store = new Map([
@@ -69,7 +80,7 @@ const { CATALOG, byId } = await import("../api/health/_lib/catalog.mjs");
 const offline = flag("unreachable", null);
 const broken = offline || flag("break", null);
 const ticks = Number(flag("ticks", broken ? 4 : 1));
-if (offline && args.includes("--break")) {
+if (offline && has("break")) {
   console.error("use --break or --unreachable, not both");
   process.exit(1);
 }
@@ -142,7 +153,7 @@ for (let i = 1; i <= ticks; i += 1) {
   }
   const { state, transitions, incidents } = await runTick({});
   console.log(`\n── tick ${i}/${ticks}  overall=${state.overall} ${JSON.stringify(state.counts)}`);
-  // Offline, every other tile is UNKNOWN by construction: print the target only.
+  // Offline, the other tiles say nothing about the real systems: print the target only.
   const shown = (row) => !offline || row.id === broken;
   for (const t of transitions.filter(shown)) console.log(`   ${t.id}: ${t.from} → ${t.to}  ${t.reason || ""}`);
   for (const inc of incidents.filter(shown)) {
@@ -161,8 +172,8 @@ if (offline) {
   target.probe.url = goodUrl;
   target.probe.healthUrl = goodHealthUrl;
   door.close();
-  console.log(`\n   the ${otherPulls.length} other pulled checks, network closed for all ${ticks} ticks: `
-    + `${otherPullsDown.size} went DOWN${otherPullsDown.size ? ` (${[...otherPullsDown].join(", ")})` : ""}`);
+  console.log(`\n   other pulled checks (${otherPulls.length}) that went DOWN in any tick: `
+    + `${otherPullsDown.size}${otherPullsDown.size ? ` (${[...otherPullsDown].join(", ")})` : ""}`);
   console.log(`   network: ${passed} requests to 127.0.0.1, ${blocked} outside requests refused before sending`);
   console.log("   pager: not loaded, HEALTH_ALERTS_ENABLED unset — nothing was posted");
 }
