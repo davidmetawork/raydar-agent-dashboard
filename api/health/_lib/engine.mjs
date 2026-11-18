@@ -5,6 +5,8 @@
 // Design rules learned from the outage this exists to prevent:
 //  - One slow probe must never sink the tick (allSettled + per-probe timeout).
 //  - A probe we cannot run is UNKNOWN, never OK. Silence is not success.
+//    One exception, by opt-in (probe.downWhenUnreachable): the booking door,
+//    where a site nobody can connect to is DOWN, not "could not tell".
 //  - Entering UNKNOWN or DOWN needs two consecutive ticks (transient network
 //    flaps are constant); leaving them is immediate.
 import { CATALOG, byId } from "./catalog.mjs";
@@ -57,8 +59,14 @@ async function runHoldProbe(check) {
       : null;
     return { transport: null, status: holdRes.status, body: { hold: holdBody, holdStatus: holdRes.status, health: healthBody } };
   } catch (e) {
-    const msg = String(e?.name === "TimeoutError" ? "timeout" : e?.message || e).slice(0, 140);
-    return { transport: msg, status: 0, body: null };
+    // The hold request itself failed: DNS, the secure connection, a refused
+    // or dropped connection, or no answer inside the time limit. `unreachable`
+    // says so explicitly, so a check that opts in (downWhenUnreachable) can
+    // judge it. The cause code ("ENOTFOUND", a certificate error) is the
+    // useful half of Node's bare "fetch failed".
+    const code = e?.cause?.code ? ` (${e.cause.code})` : "";
+    const msg = String(e?.name === "TimeoutError" ? "timeout" : `${e?.message || e}${code}`).slice(0, 140);
+    return { transport: msg, status: 0, body: null, unreachable: true };
   }
 }
 
@@ -161,7 +169,12 @@ export async function runTick({ now = Date.now() } = {}) {
     const r = settled.status === "fulfilled"
       ? settled.value
       : { transport: String(settled.reason).slice(0, 140), status: 0, body: null };
-    if (r.transport && !r.keyMissing) {
+    // A probe that could not connect is UNKNOWN for every check but one that
+    // opts in with probe.downWhenUnreachable: there, no connection at all IS
+    // the outage, so the evaluator gets to call it. Only the booking door
+    // opts in (2026-11-18: the parked domain sat in UNKNOWN for four hours).
+    const judgeUnreachable = r.unreachable === true && check.probe.downWhenUnreachable === true;
+    if (r.transport && !r.keyMissing && !judgeUnreachable) {
       results[check.id] = { state: "UNKNOWN", reason: r.transport, raw: null };
       return;
     }

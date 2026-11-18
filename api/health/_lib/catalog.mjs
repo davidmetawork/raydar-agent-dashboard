@@ -56,9 +56,17 @@ export const CATALOG = [
       healthUrl: "https://book.raydar.xyz/api/health",
       timeoutMs: 12000,
       evaluate: "bookingDoorHold",
+      // A probe that cannot connect at all (DNS, the secure connection, a
+      // refused connection, no answer in 12s) is DOWN here, not UNKNOWN, so
+      // it pages after the usual two ticks. 2026-11-18: the parked domain
+      // failed every probe for four hours and paged nobody. This check only,
+      // on David's yes; the other tier-1 pulls keep UNKNOWN (measured that
+      // day: their tiles logged 16 timeout spells since September, each of
+      // which would have been a page under this rule).
+      downWhenUnreachable: true,
     },
     registry: "/products/raydar-scheduler/",
-    note: "POSTs a non-slot hold: 409 = door open, 503 = closed. Zero side effects.",
+    note: "POSTs a non-slot hold: 409 = door open, 503 = closed, no connection = down. Zero side effects.",
   },
   {
     id: "screener-uplink",
