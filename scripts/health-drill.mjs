@@ -35,6 +35,16 @@ const flag = (name, dflt) => {
   return i >= 0 ? args[i + 1] : dflt;
 };
 const has = (name) => args.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+// Every argument must be a flag this script knows, or the value after one. A
+// misspelt flag would otherwise be ignored and select the default drill,
+// which probes the live endpoints.
+const KNOWN_FLAGS = ["break", "unreachable", "ticks"];
+const isKnownFlag = (a) => KNOWN_FLAGS.some((k) => a === `--${k}` || a.startsWith(`--${k}=`));
+const stray = args.find((a, i) => !isKnownFlag(a) && !(i > 0 && KNOWN_FLAGS.some((k) => args[i - 1] === `--${k}`)));
+if (stray !== undefined) {
+  console.error(`unknown argument "${stray}". flags: ${KNOWN_FLAGS.map((k) => `--${k}`).join(", ")}`);
+  process.exit(1);
+}
 // Asked for the offline drill but gave no id (or a typo): stop here. Falling
 // through to the default drill would probe the live endpoints instead.
 if (has("unreachable") && !flag("unreachable", null)) {
@@ -80,6 +90,10 @@ const { CATALOG, byId } = await import("../api/health/_lib/catalog.mjs");
 const offline = flag("unreachable", null);
 const broken = offline || flag("break", null);
 const ticks = Number(flag("ticks", broken ? 4 : 1));
+if (!Number.isInteger(ticks) || ticks < 1) {
+  console.error("--ticks needs a whole number, 1 or more");
+  process.exit(1);
+}
 if (offline && has("break")) {
   console.error("use --break or --unreachable, not both");
   process.exit(1);
@@ -137,6 +151,7 @@ if (offline) {
 }
 const otherPulls = CATALOG.filter((c) => c.kind === "pull" && !c.paused && c.id !== broken);
 const otherPullsDown = new Set();
+const startedAt = Date.now();
 const pointDoorAt = (origin) => {
   target.probe.url = `${origin}/api/hold`;
   target.probe.healthUrl = `${origin}/api/health`;
@@ -151,8 +166,10 @@ for (let i = 1; i <= ticks; i += 1) {
     if (i === 2) target.probe.url = `${String(goodUrl).replace(/\/+$/, "")}-drill-404`;
     if (i === ticks) target.probe.url = goodUrl;
   }
-  const { state, transitions, incidents } = await runTick({});
-  console.log(`\n── tick ${i}/${ticks}  overall=${state.overall} ${JSON.stringify(state.counts)}`);
+  // Offline, the ticks are stamped two minutes apart like the real cron: a
+  // failed connection only sticks when the tick before it saw the same.
+  const { state, transitions, incidents } = await runTick(offline ? { now: startedAt + (i - 1) * 120000 } : {});
+  console.log(`\n── tick ${i}/${ticks}${offline ? ` (+${(i - 1) * 2} min)` : ""}  overall=${state.overall} ${JSON.stringify(state.counts)}`);
   // Offline, the other tiles say nothing about the real systems: print the target only.
   const shown = (row) => !offline || row.id === broken;
   for (const t of transitions.filter(shown)) console.log(`   ${t.id}: ${t.from} → ${t.to}  ${t.reason || ""}`);

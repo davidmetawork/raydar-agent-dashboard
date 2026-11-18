@@ -20,6 +20,12 @@ const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
 /** States that must be seen twice in a row before they stick. */
 const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
+// "Twice in a row" for a failed connection means the tick before this one:
+// the cron fires every two minutes, give or take the minute it lands in.
+// Younger is the same moment seen twice (a duplicate cron delivery, a manual
+// tick); older is a stale note (ticks stopped, or a write was lost).
+const CONFIRM_MIN_MS = 45 * 1000;
+const CONFIRM_MAX_MS = 210 * 1000;
 
 export const worst = (states) =>
   states.reduce((acc, s) => (STATE_ORDER[s] > STATE_ORDER[acc] ? s : acc), "OK");
@@ -203,7 +209,7 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     try {
       const v = evaluate({ ...r, probe: check.probe, check });
-      results[check.id] = { ...v, raw: r.body };
+      results[check.id] = { ...v, raw: r.body, unreachable: judgeUnreachable };
     } catch (e) {
       results[check.id] = { state: "UNKNOWN", reason: `evaluator threw: ${String(e?.message || e).slice(0, 120)}`, raw: null };
     }
@@ -287,7 +293,15 @@ export async function runTick({ now = Date.now() } = {}) {
     let state = raw.state;
     // Two consecutive ticks required to ENTER a debounced state.
     if (DEBOUNCED.has(state) && before.state && before.state !== state) {
-      const pendingSame = before.pending === state;
+      let pendingSame = before.pending === state;
+      // A failed connection is the only verdict a passing network blip can
+      // produce, so its first sighting must be the tick just before this one
+      // (a tile carrying `pending` was written at its lastCheckedAt). If it
+      // is not, this tick becomes the first sighting and the count restarts.
+      if (pendingSame && raw.unreachable === true) {
+        const age = now - Date.parse(before.lastCheckedAt || "");
+        pendingSame = age >= CONFIRM_MIN_MS && age <= CONFIRM_MAX_MS;
+      }
       if (!pendingSame) {
         tiles[check.id] = {
           ...before,

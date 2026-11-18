@@ -62,14 +62,28 @@ const answer = (status, body) => ({
 
 /**
  * @param {object} world mutable: `door` is what the booking site does this
- *   tick ("open" | "unreachable" | "timeout" | "bodyStalls" | a number = that
- *   HTTP status); `others` is what every other probed endpoint does ("ok" |
- *   "unreachable"); `kv` is the health store ("ok" by default | "down" = every
- *   call fails | "forgets" = the saved board reads back empty).
+ *   tick ("open" | "unreachable" | "timeout" | "bodyStalls" | "healthDead" |
+ *   a number = that HTTP status); `others` is what every other probed
+ *   endpoint does ("ok" | "unreachable"); `kv` is the health store ("ok" by
+ *   default | "down" = every call fails | "forgets" = the saved board reads
+ *   back empty); `gapMs` is how long after the previous tick the next one
+ *   runs (two minutes by default, like the cron).
  */
 function harness(world) {
   const store = new Map();
   const slack = [];
+  let clock = Date.parse("2026-11-18T11:48:00Z");
+  const withWorld = async (fn) => {
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    clock += world.gapMs ?? 120000;
+    globalThis.fetch = fetchStub;
+    Date.now = () => clock;
+    try { return await fn(); } finally {
+      globalThis.fetch = originalFetch;
+      Date.now = originalNow;
+    }
+  };
   const fetchStub = async (url, init = {}) => {
     const href = String(url);
     if (href.startsWith(KV_URL)) {
@@ -86,11 +100,12 @@ function harness(world) {
     if (href === HOLD_URL || href === HEALTH_URL) {
       if (world.door === "unreachable") throw connectionError("ERR_TLS_CERT_ALTNAME_INVALID");
       if (world.door === "timeout") throw timeoutError();
+      if (href === HEALTH_URL && world.door === "healthDead") throw connectionError("ECONNRESET");
       if (href === HEALTH_URL && world.door === "bodyStalls") {
         return { ok: true, status: 200, text: async () => { throw timeoutError(); } };
       }
       if (href === HEALTH_URL) return answer(200, { ok: true, agentAdmission: true, checks: {} });
-      if (world.door === "bodyStalls") return answer(409, { error: "slot_taken" });
+      if (world.door === "bodyStalls" || world.door === "healthDead") return answer(409, { error: "slot_taken" });
       if (world.door === "open") return answer(409, { error: "slot_taken" });
       return answer(world.door, { error: "odd" });
     }
@@ -98,9 +113,7 @@ function harness(world) {
     return answer(200, {});
   };
   const runTick = async () => {
-    const original = globalThis.fetch;
-    globalThis.fetch = fetchStub;
-    try {
+    await withWorld(async () => {
       const res = {
         code: 0, body: null,
         status(c) { this.code = c; return this; },
@@ -108,19 +121,13 @@ function harness(world) {
       };
       await tick({ headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } }, res);
       assert.equal(res.code, 200, "the tick itself must succeed");
-    } finally {
-      globalThis.fetch = original;
-    }
+    });
     return JSON.parse(store.get(K.state)).tiles;
   };
   /** The engine alone, no pager: for a store that is down, where there is no saved board to read back. */
-  const runEngineOnly = async () => {
-    const original = globalThis.fetch;
-    globalThis.fetch = fetchStub;
-    try { return await runEngineTick({}); } finally { globalThis.fetch = original; }
-  };
+  const runEngineOnly = () => withWorld(() => runEngineTick({}));
   const doorPosts = () => slack.filter((text) => text.includes("Agent booking door"));
-  return { runTick, runEngineOnly, slack, doorPosts };
+  return { runTick, runEngineOnly, slack, doorPosts, store };
 }
 
 test("an unreachable booking site goes DOWN on the second failed check and pages exactly once", async () => {
@@ -308,5 +315,77 @@ test("a booking site that answers but whose body never arrives is UNKNOWN, not u
   const tiles = await h.runTick();
   assert.equal(tiles["booking-door"].state, "UNKNOWN");
   assert.equal(tiles["booking-door"].reason, "timeout");
+  assert.deepEqual(h.doorPosts(), []);
+});
+
+test("a first failure noted long ago does not count: the two failed checks must be consecutive ticks", async () => {
+  // The saved "first failure" has no expiry of its own. If ticks stop, or the
+  // write that clears it is lost, one blip much later must not be read as the
+  // second failed check in a row.
+  const world = { door: "open", others: "ok" };
+  const h = harness(world);
+  await h.runTick();
+
+  world.door = "unreachable";
+  let tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].pending, "DOWN");
+
+  world.gapMs = 30 * 60 * 1000;
+  tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "OK", "a 30-minute-old first failure is not the tick before");
+  assert.equal(tiles["booking-door"].pending, "DOWN");
+  assert.deepEqual(h.doorPosts(), []);
+
+  // The count restarted on that tick, so the next one, two minutes on, confirms it.
+  world.gapMs = undefined;
+  tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "DOWN");
+  assert.equal(h.doorPosts().length, 1);
+});
+
+test("the same moment seen twice (a duplicate run seconds later) is one failed check, not two", async () => {
+  const world = { door: "open", others: "ok" };
+  const h = harness(world);
+  await h.runTick();
+
+  world.door = "unreachable";
+  await h.runTick();
+  world.gapMs = 3000;
+  let tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "OK");
+  assert.equal(tiles["booking-door"].pending, "DOWN");
+  assert.deepEqual(h.doorPosts(), []);
+
+  world.gapMs = undefined;
+  tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "DOWN");
+  assert.equal(h.doorPosts().length, 1);
+});
+
+test("a dead health read beside a hold that answered is not an unreachable booking site", async () => {
+  // Only the hold request decides. The paired health GET is context for the
+  // tile; when it alone fails the door is still open.
+  const world = { door: "open", others: "ok" };
+  const h = harness(world);
+  await h.runTick();
+  world.door = "healthDead";
+  await h.runTick();
+  const tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "OK");
+  assert.equal(tiles["booking-door"].pending, undefined);
+  assert.deepEqual(h.doorPosts(), []);
+});
+
+test("a saved board that has no booking-door tile is no memory either", async () => {
+  const world = { door: "open", others: "ok" };
+  const h = harness(world);
+  await h.runTick();
+  const board = JSON.parse(h.store.get(K.state));
+  delete board.tiles["booking-door"];
+  h.store.set(K.state, JSON.stringify(board));
+
+  world.door = "unreachable";
+  const tiles = await h.runTick();
+  assert.equal(tiles["booking-door"].state, "UNKNOWN");
   assert.deepEqual(h.doorPosts(), []);
 });
