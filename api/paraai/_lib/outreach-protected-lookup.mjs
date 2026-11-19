@@ -50,6 +50,17 @@
 // Still held: ambiguous, background_conflict, too_many, incomplete,
 // not_found (offered on protected-subs.html).
 //
+// Lookup v5 (2026-11-19): a note was held "nobody found" for a week while
+// the person had the note's role on their Paraform record: Paraform stores
+// the name with two spaces between first name and surname, and its search
+// matched the name as typed, so the full-name search never found them while
+// the surname alone did (measured through Paraform's official MCP search;
+// the CRM search here is assumed to match the same way). So when every
+// search so far found nobody by a compatible name, a full-named note is also
+// searched by its surname alone (step 2b). It never runs when anyone was
+// found, so no note v4 found someone for changes; what it finds goes
+// through the same rules.
+//
 // A resolved note (or a staff "send" pick) becomes a request row of the tick
 // (`synthetic: true`), so the normal send path applies every guard. Such a
 // row never gets Paraform's reached-out marker, never reaches the digest
@@ -87,6 +98,9 @@ const CRM_SEARCH = "candidateUser.getCRMExternalCandidates";
 const ROLE_SEARCH_MAX_PAGES = 1;
 const NAME_SEARCH_MAX_PAGES = 3;
 const NAME_SEARCH_TOTAL_PAGES = 3;
+// v5: the surname-only search (step 2b) reads at most this many pages, and
+// always leaves one read for the applications read of whoever it finds.
+const SURNAME_SEARCH_MAX_PAGES = 1;
 // More namesakes needing an applications read than this: the lookup cannot
 // prove there is only one, so it never resolves on their applications.
 const MAX_NAME_MATCHES = 4;
@@ -103,7 +117,8 @@ const APPLICATION_BEFORE_NOTE_MS = 7 * 24 * 60 * 60 * 1000;
 const APPLICATION_AFTER_NOTE_MS = 60 * 60 * 1000;
 // Bumped when the lookup changes, so the earlier notes are measured again.
 // v4 (2026-11-07): background match, one role holder resolves, closed roles go on.
-export const PROTECTED_LOOKUP_VERSION = 4;
+// v5 (2026-11-19): a full name nobody was found for is searched by surname too.
+export const PROTECTED_LOOKUP_VERSION = 5;
 // A note whose "Why I think it fits" text was not read yet (stored before v4)
 // waits for the scan to read it, this many failed reads at most
 // (outreach-protected.mjs backfills it), so the first v4 lookup sees it.
@@ -814,18 +829,52 @@ export async function lookupProtectedSub(sub, { trpcGetImpl, now = Date.now(), p
     }
     if (foundHere && parsed.nameForm === "initial") break;
   }
+  // 2b. v5: the surname alone, only when the searches reached their end and
+  // found nobody by a compatible name (see the header). The rows it returns
+  // pass the same name check. Cut off at its page cap having found someone,
+  // the note is held ("incomplete", with them as options): another person by
+  // that name could be past the cap.
+  let surnameSearch = null;
+  const surnameWord = parsed.nameForm === "full" && parsed.tokens.length >= 2
+    ? (parsed.search.split(/\s+/).pop() || "").replace(/[.,]+$/, "") : "";
+  const surnameTerm = nameTokens(surnameWord).join("").length >= 3 ? surnameWord : "";
+  if (complete && surnameTerm && !people.size) {
+    const pageCap = Math.min(SURNAME_SEARCH_MAX_PAGES, PROTECTED_LOOKUP_MAX_READS - reads - 1);
+    if (pageCap <= 0) surnameSearch = "skipped";
+    else {
+      let cursor = null;
+      let pages = 0;
+      let done = false;
+      while (pages < pageCap) {
+        const response = await read(CRM_SEARCH, {
+          limit: CRM_PAGE_LIMIT,
+          ...(cursor != null ? { cursor } : {}),
+          filters: { sort: { ...CRM_SORT }, general_search: surnameTerm },
+        });
+        pages += 1;
+        const items = Array.isArray(response?.items) ? response.items : [];
+        for (const item of items) addPerson(item);
+        cursor = response?.next_cursor ?? null;
+        if (cursor == null || items.length < CRM_PAGE_LIMIT) { done = true; break; }
+      }
+      namePages += pages;
+      surnameSearch = done ? "done" : "unfinished";
+    }
+  }
   const all = [...people.values()];
   const linked = all.filter((person) => person.link);
   Object.assign(evidence, {
     nameMatches: people.size,
     crmPages: namePages,
     ...(shortFormSearch ? { shortFormSearch } : {}),
+    ...(surnameSearch ? { surnameSearch } : {}),
     crmRoleLinks: linked.length,
     crmRolePath: linked[0]?.link.path || null,
   });
   // The search did not reach its end: another person by that name could be
   // the one, so this is never a match.
   if (!complete) return finish("incomplete");
+  if (surnameSearch === "unfinished" && people.size) return finish("incomplete");
 
   // 3. Role before the namesake cap: the CRM rows are free to check; only
   // people without a recent row link need an applications read, and the cap
