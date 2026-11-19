@@ -105,6 +105,7 @@ import {
   teammateUserIds,
 } from "./outreach-scope.mjs";
 import { requestLaneKv } from "./request-lane-store.mjs";
+import { recordPendingSnapshot } from "./pending-snapshot.mjs";
 import {
   getProtectedLookupsSafe,
   protectedPickStillSends,
@@ -4411,6 +4412,7 @@ export async function runOutreachTick({
   replyPassImpl = runReplyPassStep,
   teammatesPausedImpl = teammateWritesPaused,
   recordScopeImpl = recordLastOutreachScope,
+  recordPendingImpl = recordPendingSnapshot,
   protectedScanImpl = scanProtectedNotes,
   protectedWatchImpl = watchUnsentProtectedSubs,
   protectedMatchRecordImpl = recordProtectedMatch,
@@ -4483,6 +4485,15 @@ export async function runOutreachTick({
     );
     const scope = Array.isArray(historyRead) ? null : historyRead.scope;
     await recordScopeImpl(scope, { now }).catch(() => {});
+    // A copy of the pending requests of this read, for readers that must not
+    // call Paraform (pending-snapshot.mjs; the CRM Call List). Best effort:
+    // it changes nothing the tick does next.
+    await Promise.resolve()
+      .then(() => recordPendingImpl(
+        Array.isArray(historyRead) ? historyRead : historyRead.requests,
+        { teammatesRead: scope?.teammatesRead === true, now },
+      ))
+      .catch(() => {});
     const protectedMatch = protectedScan?.scanned && protectedScan.subs
       ? protectedSubMatch({ subs: protectedScan.subs, history: readHistory, config, now })
       : null;

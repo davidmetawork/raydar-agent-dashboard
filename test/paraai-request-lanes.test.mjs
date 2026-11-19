@@ -644,6 +644,48 @@ test("the tick never scans for protected subs while they are switched off", asyn
   assert.equal(result.protectedSubs, undefined);
 });
 
+test("the tick hands the rows it read to the pending copy, and a failing copy never fails the tick", async () => {
+  // 2026-11-19: the CRM Call List reads a stored copy of the pending requests
+  // (pending-snapshot.mjs). The tick saves it from the read it already made.
+  const created = Date.parse("2026-11-04T16:00:00.000Z");
+  const requests = [
+    { id: "request-own", status: "pending", ownRequest: true, candidateUserId: "candidate-o", roleId: "role-o", roleName: "Engineer", companyName: "Acme", reachedOut: false, createdAtMs: created, recipientTypes: [] },
+    { id: "request-mate", status: "pending", ownRequest: false, recruiterKey: "vanessa", candidateUserId: "candidate-m", roleId: "role-m", roleName: "Engineer", companyName: "Acme", reachedOut: false, createdAtMs: created, recipientTypes: [] },
+  ];
+  const base = {
+    // Not-before in the future: the tick reads and saves, and sends nothing.
+    config: { ...openOutreachConfig(), notBeforeMs: Date.parse("2026-12-01T00:00:00.000Z"), protectedNotBeforeMs: null },
+    now: Date.parse("2026-11-04T16:10:00.000Z"),
+    pauseState: async () => ({ paused: false }),
+    recordScopeImpl: async () => {},
+  };
+  const seen = [];
+  const record = async (rows, options) => { seen.push({ ids: rows.map((row) => row.id), options }); };
+  await runOutreachTick({
+    ...base,
+    historyImpl: async () => ({ requests, scope: { agencyView: true, teammatesRead: true } }),
+    recordPendingImpl: record,
+  });
+  kv.clear();
+  await runOutreachTick({
+    ...base,
+    historyImpl: async () => ({ requests: requests.slice(0, 1), scope: { agencyView: true, teammatesRead: false, reason: "teammate_read_not_due" } }),
+    recordPendingImpl: record,
+  });
+  assert.deepEqual(seen, [
+    { ids: ["request-own", "request-mate"], options: { teammatesRead: true, now: base.now } },
+    { ids: ["request-own"], options: { teammatesRead: false, now: base.now } },
+  ]);
+  kv.clear();
+  const result = await runOutreachTick({
+    ...base,
+    historyImpl: async () => requests,
+    recordPendingImpl: async () => { throw new Error("copy store down"); },
+  });
+  assert.equal(result.enabled, true);
+  assert.notEqual(result.reason, "request_lane_cadence_not_due");
+});
+
 test("a note the request list lacks is looked up, becomes this tick's row, and stays out of the reply pass", async () => {
   const subs = new Map([["request-missing", {
     requestId: "request-missing",
