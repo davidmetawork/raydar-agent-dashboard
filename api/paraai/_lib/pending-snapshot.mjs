@@ -37,7 +37,13 @@ export const PENDING_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60;
 // most of them long closed). A cap so one odd read cannot write megabytes.
 export const PENDING_SNAPSHOT_MAX_ROWS = 1000;
 
+// The two writes together may hold the tick this long at most: the store's own
+// timeout is 8 s, and the tick has sends to get to.
+export const PENDING_SNAPSHOT_WRITE_BUDGET_MS = 3_000;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+// A mis-set PARAAI_EXPIRY_DAYS must not blank every forecast: Paraform's is 7.
+const DEFAULT_EXPIRY_DAYS = Number.isFinite(EXPIRY_DAYS) && EXPIRY_DAYS > 0 ? EXPIRY_DAYS : 7;
 const clean = (value, max = 200) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 
@@ -47,7 +53,7 @@ export function isPendingRequest(request) {
 
 // One normalized request (outreach.mjs normalizeSubmissionRequest) as the copy
 // holds it. null when it is not pending or lacks what a reader needs.
-export function pendingRow(request, { expiryDays = EXPIRY_DAYS } = {}) {
+export function pendingRow(request, { expiryDays = DEFAULT_EXPIRY_DAYS } = {}) {
   if (!isPendingRequest(request)) return null;
   // A missing created time arrives as null; Number(null) is 0, which is 1970.
   const createdMs = Number(request?.createdAtMs) > 0 ? Number(request.createdAtMs) : NaN;
@@ -86,18 +92,31 @@ function pendingRows(requests, options) {
 // scope's own flag: only then is the teammates' part replaced.
 export async function recordPendingSnapshot(
   requests,
-  { teammatesRead = false, now = Date.now(), kvImpl = requestLaneKv } = {},
+  { teammatesRead = false, now = Date.now(), kvImpl = requestLaneKv, budgetMs = PENDING_SNAPSHOT_WRITE_BUDGET_MS } = {},
 ) {
   const list = Array.isArray(requests) ? requests : [];
   const at = new Date(now).toISOString();
-  const save = (key, rows) => kvImpl([
-    "SET", key, JSON.stringify({ at, rows }), "EX", PENDING_SNAPSHOT_TTL_SECONDS,
-  ]).then(() => true, () => false);
-  const own = await save(PENDING_OWN_KEY, pendingRows(list.filter((request) => request?.ownRequest !== false)));
-  const teammates = teammatesRead
-    ? await save(PENDING_TEAMMATES_KEY, pendingRows(list.filter((request) => request?.ownRequest === false)))
-    : null;
-  return { own, teammates };
+  // Both writes at once, and neither may hold the tick past the budget: a
+  // write still in flight then is reported as not saved (it may yet land).
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(false), budgetMs); });
+  const save = (key, rows) => Promise.race([
+    Promise.resolve()
+      .then(() => kvImpl(["SET", key, JSON.stringify({ at, rows }), "EX", PENDING_SNAPSHOT_TTL_SECONDS]))
+      .then(() => true, () => false),
+    late,
+  ]);
+  try {
+    const [own, teammates] = await Promise.all([
+      save(PENDING_OWN_KEY, pendingRows(list.filter((request) => request?.ownRequest !== false))),
+      teammatesRead
+        ? save(PENDING_TEAMMATES_KEY, pendingRows(list.filter((request) => request?.ownRequest === false)))
+        : null,
+    ]);
+    return { own, teammates };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readPart(key, kvImpl) {
@@ -133,7 +152,7 @@ export async function readPendingSnapshot({ now = Date.now(), kvImpl = requestLa
   return {
     as_of: own?.at ?? null,
     teammates_as_of: teammates?.at ?? null,
-    expiry_days: EXPIRY_DAYS,
+    expiry_days: DEFAULT_EXPIRY_DAYS,
     count: requests.length,
     requests,
   };

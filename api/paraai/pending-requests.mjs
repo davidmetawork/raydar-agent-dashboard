@@ -57,7 +57,8 @@ export function createPendingRequestsHandler({
     const key = String(env[PENDING_READ_KEY_VAR] || "").trim();
     // A short secret is a misconfiguration, not a lock.
     if (key.length < 24) return res.status(503).json({ ok: false, error: "pending_read_not_configured" });
-    const bearer = String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "").trim();
+    const header = String(req.headers?.authorization || "");
+    const bearer = /^Bearer\s+/i.test(header) ? header.replace(/^Bearer\s+/i, "").trim() : "";
     if (!equalSecret(bearer, key)) return res.status(401).json({ ok: false, error: "unauthorized" });
     return res.status(200).json({ ok: true, ...(await readImpl({ now: clock() })) });
   };

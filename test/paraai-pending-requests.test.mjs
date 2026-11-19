@@ -118,6 +118,14 @@ test("no copy, a broken copy or a failing store read as 'no copy', never as an e
   assert.deepEqual(await recordPendingSnapshot([own()], { teammatesRead: true, now: NOW, kvImpl: down }), { own: false, teammates: false });
 });
 
+test("a store that hangs holds the tick no longer than the budget", async () => {
+  const hang = () => new Promise(() => {});
+  const started = Date.now();
+  const result = await recordPendingSnapshot([own(), teammate({ id: "req_t1" })], { teammatesRead: true, now: NOW, kvImpl: hang, budgetMs: 40 });
+  assert.deepEqual(result, { own: false, teammates: false });
+  assert.ok(Date.now() - started < 1000);
+});
+
 test("the route is shut without the secret, refuses a wrong one, and answers the copy for the right one", async () => {
   let reads = 0;
   const readImpl = async ({ now }) => { reads += 1; return { as_of: new Date(now).toISOString(), teammates_as_of: null, expiry_days: 7, count: 0, requests: [] }; };
@@ -130,7 +138,7 @@ test("the route is shut without the secret, refuses a wrong one, and answers the
     assert.equal(res.payload.error, "pending_read_not_configured");
   }
   const env = { PARAAI_PENDING_READ_KEY: KEY, PARAAI_AUTOMATION_RUNNER_KEY: "runner-key-for-tests-0123456789", CRON_SECRET: "cron-secret-for-tests-0123456789" };
-  for (const authorization of [undefined, "Bearer wrong", `Bearer ${env.PARAAI_AUTOMATION_RUNNER_KEY}`, `Bearer ${env.CRON_SECRET}`, `Bearer ${KEY}x`]) {
+  for (const authorization of [undefined, "Bearer wrong", KEY, `Bearer ${env.PARAAI_AUTOMATION_RUNNER_KEY}`, `Bearer ${env.CRON_SECRET}`, `Bearer ${KEY}x`]) {
     const { req, res } = stubs({ authorization });
     await make(env)(req, res);
     assert.equal(res.statusCode, 401, String(authorization));
