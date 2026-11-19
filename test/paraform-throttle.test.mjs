@@ -141,6 +141,12 @@ const STORE_ROWS = [
 
 const sentCookie = (init) => String(init?.headers?.cookie || "").replace(/^[^=]+=/u, "");
 const isProbe = (url) => String(url).includes("getListOfCampaignsOptimized");
+const isStoreRead = (url) => String(url).startsWith(N8N);
+// A Paraform stub that also answers the n8n store, the way production's one
+// global fetch reaches both; only Paraform requests reach `handler`.
+const withStore = (handler, rows = STORE_ROWS) => async (url, init) => (
+  isStoreRead(url) ? { ok: true, json: async () => ({ data: rows }) } : handler(url, init)
+);
 
 async function withStoreSession(run) {
   const env = {
@@ -225,8 +231,77 @@ test("a dead store session is parked only after probes of that same cookie confi
   await withStoreSession(async ({ storeFetch }) => {
     const seen = [];
     await withStubbedParaform(
-      async (url, init) => {
+      withStore(async (url, init) => {
         seen.push({ probe: isProbe(url), cookie: sentCookie(init) });
+        return unauthorized();
+      }),
+      async () => {
+        await assert.rejects(
+          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
+          (e) => e.code === "AUTH_EXPIRED",
+        );
+      },
+    );
+    const shared = seen.filter((row) => row.cookie === SHARED);
+    assert.equal(shared.filter((row) => !row.probe).length, 4, "one attempt plus three ladder retries");
+    assert.equal(shared.filter((row) => row.probe).length, 3, "three serial probes of the cookie that got the 401");
+    const account = seen.filter((row) => row.cookie === ACCOUNT);
+    assert.equal(account.filter((row) => !row.probe).length, 1, "then one try on the next store slot, no second ladder");
+    assert.equal(account.filter((row) => row.probe).length, 3, "and its own three probes before AUTH_EXPIRED");
+    assert.ok(seen.every((row) => row.cookie !== ENV_SEAL), "never the env seal");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "account", "the failover slot is not parked on one try and the probes");
+  });
+});
+
+test("a confirmed-dead shared slot fails over to the live account slot in the same request", async () => {
+  // Measured 2026-11-18 on Enrich: shared stopped renewing, David's account
+  // slot stayed live, and the page answered AUTH_EXPIRED anyway.
+  await withStoreSession(async ({ storeFetch }) => {
+    const seen = [];
+    await withStubbedParaform(
+      withStore(async (url, init) => {
+        seen.push(sentCookie(init));
+        return sentCookie(init) === ACCOUNT ? ok({ id: "u1" }) : unauthorized();
+      }),
+      async () => {
+        assert.deepEqual(await trpcGet("campaigns.getCampaignLeads", {}, 1), { id: "u1" });
+      },
+    );
+    assert.equal(seen.at(-1), ACCOUNT);
+    assert.equal(seen.filter((cookie) => cookie === ACCOUNT).length, 1, "the account answered first time");
+    assert.ok(seen.every((cookie) => cookie !== ENV_SEAL), "never the env seal");
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "account");
+    assert.equal(next.cached, true, "the failover's resolution is reused by later calls");
+  });
+});
+
+test("a throttled failover slot that probes alive is PARAFORM_THROTTLED, not AUTH_EXPIRED", async () => {
+  await withStoreSession(async ({ storeFetch }) => {
+    await withStubbedParaform(
+      withStore(async (url, init) => (
+        sentCookie(init) === ACCOUNT && isProbe(url) ? ok([]) : unauthorized()
+      )),
+      async () => {
+        await assert.rejects(
+          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
+          (e) => e.code === "PARAFORM_THROTTLED",
+        );
+      },
+    );
+    const next = await ensureParaformSession({ fetchImpl: storeFetch });
+    assert.equal(next.slot, "account", "a throttle never parks the live account slot");
+  });
+});
+
+test("a confirmed-dead slot does not fail over onto the env seal when the store is unreachable", async () => {
+  await withStoreSession(async () => {
+    const seen = [];
+    await withStubbedParaform(
+      async (url, init) => {
+        if (isStoreRead(url)) return { ok: false, status: 503, json: async () => ({}) };
+        seen.push(sentCookie(init));
         return unauthorized();
       },
       async () => {
@@ -236,11 +311,7 @@ test("a dead store session is parked only after probes of that same cookie confi
         );
       },
     );
-    assert.equal(seen.filter((row) => !row.probe).length, 4, "one attempt plus three ladder retries");
-    assert.equal(seen.filter((row) => row.probe).length, 3, "three serial probes");
-    assert.ok(seen.every((row) => row.cookie === SHARED), "the probes tested the cookie that got the 401");
-    const next = await ensureParaformSession({ fetchImpl: storeFetch });
-    assert.equal(next.slot, "account", "the confirmed-dead shared slot is parked");
+    assert.ok(seen.every((cookie) => cookie === SHARED), "no second ladder on the env seal");
   });
 });
 
@@ -323,6 +394,7 @@ test("after a park empties the cache, a retry does not move onto the env fallbac
     const seen = [];
     await withStubbedParaform(
       async (url, init) => {
+        if (isStoreRead(url)) return { ok: false, status: 503, json: async () => ({}) };
         seen.push({ probe: isProbe(url), cookie: sentCookie(init) });
         if (seen.length === 1) assert.equal(notifyParaformSessionRejected({ cookie: SHARED }), true);
         return unauthorized();
@@ -341,8 +413,10 @@ test("after a park empties the cache, a retry does not move onto the env fallbac
 test("a verdict on a cookie the process already left does not park the new session", async () => {
   await withStoreSession(async ({ storeFetch }) => {
     let moved = false;
+    const seen = [];
     await withStubbedParaform(
       async (url, init) => {
+        seen.push(sentCookie(init));
         if (isProbe(url) && !moved) {
           // The move happens after this call's last retry, during its probes.
           moved = true;
@@ -352,13 +426,12 @@ test("a verdict on a cookie the process already left does not park the new sessi
         return sentCookie(init) === ACCOUNT ? ok([]) : unauthorized();
       },
       async () => {
-        await assert.rejects(
-          () => trpcGet("campaigns.getCampaignLeads", {}, 1),
-          (e) => e.code === "AUTH_EXPIRED",
-          "this call's probes tested the dead shared cookie",
-        );
+        // This call's probes proved the shared cookie dead; it then moves to
+        // the session the process already holds instead of failing.
+        assert.deepEqual(await trpcGet("campaigns.getCampaignLeads", {}, 1), []);
       },
     );
+    assert.equal(seen.at(-1), ACCOUNT);
     assert.equal(paraformCookieValue(), ACCOUNT, "the live account session was not parked by the stale verdict");
     const next = await ensureParaformSession({ fetchImpl: storeFetch });
     assert.equal(next.cached, true);

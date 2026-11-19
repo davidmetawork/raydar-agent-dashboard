@@ -2,7 +2,7 @@
   "schema_version": 2,
   "algorithm": "sha256",
   "file_count": 108,
-  "digest": "1f0588bcb1400fd5f6dfe410fa7c62bede10810587cc2ac188eba8b4fb0d3445",
+  "digest": "8413e84e6bd3497d6e58f541951f020b57f060ebed75593677c9b349e6c82839",
   "vercel_json_canonical_sha256": "fa7369558444458a0713138adee6333287d816480c85f571730a51a3f69316aa",
   "files": [
     {
@@ -47,7 +47,7 @@
     },
     {
       "path": "api/seq/_lib/core.mjs",
-      "sha256": "6954aa9a4603ade037263330cf683c9b0fea5bc55b3038c9dd0e215cda353f41"
+      "sha256": "2a438b677e4ec17b9bb6dc026555bb75f3f6bfabc50c3b181f0ce0ad1abb2b1d"
     },
     {
       "path": "api/seq/_lib/scheduling-links.mjs",
