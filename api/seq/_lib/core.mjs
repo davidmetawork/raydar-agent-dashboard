@@ -193,11 +193,16 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
   // cookie that got the last 401.
   let cookie = paraformCookieValue();
   let switched = false;
+  let failedOver = false;
   for (let attempt = 0; ; attempt++) {
     try { return await fn(cookie); }
     catch (e) {
       if (e?.code !== "PARAFORM_THROTTLED") throw e;
-      if (attempt < delays.length) {
+      // The failover slot gets one try and then the serial probes, not a
+      // second full ladder: two ladders (~70 s) would outrun Enrich's 60 s
+      // function limit, and a live-but-throttled slot still probes alive and
+      // reports PARAFORM_THROTTLED rather than AUTH_EXPIRED.
+      if (attempt < delays.length && !failedOver) {
         // Jitter so a fleet of workers does not retry in lockstep.
         await sleep(delays[attempt] + Math.floor(Math.random() * 400));
         // A cold instance can start on the static env seal because the store
@@ -213,9 +218,42 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
         }
         continue;
       }
-      throw (await confirmSessionExpired(cookie)) ? authExpired(cookie) : e;
+      if (!(await confirmSessionExpired(cookie))) throw e;
+      const expired = authExpired(cookie); // parks this slot for the next resolution
+      // One confirmed-dead store slot must not fail the whole request while
+      // the next store slot is alive. Measured 2026-11-18 on Enrich: the
+      // shared namespace stopped renewing at 21:45Z while David's account
+      // namespace kept renewing, and every cold instance tried shared first,
+      // proved it dead, then answered AUTH_EXPIRED instead of trying David's
+      // live session. So move once onto the next store candidate (never the
+      // env seal); a second confirmed death is final.
+      if (!failedOver) {
+        const next = await nextStoreSession(cookie);
+        if (next) {
+          cookie = next;
+          failedOver = true;
+          switched = true;
+          attempt = -1;
+          continue;
+        }
+      }
+      throw expired;
     }
   }
+}
+
+// After a confirmed expiry: the next live-looking store session, or null.
+// Prefers what this process already moved to; otherwise re-resolves within a
+// short budget (a timed-out read settles on the env seal, which is refused).
+const FAILOVER_STORE_BUDGET_MS = 5_000;
+async function nextStoreSession(deadCookie) {
+  let next = resolvedParaformSession();
+  if (!next) {
+    try { next = await ensureParaformSession({ timeoutMs: FAILOVER_STORE_BUDGET_MS }); }
+    catch { next = null; }
+  }
+  if (!next || next.slot === "env" || !next.value || next.value === deadCookie) return null;
+  return next.value;
 }
 
 // Concurrent callers that reach a verdict on the same cookie share one run,
