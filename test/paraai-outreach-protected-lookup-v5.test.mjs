@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PROTECTED_LOOKUP_RETRY_MS,
   PROTECTED_LOOKUP_VERSION,
   lookupProtectedSub,
   protectedLookupQueue,
@@ -131,4 +132,25 @@ test("v5: a surname search cut off at its page cap holds the note with what it f
   assert.equal(record.surnameSearch, "unfinished");
   assert.equal(record.status, "incomplete");
   assert.deepEqual(record.options.map((option) => option.candidateUserId), ["cu-1"]);
+});
+
+test("pacing refusals never push a note in its last day on Paraform past its expiry", () => {
+  const throttled = (lastTriedAt) => ({ requestId: "req-v5", status: "throttled", version: PROTECTED_LOOKUP_VERSION, throttled: 12, lastTriedAt });
+  const queueFor = (receivedAt, record, windowMs) => protectedLookupQueue({
+    subs: new Map([["req-v5", note("Avery Quillon", { receivedAt })]]),
+    historyIds: new Set(),
+    lookups: { "req-v5": record },
+    notBeforeMs: Date.parse("2026-11-01T00:00:00Z"),
+    now: NOW,
+    ...(windowMs ? { windowMs } : {}),
+  });
+  const tenMinutesAgo = new Date(NOW - PROTECTED_LOOKUP_RETRY_MS - 60_000).toISOString();
+  const justNow = new Date(NOW - 60_000).toISOString();
+  // Six and a half days old (expires in 12 hours): retried every ten minutes.
+  assert.equal(queueFor("2026-11-13T03:00:00.000Z", throttled(tenMinutesAgo)).length, 1);
+  assert.equal(queueFor("2026-11-13T03:00:00.000Z", throttled(justNow)).length, 0);
+  // Three days old: the refusals ran out, so it waits a day as before.
+  assert.equal(queueFor("2026-11-16T15:00:00.000Z", throttled(tenMinutesAgo)).length, 0);
+  // Already expired on Paraform (kept by a 14-day window): no fast retries.
+  assert.equal(queueFor("2026-11-11T15:00:00.000Z", throttled(tenMinutesAgo), 14 * 24 * 60 * 60 * 1000).length, 0);
 });

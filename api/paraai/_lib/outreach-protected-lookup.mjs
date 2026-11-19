@@ -87,6 +87,9 @@ export const PROTECTED_LOOKUP_RETRY_MS = 10 * 60 * 1000;
 // v3 (2026-11-06): a note that did not resolve is checked again once a day
 // while it is in the window (Paraform may add the role, or reopen it, later).
 export const PROTECTED_LOOKUP_RECHECK_MS = 24 * 60 * 60 * 1000;
+// Paraform expires a protected request this long after its note (the picks
+// page shows the same deadline).
+export const PROTECTED_REQUEST_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 // At most this many people are kept on a lookup for staff to pick from.
 export const PROTECTED_LOOKUP_MAX_OPTIONS = 10;
 const CRM_PAGE_LIMIT = 50;
@@ -553,8 +556,13 @@ export function protectedLookupQueue({ subs, historyIds, lookups = {}, notBefore
     if (record.status === "no_name") return false;
     const last = Date.parse(record.lastTriedAt || "");
     // Pacing refusals ran out for this check: tried again a day after the
-    // last try, never dropped for good (2026-11-06 review).
-    if (Number(record.throttled || 0) >= MAX_THROTTLED) {
+    // last try, never dropped for good (2026-11-06 review). Not in the
+    // note's last day on Paraform (2026-11-19): a day's wait would outlast
+    // the request, so it keeps the ten-minute retries until it expires.
+    const receivedMs = Date.parse(sub?.receivedAt || "");
+    const timeLeft = Number.isFinite(receivedMs) ? receivedMs + PROTECTED_REQUEST_LIFETIME_MS - now : NaN;
+    const lastDay = timeLeft > 0 && timeLeft <= PROTECTED_LOOKUP_RECHECK_MS;
+    if (Number(record.throttled || 0) >= MAX_THROTTLED && !lastDay) {
       return Number.isFinite(last) && last <= now - PROTECTED_LOOKUP_RECHECK_MS;
     }
     if (Number.isFinite(last) && last > now - PROTECTED_LOOKUP_RETRY_MS) return false;
