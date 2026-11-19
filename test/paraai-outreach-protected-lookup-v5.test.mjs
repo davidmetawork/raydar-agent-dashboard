@@ -110,7 +110,8 @@ test("v5: no surname search when the full-name search found someone", async () =
   const record = await lookupProtectedSub(note("Avery Quillon"), { trpcGetImpl: fake.impl, now: NOW });
   assert.equal(record.surnameSearch, undefined);
   assert.ok(!fake.terms().includes("Quillon"));
-  assert.notEqual(record.candidateUserId, "cu-2");
+  assert.equal(record.status, "not_found");
+  assert.deepEqual(record.options.map((option) => option.candidateUserId), ["cu-1"]);
 });
 
 test("v5: no surname search for an initial surname or a surname under three letters", async () => {
