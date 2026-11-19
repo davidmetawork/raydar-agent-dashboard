@@ -24,6 +24,11 @@
 // `Set-Cookie` back to the store — renewal stays lifecycle's job.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import {
+  resolveStoreSession,
+  sessionStoreFromEnv,
+} from "./vendor/paraform/paraform-session-store.mjs";
+
 // n8n's per-variable ceiling (unchanged from lifecycle: the live `_A` chunk
 // sits at exactly 1000, which is how the limit was originally found).
 export const CHUNK_LIMIT = 1000;
@@ -176,6 +181,33 @@ export function resolveSession(rows = [], { namespace = DEFAULT_SESSION_NAMESPAC
   return { value: legacyCookieFromRows(rows, { namespace }), generation: 0, source: "legacy" };
 }
 
+// ── Store mode (n8n replacement, SPEC section 3) ───────────────────────────
+//
+// PARAFORM_SESSION_STORE selects where the shared and account namespaces are
+// READ from: "n8n" (the default, today's behaviour, byte for byte) or "pg"
+// (the Postgres paraform_session store, read over Neon HTTP with
+// PARAFORM_SESSION_DATABASE_URL). The store-aware reader lives in
+// ./vendor/paraform/ (byte-identical copies of lifecycle/_lib/, guarded by
+// test/paraform-vendor.test.mjs); in pg mode it follows each namespace's
+// authoritative_store, so a namespace still owned by n8n keeps being read from
+// n8n. pg mode FAILS CLOSED (SPEC PS5): when the store cannot be read, or the
+// mode/config is invalid, there is no candidate and NO static-env fallback,
+// because the env seal is the very value WorkOS rotated away. The dashboard
+// stays read-only in both modes; renewal remains lifecycle's job.
+export const SESSION_STORE_ENV_KEY = "PARAFORM_SESSION_STORE";
+export const DASHBOARD_STORE_RUNTIME_ID = "dashboard";
+
+export function paraformSessionStoreMode(environment = process.env) {
+  return String(environment?.[SESSION_STORE_ENV_KEY] ?? "n8n").trim().toLowerCase() || "n8n";
+}
+
+let lastStoreError = null; // { mode, code } from the newest resolution, or null
+
+/** Observability for health pages: which mode, and why the last pg read failed. */
+export function paraformSessionStoreStatus(environment = process.env) {
+  return { mode: paraformSessionStoreMode(environment), lastError: lastStoreError };
+}
+
 // ── n8n store I/O (read-only) ───────────────────────────────────────────────
 
 const N8N_TIMEOUT_MS = 15_000;
@@ -225,9 +257,15 @@ function staticEnvCookie(environment) {
   return String(environment.PARAFORM_SESSION_COOKIE || environment.PARAFORM_COOKIE || "");
 }
 
-function tryResolve(rows, namespace) {
+/** The env candidate's value. Any mode other than n8n is fail-closed: the
+ *  static seal is never a fallback there (an invalid mode counts as pg). */
+function envFallbackCookie(environment) {
+  return paraformSessionStoreMode(environment) === "n8n" ? staticEnvCookie(environment) : "";
+}
+
+function tryResolve(rows, namespace, resolver = resolveSession) {
   try {
-    return resolveSession(rows, { namespace });
+    return resolver(rows, { namespace });
   } catch {
     return null;
   }
@@ -254,19 +292,19 @@ function accountNamespaceFor(environment) {
  *  store is unconfigured/unreachable — `rows` is null in that case). The env
  *  candidate is always present, even if its value is an empty string, so a
  *  caller can always fall through to *something* rather than nothing. */
-function candidatesFromRows(rows, environment) {
+function candidatesFromRows(rows, environment, resolver = resolveSession) {
   const candidates = { shared: null, account: null, env: null };
   if (rows) {
-    const shared = tryResolve(rows, DEFAULT_SESSION_NAMESPACE);
+    const shared = tryResolve(rows, DEFAULT_SESSION_NAMESPACE, resolver);
     if (shared && isPlausibleCookie(shared.value)) {
       candidates.shared = { value: shared.value, generation: shared.generation, slot: "shared" };
     }
-    const account = tryResolve(rows, accountNamespaceFor(environment));
+    const account = tryResolve(rows, accountNamespaceFor(environment), resolver);
     if (account && isPlausibleCookie(account.value)) {
       candidates.account = { value: account.value, generation: account.generation, slot: "account" };
     }
   }
-  candidates.env = { value: staticEnvCookie(environment), generation: null, slot: "env" };
+  candidates.env = { value: envFallbackCookie(environment), generation: null, slot: "env" };
   return candidates;
 }
 
@@ -302,7 +340,35 @@ function pickCandidate(candidates, order, now) {
   return candidates.env;
 }
 
+/** pg mode: read the rows through the vendored store (the union of pg-owned
+ *  synthesized rows and n8n-owned real rows). Any failure leaves `rows` null
+ *  and records the code; the env candidate is empty in this mode, so the
+ *  caller ends with no cookie rather than a stale one. */
+async function resolveParaformSessionFromStore({ environment, fetchImpl, now }) {
+  const mode = paraformSessionStoreMode(environment);
+  let rows = null;
+  try {
+    const store = sessionStoreFromEnv(environment, {
+      fetchImpl,
+      writtenBy: "dashboard",
+      runtimeId: DASHBOARD_STORE_RUNTIME_ID,
+    });
+    rows = await store.listRows({
+      namespaces: [DEFAULT_SESSION_NAMESPACE, accountNamespaceFor(environment)],
+    });
+    lastStoreError = null;
+  } catch (error) {
+    lastStoreError = { mode, code: String(error?.code || "PARAFORM_SESSION_STORE_UNAVAILABLE") };
+  }
+  const candidates = candidatesFromRows(rows, environment, resolveStoreSession);
+  return pickCandidate(candidates, slotOrder(environment), now);
+}
+
 async function resolveParaformSession({ environment, fetchImpl, now }) {
+  if (paraformSessionStoreMode(environment) !== "n8n") {
+    return resolveParaformSessionFromStore({ environment, fetchImpl, now });
+  }
+  lastStoreError = null;
   const base = String(environment.N8N_BASE_URL || "").replace(/\/+$/u, "");
   const key = String(environment.N8N_API_KEY || "");
   let rows = null;
@@ -377,7 +443,7 @@ export async function ensureParaformSession({
     const winner = await Promise.race([inflight, sleep(timeoutMs).then(() => budgetExceeded)]);
     if (winner === budgetExceeded) {
       return {
-        value: staticEnvCookie(environment),
+        value: envFallbackCookie(environment),
         slot: "env",
         generation: null,
         cached: false,
@@ -403,7 +469,7 @@ export async function ensureParaformSession({
  */
 export function paraformCookieValue(environment = process.env) {
   if (environment === process.env && cache.value) return cache.value;
-  return staticEnvCookie(environment);
+  return envFallbackCookie(environment);
 }
 
 /** What the resolver last settled on, as { value, slot }, or null when
@@ -461,4 +527,5 @@ export function __resetParaformSessionStateForTests() {
   cache = { value: null, slot: null, generation: null, resolvedAt: 0 };
   inflight = null;
   rejectedUntil = new Map();
+  lastStoreError = null;
 }
