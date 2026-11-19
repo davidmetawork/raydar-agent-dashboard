@@ -458,3 +458,38 @@ test("booking door judges the hold path, and calls out a lying health mirror", a
   assert.equal(serverError.state, "DOWN");
   assert.match(serverError.reason, /HTTP 500/);
 });
+
+test("booking door: no connection at all is DOWN, and an answer we cannot read stays UNKNOWN", async () => {
+  // 2026-11-18 11:48Z-16:00Z: the raydar.xyz renewal went unpaid and the
+  // registrar parked the domain. Every probe of book.raydar.xyz failed its
+  // secure connection for four hours; the engine filed "fetch failed" as
+  // UNKNOWN, which never pages, so nobody was told.
+  const { bookingDoorHold } = await import("../api/health/_lib/evaluators.mjs");
+  const probe = byId.get("booking-door").probe;
+
+  const parked = bookingDoorHold({
+    transport: "fetch failed (ERR_TLS_CERT_ALTNAME_INVALID)", status: 0, body: null, unreachable: true, probe,
+  });
+  assert.equal(parked.state, "DOWN");
+  assert.match(parked.reason, /^book\.raydar\.xyz cannot be reached: fetch failed \(ERR_TLS_CERT_ALTNAME_INVALID\)$/);
+
+  const hung = bookingDoorHold({ transport: "timeout", status: 0, body: null, unreachable: true, probe });
+  assert.equal(hung.state, "DOWN");
+  assert.match(hung.reason, /cannot be reached: timeout/);
+
+  // Nothing to read and no word from the engine that the connection failed:
+  // that is still "we could not tell", never a page.
+  assert.equal(bookingDoorHold({ body: null, probe }).state, "UNKNOWN");
+  // An answer below 500 that is none of the ones we know stays UNKNOWN.
+  const odd = bookingDoorHold({ body: { hold: null, holdStatus: 418, health: null }, probe });
+  assert.equal(odd.state, "UNKNOWN");
+  assert.match(odd.reason, /unexpected hold answer HTTP 418/);
+});
+
+test("only the booking door turns a failed connection into DOWN", () => {
+  // David's yes on 2026-11-18 covered the booking door alone. The same rule
+  // on the screener feed would have paged for nine slow answers in October.
+  // Widening this list is a decision, not a refactor.
+  const optedIn = CATALOG.filter((c) => c.probe?.downWhenUnreachable).map((c) => c.id);
+  assert.deepEqual(optedIn, ["booking-door"]);
+});

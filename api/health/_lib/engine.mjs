@@ -5,6 +5,8 @@
 // Design rules learned from the outage this exists to prevent:
 //  - One slow probe must never sink the tick (allSettled + per-probe timeout).
 //  - A probe we cannot run is UNKNOWN, never OK. Silence is not success.
+//    One exception, by opt-in (probe.downWhenUnreachable): the booking door,
+//    where a site nobody can connect to is DOWN, not "could not tell".
 //  - Entering UNKNOWN or DOWN needs two consecutive ticks (transient network
 //    flaps are constant); leaving them is immediate.
 import { CATALOG, byId } from "./catalog.mjs";
@@ -18,6 +20,12 @@ const TRANS_TTL = 31 * 24 * 3600;
 const STATE_ORDER = { OK: 0, PAUSED: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
 /** States that must be seen twice in a row before they stick. */
 const DEBOUNCED = new Set(["UNKNOWN", "DOWN"]);
+// "Twice in a row" for a failed connection means the tick before this one:
+// the cron fires every two minutes, give or take the minute it lands in.
+// Younger is the same moment seen twice (a duplicate cron delivery, a manual
+// tick); older is a stale note (ticks stopped, or a write was lost).
+const CONFIRM_MIN_MS = 45 * 1000;
+const CONFIRM_MAX_MS = 210 * 1000;
 
 export const worst = (states) =>
   states.reduce((acc, s) => (STATE_ORDER[s] > STATE_ORDER[acc] ? s : acc), "OK");
@@ -38,8 +46,14 @@ async function runHoldProbe(check) {
     startMs: (Math.floor(Date.now() / 1000) + 4 * 86400) * 1000 + 37000,
     browserKey: globalThis.crypto.randomUUID(),
   };
+  const describe = (e, withCode) => {
+    const code = withCode && e?.cause?.code ? ` (${e.cause.code})` : "";
+    return String(e?.name === "TimeoutError" ? "timeout" : `${e?.message || e}${code}`).slice(0, 140);
+  };
+  let holdRes;
+  let healthRes;
   try {
-    const [holdRes, healthRes] = await Promise.all([
+    [holdRes, healthRes] = await Promise.all([
       fetch(p.url, {
         method: "POST",
         headers: { "content-type": "application/json", "user-agent": "raydar-health/1" },
@@ -51,14 +65,25 @@ async function runHoldProbe(check) {
         signal: AbortSignal.timeout(p.timeoutMs || 12000),
       }).catch(() => null),
     ]);
+  } catch (e) {
+    // Only the hold request can land here (the health GET has its own catch),
+    // and it got no answer at all: DNS, the secure connection, a refused or
+    // dropped connection, or nothing inside the time limit. `unreachable`
+    // says so explicitly, so a check that opts in (downWhenUnreachable) can
+    // judge it. The cause code ("ENOTFOUND", a certificate error) is the
+    // useful half of Node's bare "fetch failed".
+    return { transport: describe(e, true), status: 0, body: null, unreachable: true };
+  }
+  try {
     const holdBody = await holdRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } });
     const healthBody = healthRes
       ? await healthRes.text().then((t) => { try { return JSON.parse(t); } catch { return null; } })
       : null;
     return { transport: null, status: holdRes.status, body: { hold: holdBody, holdStatus: holdRes.status, health: healthBody } };
   } catch (e) {
-    const msg = String(e?.name === "TimeoutError" ? "timeout" : e?.message || e).slice(0, 140);
-    return { transport: msg, status: 0, body: null };
+    // The site answered and a body then failed to arrive. That is not
+    // "unreachable" (the door may well be open): UNKNOWN, as it always was.
+    return { transport: describe(e, false), status: 0, body: null };
   }
 }
 
@@ -161,7 +186,19 @@ export async function runTick({ now = Date.now() } = {}) {
     const r = settled.status === "fulfilled"
       ? settled.value
       : { transport: String(settled.reason).slice(0, 140), status: 0, body: null };
-    if (r.transport && !r.keyMissing) {
+    // A probe that could not connect is UNKNOWN for every check but one that
+    // opts in with probe.downWhenUnreachable: there, no connection at all IS
+    // the outage, so the evaluator gets to call it. Only the booking door
+    // opts in (2026-11-18: the parked domain sat in UNKNOWN for four hours).
+    // It also needs last tick's state for the tile in hand. A failed
+    // connection only counts as the second in a row if we remember the
+    // first; on a first sighting, or when the KV read came back empty, one
+    // blip would otherwise stick at once and page. Then it is UNKNOWN, as
+    // before, and the next tick can start the count.
+    const judgeUnreachable = r.unreachable === true
+      && check.probe.downWhenUnreachable === true
+      && Boolean(prev.tiles?.[check.id]?.state);
+    if (r.transport && !r.keyMissing && !judgeUnreachable) {
       results[check.id] = { state: "UNKNOWN", reason: r.transport, raw: null };
       return;
     }
@@ -172,7 +209,7 @@ export async function runTick({ now = Date.now() } = {}) {
     }
     try {
       const v = evaluate({ ...r, probe: check.probe, check });
-      results[check.id] = { ...v, raw: r.body };
+      results[check.id] = { ...v, raw: r.body, unreachable: judgeUnreachable };
     } catch (e) {
       results[check.id] = { state: "UNKNOWN", reason: `evaluator threw: ${String(e?.message || e).slice(0, 120)}`, raw: null };
     }
@@ -256,7 +293,15 @@ export async function runTick({ now = Date.now() } = {}) {
     let state = raw.state;
     // Two consecutive ticks required to ENTER a debounced state.
     if (DEBOUNCED.has(state) && before.state && before.state !== state) {
-      const pendingSame = before.pending === state;
+      let pendingSame = before.pending === state;
+      // A failed connection is the only verdict a passing network blip can
+      // produce, so its first sighting must be the tick just before this one
+      // (a tile carrying `pending` was written at its lastCheckedAt). If it
+      // is not, this tick becomes the first sighting and the count restarts.
+      if (pendingSame && raw.unreachable === true) {
+        const age = now - Date.parse(before.lastCheckedAt || "");
+        pendingSame = age >= CONFIRM_MIN_MS && age <= CONFIRM_MAX_MS;
+      }
       if (!pendingSame) {
         tiles[check.id] = {
           ...before,

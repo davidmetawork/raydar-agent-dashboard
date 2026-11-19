@@ -4,6 +4,10 @@
 // Evaluators NEVER see transport failures — the engine turns fetch errors,
 // timeouts and unexpected statuses into UNKNOWN before calling here. So an
 // evaluator can assume it has a parsed body (or null body with a status).
+// The one exception is a check whose catalog row sets
+// probe.downWhenUnreachable (the booking door only): its evaluator is called
+// with `unreachable: true` and the error text in `transport` when the
+// connection itself failed, and decides what that means.
 //
 // Guiding rule from the 2026-08-06/07 outage: report what is TRUE, never what
 // is convenient. A tile that cannot tell must say UNKNOWN, not OK.
@@ -43,7 +47,21 @@ export function bookingDoor({ body, status }) {
 }
 
 /** Ground truth for the door: what does /api/hold actually answer. */
-export function bookingDoorHold({ body }) {
+export function bookingDoorHold({ body, unreachable, transport, probe }) {
+  if (unreachable === true) {
+    // No connection at all IS the door failing: a candidate cannot open the
+    // page either. On 2026-11-18 the raydar.xyz renewal went unpaid, the
+    // registrar parked the domain, and every probe failed its secure
+    // connection for four hours while this tile sat in UNKNOWN, which never
+    // pages. The engine only hands a failed connection here because the
+    // catalog row opts in (downWhenUnreachable); two ticks in a row are still
+    // needed before it sticks.
+    let host = "booking site";
+    try { host = new URL(probe.url).host; } catch { /* keep the plain name */ }
+    return DOWN(`${host} cannot be reached: ${transport || "no connection"}`, {
+      holdStatus: null, holdError: null, healthOk: null, healthAgentAdmission: null,
+    });
+  }
   if (!body || typeof body !== "object") return UNK("no probe result");
   const { hold, holdStatus, health } = body;
   const checks = health?.checks || {};
