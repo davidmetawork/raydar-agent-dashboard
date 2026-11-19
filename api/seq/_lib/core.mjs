@@ -219,6 +219,11 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
         continue;
       }
       if (!(await confirmSessionExpired(cookie))) throw e;
+      // The failover slot saw only one try and the probes, which a sustained
+      // throttle can fail too (it may be what falsely killed the first slot),
+      // so its verdict is reported but never parks it: the next request gives
+      // it the full ladder.
+      if (failedOver) throw Object.assign(new Error("AUTH_EXPIRED"), { code: "AUTH_EXPIRED" });
       const expired = authExpired(cookie); // parks this slot for the next resolution
       // One confirmed-dead store slot must not fail the whole request while
       // the next store slot is alive. Measured 2026-11-18 on Enrich: the
@@ -227,17 +232,12 @@ async function classifyThrottle(fn, { delays = authRetryDelays() } = {}) {
       // proved it dead, then answered AUTH_EXPIRED instead of trying David's
       // live session. So move once onto the next store candidate (never the
       // env seal); a second confirmed death is final.
-      if (!failedOver) {
-        const next = await nextStoreSession(cookie);
-        if (next) {
-          cookie = next;
-          failedOver = true;
-          switched = true;
-          attempt = -1;
-          continue;
-        }
-      }
-      throw expired;
+      const next = await nextStoreSession(cookie);
+      if (!next) throw expired;
+      cookie = next;
+      failedOver = true;
+      switched = true;
+      attempt = -1;
     }
   }
 }

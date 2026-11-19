@@ -250,7 +250,7 @@ test("a dead store session is parked only after probes of that same cookie confi
     assert.equal(account.filter((row) => row.probe).length, 3, "and its own three probes before AUTH_EXPIRED");
     assert.ok(seen.every((row) => row.cookie !== ENV_SEAL), "never the env seal");
     const next = await ensureParaformSession({ fetchImpl: storeFetch });
-    assert.notEqual(next.slot, "account", "the confirmed-dead account slot is parked too");
+    assert.equal(next.slot, "account", "the failover slot is not parked on one try and the probes");
   });
 });
 
